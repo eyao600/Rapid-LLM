@@ -23,7 +23,6 @@ def add_chakra_to_sys_path() -> None:
             sys.path.insert(0, path)
 
 
-@lru_cache(maxsize=1)
 def ensure_chakra_available() -> None:
     """Verify that Chakra protobuf helpers can be imported.
 

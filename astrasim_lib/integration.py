@@ -100,10 +100,12 @@ def _hash_sig(canonical: str) -> str:
 
 def _hash_file_bundle(paths: Iterable[str]) -> str:
     h = hashlib.sha256()
-    for path in paths:
+    for path in sorted(set(paths)):
+        if not path or not os.path.exists(path):
+            continue
         with open(path, "rb") as fh:
             while True:
-                chunk = fh.read(8192)
+                chunk = fh.read(1024 * 1024)
                 if not chunk:
                     break
                 h.update(chunk)
@@ -219,41 +221,64 @@ def generate_concurrent_collectives_et(
     return prefix_path
 
 
+def _astrasim_binary_path() -> str:
+    return os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "astra-sim",
+        "build",
+        "astra_analytical",
+        "build",
+        "bin",
+        "AstraSim_Analytical_Congestion_Aware",
+    )
+
+
 def run_astrasim_analytical(
     workload_prefix: Optional[str],
     system_json: str,
     network_yaml: str,
     remote_memory_json: Optional[str] = None,
     comm_group_json: Optional[str] = None,
+    binary_path: Optional[str] = None,
 ) -> Tuple[List[float], float]:
+    bin_path = binary_path or _astrasim_binary_path()
+    if not os.path.exists(bin_path):
+        raise FileNotFoundError(f"AstraSim binary not found at {bin_path}")
+
+    if not workload_prefix:
+        raise ValueError("workload_prefix is required for analytical AstraSim runs")
+
     cmd = [
-        "python3",
-        os.path.join("astra-sim", "build", "bin", "run.py"),
-        "--simulation_mode=analytical",
-        f"--system={system_json}",
-        f"--network={network_yaml}",
+        bin_path,
+        f"--workload-configuration={workload_prefix}",
+        f"--system-configuration={system_json}",
+        f"--network-configuration={network_yaml}",
     ]
-    if workload_prefix:
-        cmd.append(f"--workload={workload_prefix}")
+
     if remote_memory_json:
-        cmd.append(f"--remote_memory={remote_memory_json}")
-    if comm_group_json:
-        cmd.append(f"--communicator_groups={comm_group_json}")
+        cmd.append(f"--remote-memory-configuration={remote_memory_json}")
+    if comm_group_json and os.path.exists(comm_group_json):
+        cmd.append(f"--comm-group-configuration={comm_group_json}")
 
-    env = os.environ.copy()
-    env.setdefault("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    if ASTRA_DEBUG:
+        print("Command:")
+        print(" ".join(cmd))
 
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, check=False, text=True)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
     output = proc.stdout or ""
     if proc.returncode != 0:
         raise RuntimeError(f"AstraSim execution failed with code {proc.returncode}:\n{output}")
 
     times_cycles: List[int] = []
     for line in output.splitlines():
-        m = re.search(r"sys\[(\d+)\] finished,\s*(\d+) cycles", line)
-        if m:
-            t_cycles = int(m.group(2))
-            times_cycles.append(t_cycles)
+        wall_match = re.search(r"sys\[(\d+)\],\s*Wall time:\s*(\d+)", line)
+        if wall_match:
+            times_cycles.append(int(wall_match.group(2)))
+            continue
+        # finish_match = re.search(r"sys\[(\d+)\] finished,\s*(\d+) cycles", line)
+        # if finish_match:
+        #     times_cycles.append(int(finish_match.group(2)))
 
     per_node_sec = [t * 1e-9 for t in times_cycles]
     max_sec = max(per_node_sec) if per_node_sec else 0.0
@@ -399,12 +424,9 @@ def run_cache_astrasim(
         cache_entry["manifest_path"] = manifest_json_path
 
     if allow_write:
-        try:
-            cache = _load_cache(cache_path)
-            cache[cache_key] = cache_entry
-            _save_cache(cache_path, cache)
-        except Exception:
-            pass
+        cache = _load_cache(cache_path)
+        cache[cache_key] = cache_entry
+        _save_cache(cache_path, cache)
 
     return per_node_sec, max_sec
 
