@@ -7,7 +7,7 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 _CHK_PB_DIR = _REPO_ROOT / "astra-sim" / "extern" / "graph_frontend" / "chakra" / "schema" / "protobuf"
 _CHK_UTILS_DIR = _REPO_ROOT / "astra-sim" / "extern" / "graph_frontend" / "chakra" / "src" / "third_party" / "utils"
 
