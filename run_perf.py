@@ -202,7 +202,7 @@ def run_GEMM(
             f.write("Backward Reduction Time: {}\n".format(backward_red))
             if dp_reduction_time > 0:
                 f.write("DP Reduction Time: {}\n".format(dp_reduction_time))
-            f.write("Total Time: {}\n".format(total_time))
+        f.write("Total Time: {}\n".format(total_time))
     print("Performance Results written to {}".format(output_file))
     # Emit lines for astra_test parsing
     print("Total time: {}".format(total_time))

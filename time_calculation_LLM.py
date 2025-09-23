@@ -1191,6 +1191,11 @@ class TimeCalculationLLM(TimeCalculation):
             }
             entry[direction]['comm_keys'].append(unique_key)
 
+        row_participants = max(1, kp1)
+        col_participants = max(1, kp2)
+        row_shard = math.ceil(effective_m / row_participants) if effective_m else 0
+        col_shard = math.ceil(effective_n / col_participants) if effective_n else 0
+
         if tp_mode == "CR":
             if kp1 <= 1:
                 return
@@ -1205,16 +1210,16 @@ class TimeCalculationLLM(TimeCalculation):
 
         if tp_mode == "RC":
             if kp2 > 1:
-                total_bytes = math.ceil(precision * (effective_m // max(1, kp1)) * effective_n)
-                size_bytes = math.ceil(total_bytes / kp2)
+                total_bytes = math.ceil(precision * row_shard * effective_n)
+                size_bytes = math.ceil(total_bytes / col_participants)
                 add_comm('forward', 'all_gather', 'all_gather', size_bytes, kp2, 'kp2')
 
             if kp1 > 1:
                 total_bytes_row = math.ceil(precision * effective_k * effective_m)
-                size_row = math.ceil(total_bytes_row / kp1)
+                size_row = math.ceil(total_bytes_row / row_participants)
 
-                total_bytes_col = math.ceil(precision * effective_m * (effective_n / max(1, kp2)))
-                size_col = math.ceil(total_bytes_col / kp1)
+                total_bytes_col = math.ceil(precision * effective_m * col_shard)
+                size_col = math.ceil(total_bytes_col / row_participants)
 
                 add_comm(
                     'backward',
@@ -1226,11 +1231,11 @@ class TimeCalculationLLM(TimeCalculation):
                 )
 
             if kp2 > 1:
-                total_bytes_row = math.ceil(precision * (effective_m / max(1, kp1)) * effective_n)
-                size_row = math.ceil(total_bytes_row / kp2)
+                total_bytes_row = math.ceil(precision * row_shard * effective_n)
+                size_row = math.ceil(total_bytes_row / col_participants)
 
                 total_bytes_col = math.ceil(precision * effective_k * effective_n)
-                size_col = math.ceil(total_bytes_col / kp2)
+                size_col = math.ceil(total_bytes_col / col_participants)
 
                 add_comm(
                     'backward',
@@ -1735,10 +1740,16 @@ class LLMExecutionDispatcher:
 
         # Use hierarchical artifact directory when persisting artifacts for transformer simulation
         artifact_dir = self.time_calc.output_dir
+        artifact_dir_fwd = artifact_dir
+        artifact_dir_bwd = artifact_dir
+        os.makedirs(artifact_dir, exist_ok=True)
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
             artifact_dir_fwd = os.path.join(artifact_dir, "fwd")
             artifact_dir_bwd = os.path.join(artifact_dir, "bwd")
+            os.makedirs(artifact_dir, exist_ok=True)
+            os.makedirs(artifact_dir_fwd, exist_ok=True)
+            os.makedirs(artifact_dir_bwd, exist_ok=True)
 
         fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
             self.transformer_forward_root,
