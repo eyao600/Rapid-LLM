@@ -281,14 +281,6 @@ if __name__ == "__main__":
     if os.path.exists(exp_dir):
         shutil.rmtree(exp_dir)
     os.makedirs(exp_dir, exist_ok=True)
-    global USE_NUMBA
-    USE_NUMBA = False
-    try:
-        import numba
-        USE_NUMBA = True
-    except ImportError:
-        print("Numba is not installed. DeepFlow will be slower, especially for large LLM systems.")
-    
     
     if mode == "LLM":
         print("Using LLM parameters for computation...")

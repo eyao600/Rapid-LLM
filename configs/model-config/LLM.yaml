@@ -11,3 +11,4 @@ model_param:
     n_tokens: 10000000000  # Number of tokens to train on. Set to 1T for now.
     communication_time: 0  # Communication time in seconds
     N_PP: 1  # pipeline degree
+    all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"

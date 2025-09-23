@@ -403,6 +403,7 @@ LLMConfig = _namedtuple(
         "n_tokens",
         "communication_time",
         "N_PP",
+        "all_reduce",
     ],
 )
 SWConfig = _namedtuple("sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth"])

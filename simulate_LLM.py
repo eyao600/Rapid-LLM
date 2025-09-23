@@ -4,11 +4,9 @@ import sys
 from typing import Any, Dict
 from graphviz import Digraph
 import os
-showing_breakdown = False
-all_reduce =  "the end" #"every layer" define whether the all reduce happens after computation of every transformer layer or after the model is processed
 debug = False
-class Node:
 
+class Node:
     def __init__(self, name, op_id, hw_id, duration, fwd=True):
         self.name = name
         self.op_id = op_id

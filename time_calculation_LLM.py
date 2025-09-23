@@ -31,8 +31,6 @@ from util import disk_cache_method
 validating_v100 = True
 
 debug = True
-all_reduce = "every layer"  #"the end"  "every layer"
-
 
 showing_ms = False # Show time in ms if True    show time in us if False
 if showing_ms:
@@ -441,7 +439,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
         self.execution_mode = execution_mode
         self._reduction_total_llm = 0.0
-        self.all_reduce = all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
+        self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
@@ -1445,16 +1443,16 @@ class TimeCalculationLLM(TimeCalculation):
 
         # self.pipeline_graph.save_graph(pipeline_root, "output_graph/", "fw_bw_graph")
 
-        if self.transformer_analytical_time_forward is not None:
-            print(
-                f"Analytical transformer forward time: "
-                f"{self.transformer_analytical_time_forward:.1f}s"
-            )
-        if self.transformer_analytical_time_backward is not None:
-            print(
-                f"Analytical transformer backward time: "
-                f"{self.transformer_analytical_time_backward:.1f}s"
-            )
+        # if self.transformer_analytical_time_forward is not None:
+        #     print(
+        #         f"Analytical transformer forward time: "
+        #         f"{self.transformer_analytical_time_forward:.1f}s"
+        #     )
+        # if self.transformer_analytical_time_backward is not None:
+        #     print(
+        #         f"Analytical transformer backward time: "
+        #         f"{self.transformer_analytical_time_backward:.1f}s"
+        #     )
 
         graph_folder = self.output_dir.rstrip(os.sep) + os.sep
         if self._generate_graphs and self.transformer_forward_root is not None:

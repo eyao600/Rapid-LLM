@@ -31,6 +31,7 @@ class Model_LLM:
       self.n_tokens         = exp_config.model_config.n_tokens
       self.communication_time = exp_config.model_config.communication_time
       self.N_PP             = exp_config.model_config.N_PP
+      self.all_reduce       = exp_config.model_config.all_reduce
       
       
       

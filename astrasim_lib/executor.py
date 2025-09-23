@@ -1006,7 +1006,16 @@ def run_astra_simulation_only_onepath(
 
         # Print results
         # include times per node
-        print(f"[AstraSim] Times per node: {fwd_times}")
+        if len(fwd_times) > 5:
+            printstr = ""
+            for i in range(5):
+                #reverse the list
+                rev_times = list(reversed(fwd_times))
+                printstr += f" {round(rev_times[i],2)},"
+            printstr += "...."
+            print(f"[AstraSim] Times per node:{printstr}")
+        else:
+            print(f"[AstraSim] Times per node: {fwd_times}")
         print(f"[AstraSim] Total execution time: {fwd_total:.6f} seconds")
         print(f"[AstraSim] Simulation duration: {conversion_and_sim_time:.3f} seconds")
 
