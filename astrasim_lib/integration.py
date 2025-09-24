@@ -40,8 +40,19 @@ _CACHE_MODES = {
     "CACHE_READWRITE",
 }
 
+_COLLECTIVE_ENUMS = {
+    "all_gather": pb.ALL_GATHER,
+    "allreduce": pb.ALL_REDUCE,
+    "all_reduce": pb.ALL_REDUCE,
+    "reduce_scatter": pb.REDUCE_SCATTER,
+    "all_to_all": pb.ALL_TO_ALL,
+    "alltoall": pb.ALL_TO_ALL,
+}
+
 
 def _cache_mode() -> str:
+    """Return the normalized cache mode set via ``DEEPFLOW_ASTRA_CACHE_MODE``."""
+
     mode = os.environ.get("DEEPFLOW_ASTRA_CACHE_MODE", "CACHE_READWRITE")
     if mode is None:
         return "CACHE_READWRITE"
@@ -52,6 +63,8 @@ def _cache_mode() -> str:
 
 
 def _collectives_from_hw(hw_obj, topo: str) -> Dict[str, str]:
+    """Extract collective overrides from ``hw_obj`` for a topology ``topo``."""
+
     exec_backend = getattr(hw_obj, "execution_backend", None)
     if exec_backend and exec_backend.astra:
         coll = exec_backend.astra.collectives
@@ -70,6 +83,8 @@ def _collectives_from_hw(hw_obj, topo: str) -> Dict[str, str]:
 
 
 def _sys_options_from_hw(hw_obj) -> Optional[Dict[str, Any]]:
+    """Return AstraSim system overrides encoded on ``hw_obj`` if present."""
+
     exec_backend = getattr(hw_obj, "execution_backend", None)
     if not exec_backend or not exec_backend.astra:
         return None
@@ -89,16 +104,22 @@ def _sys_options_from_hw(hw_obj) -> Optional[Dict[str, Any]]:
 
 
 def _canonical_sig(sig: Dict[str, Any]) -> str:
+    """Serialize a cache signature dictionary deterministically."""
+
     return json.dumps(sig, sort_keys=True, separators=(",", ":"))
 
 
 def _hash_sig(canonical: str) -> str:
+    """Hash a canonical signature string using SHA-256."""
+
     h = hashlib.sha256()
     h.update(canonical.encode("utf-8"))
     return h.hexdigest()
 
 
 def _hash_file_bundle(paths: Iterable[str]) -> str:
+    """Hash the contents of all existing files in ``paths`` for cache lookups."""
+
     h = hashlib.sha256()
     for path in sorted(set(paths)):
         if not path or not os.path.exists(path):
@@ -113,6 +134,8 @@ def _hash_file_bundle(paths: Iterable[str]) -> str:
 
 
 def _load_cache(cache_path: str) -> Dict[str, Any]:
+    """Load a JSON cache manifest if available, otherwise return an empty dict."""
+
     if not os.path.exists(cache_path):
         return {}
     try:
@@ -123,6 +146,8 @@ def _load_cache(cache_path: str) -> Dict[str, Any]:
 
 
 def _save_cache(cache_path: str, cache: Dict[str, Any]) -> None:
+    """Persist ``cache`` to ``cache_path`` safely via atomic rename."""
+
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     tmp_path = cache_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
@@ -131,6 +156,8 @@ def _save_cache(cache_path: str, cache: Dict[str, Any]) -> None:
 
 
 def ensure_cache_file_exists(cache_path: str = "./astra_cache/cache.json") -> None:
+    """Create an empty cache file at ``cache_path`` if it does not exist."""
+
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         if not os.path.exists(cache_path):
@@ -141,6 +168,8 @@ def ensure_cache_file_exists(cache_path: str = "./astra_cache/cache.json") -> No
 
 
 def get_remote_memory_path() -> str:
+    """Return the bundled remote-memory configuration shipped with AstraSim."""
+
     return os.path.join(
         os.path.dirname(os.path.dirname(__file__)),
         "astra-sim",
@@ -157,6 +186,8 @@ def generate_workload_et(
     size_bytes: int,
     astra_config_dir: str = "./astra_cache",
 ) -> str:
+    """Emit microbenchmark ET files for ``comm`` of ``size_bytes`` across ``npus_count`` ranks."""
+
     comm_lower = comm.lower()
     label = size_label(size_bytes)
     base_dir = os.path.join(astra_config_dir, "workload", comm_lower, f"{npus_count}npus_{label}")
@@ -165,18 +196,10 @@ def generate_workload_et(
     if comm_lower == "pipeline":
         return write_point_to_point_microbenchmark(prefix, size_bytes)
 
-    coll_map = {
-        "all_gather": pb.ALL_GATHER,
-        "allreduce": pb.ALL_REDUCE,
-        "all_reduce": pb.ALL_REDUCE,
-        "reduce_scatter": pb.REDUCE_SCATTER,
-        "all_to_all": pb.ALL_TO_ALL,
-        "alltoall": pb.ALL_TO_ALL,
-    }
-    if comm_lower not in coll_map:
+    if comm_lower not in _COLLECTIVE_ENUMS:
         raise ValueError(f"Unsupported comm type: {comm}")
 
-    return write_comm_microbenchmark(prefix, npus_count, coll_map[comm_lower], size_bytes)
+    return write_comm_microbenchmark(prefix, npus_count, _COLLECTIVE_ENUMS[comm_lower], size_bytes)
 
 
 def generate_concurrent_collectives_et(
@@ -184,16 +207,9 @@ def generate_concurrent_collectives_et(
     collectives: List[Tuple[str, int, int]],
     prefix_path: str,
 ) -> str:
-    ensure_dir(os.path.dirname(prefix_path))
+    """Write ET traces that sequence ``collectives`` on ``npus_count`` ranks."""
 
-    coll_map = {
-        "all_gather": pb.ALL_GATHER,
-        "allreduce": pb.ALL_REDUCE,
-        "all_reduce": pb.ALL_REDUCE,
-        "reduce_scatter": pb.REDUCE_SCATTER,
-        "all_to_all": pb.ALL_TO_ALL,
-        "alltoall": pb.ALL_TO_ALL,
-    }
+    ensure_dir(os.path.dirname(prefix_path))
 
     for rank in range(npus_count):
         et_path = f"{prefix_path}.{rank}.et"
@@ -201,9 +217,9 @@ def generate_concurrent_collectives_et(
             chakra_encode(fh, pb.GlobalMetadata(version="0.0.4"))
             node_id = 0
             for i, (coll_name, size_bytes, delay_ns) in enumerate(collectives):
-                if coll_name not in coll_map:
+                if coll_name not in _COLLECTIVE_ENUMS:
                     raise ValueError(f"Unsupported collective: {coll_name}")
-                coll_type = coll_map[coll_name]
+                coll_type = _COLLECTIVE_ENUMS[coll_name]
                 if delay_ns > 0:
                     delay_micros = delay_ns // 1000
                     delay_node = new_comp_node(node_id, f"delay_{i}_{delay_micros}us", delay_micros)
@@ -222,6 +238,8 @@ def generate_concurrent_collectives_et(
 
 
 def _astrasim_binary_path() -> str:
+    """Return the default AstraSim analytical binary path relative to the repo root."""
+
     return os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -242,6 +260,8 @@ def run_astrasim_analytical(
     comm_group_json: Optional[str] = None,
     binary_path: Optional[str] = None,
 ) -> Tuple[List[float], float]:
+    """Execute AstraSim analytically and return per-rank and max wall times."""
+
     bin_path = binary_path or _astrasim_binary_path()
     if not os.path.exists(bin_path):
         raise FileNotFoundError(f"AstraSim binary not found at {bin_path}")
@@ -296,6 +316,8 @@ def run_cache_astrasim(
     workload_prefix: Optional[str] = None,
     comm_group_json: Optional[str] = None,
 ) -> Tuple[List[float], float]:
+    """Run AstraSim with caching to avoid recomputation when inputs match."""
+
     if isinstance(hw_obj, str):
         raise TypeError("run_cache_astrasim expects a parsed HWConfig object, not a path")
 

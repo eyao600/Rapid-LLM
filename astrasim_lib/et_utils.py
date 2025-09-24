@@ -34,14 +34,20 @@ __all__ = [
 
 
 def ensure_dir(path: str) -> None:
+    """Create ``path`` if missing, mirroring ``mkdir -p`` semantics."""
+
     os.makedirs(path, exist_ok=True)
 
 
 def write_et_node(fh, node: pb.Node) -> None:
+    """Serialize ``node`` into the open Chakra ET file handle ``fh``."""
+
     chakra_encode(fh, node)
 
 
 def new_comm_node(node_id: int, name: str, coll_type: int, size_bytes: int) -> pb.Node:
+    """Build an AstraSim collective communication node."""
+
     node = pb.Node()
     node.id = node_id
     node.name = name
@@ -53,6 +59,8 @@ def new_comm_node(node_id: int, name: str, coll_type: int, size_bytes: int) -> p
 
 
 def new_send_node(node_id: int, name: str, size_bytes: int, dst_rank: int, tag: int) -> pb.Node:
+    """Return a point-to-point send node targeting ``dst_rank``."""
+
     node = pb.Node()
     node.id = node_id
     node.name = name
@@ -65,6 +73,8 @@ def new_send_node(node_id: int, name: str, size_bytes: int, dst_rank: int, tag: 
 
 
 def new_recv_node(node_id: int, name: str, size_bytes: int, src_rank: int, tag: int) -> pb.Node:
+    """Return a point-to-point recv node expecting ``src_rank``."""
+
     node = pb.Node()
     node.id = node_id
     node.name = name
@@ -77,6 +87,8 @@ def new_recv_node(node_id: int, name: str, size_bytes: int, src_rank: int, tag: 
 
 
 def new_comp_node(node_id: int, name: str, duration_micros: int) -> pb.Node:
+    """Return a compute placeholder node lasting ``duration_micros`` microseconds."""
+
     node = pb.Node()
     node.id = node_id
     node.name = name
@@ -87,6 +99,8 @@ def new_comp_node(node_id: int, name: str, duration_micros: int) -> pb.Node:
 
 
 def size_label(size_bytes: int) -> str:
+    """Convert ``size_bytes`` into a short human-readable label."""
+
     units: List[tuple[str, int]] = [
         ("TB", 1024 ** 4),
         ("GB", 1024 ** 3),
@@ -102,6 +116,8 @@ def size_label(size_bytes: int) -> str:
 
 
 def write_comm_microbenchmark(prefix_path: str, npus_count: int, coll_type: int, size_bytes: int) -> str:
+    """Generate per-rank ET files for a collective microbenchmark."""
+
     ensure_dir(os.path.dirname(prefix_path))
     node_id = 0
     for rank in range(npus_count):
@@ -116,6 +132,8 @@ def write_comm_microbenchmark(prefix_path: str, npus_count: int, coll_type: int,
 
 
 def write_point_to_point_microbenchmark(prefix_path: str, size_bytes: int) -> str:
+    """Generate a two-rank send/recv microbenchmark ET bundle."""
+
     ensure_dir(os.path.dirname(prefix_path))
 
     et_path = f"{prefix_path}.0.et"

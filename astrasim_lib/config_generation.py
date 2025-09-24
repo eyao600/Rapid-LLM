@@ -36,10 +36,14 @@ def _save_json(path: str, data: Dict[str, Any], npus_key: Optional[int] = None) 
 
 
 def _gbps_from_bps(bps: float) -> float:
+    """Convert raw bits-per-second throughput to gigabytes-per-second."""
+
     return float(bps) / float(1 << 30)
 
 
 def _ns_from_s(sec: float) -> float:
+    """Convert seconds to nanoseconds."""
+
     return float(sec) * 1e9
 
 

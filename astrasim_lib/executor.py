@@ -15,7 +15,7 @@ import tempfile
 import time
 from collections import defaultdict, deque
 from itertools import count as _it_count
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.setrecursionlimit(10000)
 
@@ -38,6 +38,8 @@ from simulate_LLM import visualize_graph
 
 
 def _env_truthy(name: str) -> bool:
+    """Return ``True`` when environment variable ``name`` is set to a truthy value."""
+
     value = os.environ.get(name)
     if value is None:
         return False
@@ -46,6 +48,8 @@ def _env_truthy(name: str) -> bool:
 
 
 def _clean_astrasim_artifacts(directory: str) -> None:
+    """Remove generated AstraSim artifacts under ``directory`` if they exist."""
+
     try:
         for entry in os.listdir(directory):
             path = os.path.join(directory, entry)
@@ -126,6 +130,8 @@ def _attr_to_dict(node: pb.Node) -> Dict[str, Any]:
 
 
 def _visualize_et_files(et_paths: List[str]) -> None:
+    """Render dot graphs for Chakra ET files to aid debugging when enabled."""
+
     if not et_paths:
         return
 
