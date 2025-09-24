@@ -13,7 +13,7 @@ Pre-requirement: Python3
 	* pip install --upgrade pip
 	* pip install -r requirements.txt
 
-**Step 4**. (Optional) Setup AstraSim for advanced simulation capabilities:
+**Step 4**. (Optional) Setup AstraSim for advanced network simulation:
 
 	* git submodule update --init --recursive
 	* git submodule update --remote -- astra-sim
