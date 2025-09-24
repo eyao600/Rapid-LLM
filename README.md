@@ -2,7 +2,7 @@
 
 Pre-requirement: Python3
 
-**Step 1**. git clone https://github.com/nanocad-lab/DeepFlow.git
+**Step 1**. git clone https://github.com/gkarfakis19/DeepFlow/
 
 **Step 2**. cd DeepFlow
 
@@ -15,16 +15,15 @@ Pre-requirement: Python3
 
 **Step 4**. (Optional) Setup AstraSim for advanced simulation capabilities:
 
-	* git clone git@github.com:astra-sim/astra-sim.git
+	* git submodule update --init --recursive
 	* ASTRA_SIM=$(realpath ./astra-sim)
 	* cd ${ASTRA_SIM}
-	* git submodule update --init --recursive
 	* ./build/astra_analytical/build.sh
+  * cd ..
 
 **Step 5**. Test if the installation has been successful:
 
-	* python run_perf.py --hardware_config configs/hardware-config/waferscale_20v100_80hbm.yaml --model_config configs/model-config/LSTM.yaml --output_dir output
-	* check the output result: vim output/LSTM/summary_LSTM.txt
+	* ./examples/llm.sh
 
 
 ## Execution Modes ##
