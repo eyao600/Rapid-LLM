@@ -118,13 +118,24 @@ class PipelineGraphFlattener:
                 self._clone_cache[obj_id] = expanded
                 return expanded
 
-            cloned = simulate_LLM.Node(
-                obj.name,
-                self._next_op_id(),
-                obj.hw_id,
-                obj.duration,
-                fwd=obj.fwd,
-            )
+            if "linear_softmax" in obj.name:
+                # for linear softmax we need to carefully look at hw id to choose.
+                cloned = simulate_LLM.Node(
+                    obj.name,
+                    self._next_op_id(),
+                    self._hw_id_for_rank(obj.hw_id, 0),
+                    obj.duration,
+                    fwd=obj.fwd,
+                )
+            else:
+                cloned = simulate_LLM.Node(
+                    obj.name,
+                    self._next_op_id(),
+                    obj.hw_id,
+                    obj.duration,
+                    fwd=obj.fwd,
+                )
+
             self._clone_cache[obj_id] = cloned
             self._copy_metadata(obj, cloned)
             for child in getattr(obj, "children", []):
@@ -432,7 +443,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         self.output_dir = os.path.abspath(output_dir) if output_dir else os.getcwd()
         os.makedirs(self.output_dir, exist_ok=True)
-        self._generate_graphs = _env_flag("DEEPFLOW_GENERATE_GRAPHS")
+        self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
         self.execution_mode = execution_mode
         self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
@@ -752,32 +763,31 @@ class TimeCalculationLLM(TimeCalculation):
             sys.exit("Program terminated due to memory capacity exceeded.")
 
         return
-    def get_dp_overhead(self, d, ffn_dim, n_layers): #calculate the reduction time and apply_grad_time for data parallelism 
 
-        reduction_time = 0
-        apply_grad_time = 0
+    # This function should be deleted.
+    # def get_dp_overhead(self, d, ffn_dim, n_layers): #calculate the reduction time and apply_grad_time for data parallelism 
 
-        reduction_time += self.getR(Dim0=d, Dim1=3*d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="qkv_proj reduction") #get the reduction time between all nodes in one data parallel group
-        apply_grad_time += self.applyGrad(Dim0=d, Dim1=3*d, name="qkv_proj grad")
+    #     reduction_time = 0
+    #     apply_grad_time = 0
 
-        reduction_time += self.getR(Dim0=d, Dim1=d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="output_proj reduction")
-        apply_grad_time += self.applyGrad(Dim0=d, Dim1=d, name="output_proj grad")
+    #     reduction_time += self.getR(Dim0=d, Dim1=3*d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="qkv_proj reduction") #get the reduction time between all nodes in one data parallel group
+    #     apply_grad_time += self.applyGrad(Dim0=d, Dim1=3*d, name="qkv_proj grad")
 
-        reduction_time += 2*self.getR(Dim0=ffn_dim, Dim1=d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="ffn reduction")
-        apply_grad_time += 2*self.applyGrad(Dim0=ffn_dim, Dim1=d, name="ffn grad")
-        print(f"apply_grad_time: {apply_grad_time}")
+    #     reduction_time += self.getR(Dim0=d, Dim1=d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="output_proj reduction")
+    #     apply_grad_time += self.applyGrad(Dim0=d, Dim1=d, name="output_proj grad")
+
+    #     reduction_time += 2*self.getR(Dim0=ffn_dim, Dim1=d, p=self.dp, ib=self.IBD, ll=self.LLD, partial=False, allReduce=True, name="ffn reduction")
+    #     apply_grad_time += 2*self.applyGrad(Dim0=ffn_dim, Dim1=d, name="ffn grad")
+    #     print(f"apply_grad_time: {apply_grad_time}")
         
-        if self.all_reduce == "the end":
-            reduction_time *= n_layers
-            apply_grad_time *= n_layers
-        elif self.all_reduce == "every layer": #return the reduction time for each layer
-            pass
-        else:
-            sys.exit("Invalid all_reduce option")
-
-
-
-        return reduction_time , apply_grad_time
+    #     if self.all_reduce == "the end":
+    #         reduction_time *= n_layers
+    #         apply_grad_time *= n_layers
+    #     elif self.all_reduce == "every layer": #return the reduction time for each layer
+    #         pass
+    #     else:
+    #         sys.exit("Invalid all_reduce option")
+    #     return reduction_time , apply_grad_time
     
     
     def get_inter_layer_comm_latency_llm(self, batch_size, hidden_dim, seq_len): #calculate the cross-layer communication latency
@@ -816,9 +826,9 @@ class TimeCalculationLLM(TimeCalculation):
 
     def get_data_parallel_local_computation(self, d, ffn_dim):
         """Calculate local computation times for apply_grad operations."""
-        qkv_local = self.applyGrad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
-        output_local = self.applyGrad(Dim0=d, Dim1=d, name="output_proj reduction")
-        ffn_local = 2 * self.applyGrad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
+        qkv_local = self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
+        output_local = self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
+        ffn_local = 2 * self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
 
         return {
             'qkv_local': qkv_local,
@@ -831,9 +841,9 @@ class TimeCalculationLLM(TimeCalculation):
         # If no data parallelism, still apply gradients locally but no cross-device reduction
         if not getattr(self, "dp", 1) or self.dp <= 1:
             apply_grad_time = 0.0
-            apply_grad_time += self.applyGrad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
-            apply_grad_time += self.applyGrad(Dim0=d, Dim1=d, name="output_proj reduction")
-            apply_grad_time += 2 * self.applyGrad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
+            apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
+            apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
+            apply_grad_time += 2 * self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
             if self.debug:
                 print(f"(dp=1) apply_grad_time: {apply_grad_time}")
             return apply_grad_time
@@ -856,7 +866,7 @@ class TimeCalculationLLM(TimeCalculation):
             local_bytes=0.0,
             debug_label="qkv_proj reduction",
         )
-        apply_grad_time += self.applyGrad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
+        apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
 
         total_bytes = math.ceil(self.precision * d * d)
         reduction_time += self.network_model.collective(
@@ -868,7 +878,7 @@ class TimeCalculationLLM(TimeCalculation):
             local_bytes=0.0,
             debug_label="output_proj reduction",
         )
-        apply_grad_time += self.applyGrad(Dim0=d, Dim1=d, name="output_proj reduction")
+        apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
 
         total_bytes = math.ceil(self.precision * ffn_dim * d)
         reduction_time += 2 * self.network_model.collective(
@@ -880,7 +890,7 @@ class TimeCalculationLLM(TimeCalculation):
             local_bytes=0.0,
             debug_label="ffn reduction",
         )
-        apply_grad_time += 2 * self.applyGrad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
+        apply_grad_time += 2 * self.apply_grad(Dim0=ffn_dim, Dim1=d, name="ffn reduction")
 
         if self.debug:
             print(f"apply_grad_time: {apply_grad_time}")
@@ -889,8 +899,8 @@ class TimeCalculationLLM(TimeCalculation):
     
     
     
-    def _compute_all_gemm_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim):
-        """Compute latency for all GEMM operations and return structured results."""
+    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim):
+        """Compute latency for all GEMM operations and node breakdown times in one function."""
 
         # Process GEMM shapes
         gemm_shapes = LLM_util.process_gemm_shapes(
@@ -905,14 +915,14 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_linear = gemm_shapes["linear"]
 
         # Compute GEMM times and organize in structured dict
-        results = {}
+        gemm_results = {}
 
         # QKV Projection GEMM
         qkv_proj_gemm_f, qkv_proj_reduction_f = self._distributed_gemm_forward(gemm_qkv_proj, "qkv_projection_f")
         qkv_proj_gemm_b, qkv_proj_reduction_b = self._distributed_gemm_backward(gemm_qkv_proj, "qkv_projection_b")
         qkv_proj_f = qkv_proj_gemm_f + qkv_proj_reduction_f
         qkv_proj_b = qkv_proj_gemm_b + qkv_proj_reduction_b
-        results['qkv_proj'] = {
+        gemm_results['qkv_proj'] = {
             'forward': qkv_proj_f, 'backward': qkv_proj_b,
             'forward_gemm': qkv_proj_gemm_f, 'forward_reduction': qkv_proj_reduction_f,
             'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b
@@ -923,7 +933,7 @@ class TimeCalculationLLM(TimeCalculation):
         attn_score_gemm_b, attn_score_reduction_b = self._distributed_gemm_backward(gemm_attention_score, "attention_score_b")
         attention_score_f = attn_score_gemm_f + attn_score_reduction_f
         attention_score_b = attn_score_gemm_b + attn_score_reduction_b
-        results['attention_score'] = {
+        gemm_results['attention_score'] = {
             'forward': attention_score_f, 'backward': attention_score_b,
             'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
             'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b
@@ -934,7 +944,7 @@ class TimeCalculationLLM(TimeCalculation):
         attn_out_gemm_b, attn_out_reduction_b = self._distributed_gemm_backward(gemm_attention_output, "attention_output_b")
         attention_output_f = attn_out_gemm_f + attn_out_reduction_f
         attention_output_b = attn_out_gemm_b + attn_out_reduction_b
-        results['attention_output'] = {
+        gemm_results['attention_output'] = {
             'forward': attention_output_f, 'backward': attention_output_b,
             'forward_gemm': attn_out_gemm_f, 'forward_reduction': attn_out_reduction_f,
             'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b
@@ -945,7 +955,7 @@ class TimeCalculationLLM(TimeCalculation):
         out_proj_gemm_b, out_proj_reduction_b = self._distributed_gemm_backward(gemm_output_proj, "output_projection_b")
         output_proj_f = out_proj_gemm_f + out_proj_reduction_f
         output_proj_b = out_proj_gemm_b + out_proj_reduction_b
-        results['output_proj'] = {
+        gemm_results['output_proj'] = {
             'forward': output_proj_f, 'backward': output_proj_b,
             'forward_gemm': out_proj_gemm_f, 'forward_reduction': out_proj_reduction_f,
             'backward_gemm': out_proj_gemm_b, 'backward_reduction': out_proj_reduction_b
@@ -956,7 +966,7 @@ class TimeCalculationLLM(TimeCalculation):
         ffn1_gemm_b, ffn1_reduction_b = self._distributed_gemm_backward(gemm_ffn1, "ffn_b")
         ffn1_f = ffn1_gemm_f + ffn1_reduction_f
         ffn1_b = ffn1_gemm_b + ffn1_reduction_b
-        results['ffn1'] = {
+        gemm_results['ffn1'] = {
             'forward': ffn1_f, 'backward': ffn1_b,
             'forward_gemm': ffn1_gemm_f, 'forward_reduction': ffn1_reduction_f,
             'backward_gemm': ffn1_gemm_b, 'backward_reduction': ffn1_reduction_b
@@ -967,7 +977,7 @@ class TimeCalculationLLM(TimeCalculation):
         ffn2_gemm_b, ffn2_reduction_b = self._distributed_gemm_backward(gemm_ffn2, "ffn2_b")
         ffn2_f = ffn2_gemm_f + ffn2_reduction_f
         ffn2_b = ffn2_gemm_b + ffn2_reduction_b
-        results['ffn2'] = {
+        gemm_results['ffn2'] = {
             'forward': ffn2_f, 'backward': ffn2_b,
             'forward_gemm': ffn2_gemm_f, 'forward_reduction': ffn2_reduction_f,
             'backward_gemm': ffn2_gemm_b, 'backward_reduction': ffn2_reduction_b
@@ -976,87 +986,56 @@ class TimeCalculationLLM(TimeCalculation):
         # Calculate non-GEMM operations
         embedding_f = self.get_embedding_f()
         embedding_b = self.get_embedding_b()
-        results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
+        gemm_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
 
         attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
         attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
-        results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
+        gemm_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
         residual1_f = self.get_residual_f(gemm=gemm_output_proj)
         residual1_b = self.get_residual_b(gemm=gemm_output_proj)
-        results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
+        gemm_results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
 
         layernorm1_f = self.get_layernorm_f(gemm=gemm_output_proj)
         layernorm1_b = self.get_layernorm_b(gemm=gemm_output_proj)
-        results['layernorm1'] = {'forward': layernorm1_f, 'backward': layernorm1_b}
+        gemm_results['layernorm1'] = {'forward': layernorm1_f, 'backward': layernorm1_b}
 
         residual2_f = self.get_residual_f(gemm=gemm_ffn2)
         residual2_b = self.get_residual_b(gemm=gemm_ffn2)
-        results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
+        gemm_results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
 
         layernorm2_f = self.get_layernorm_f(gemm=gemm_ffn2)
         layernorm2_b = self.get_layernorm_b(gemm=gemm_ffn2)
-        results['layernorm2'] = {'forward': layernorm2_f, 'backward': layernorm2_b}
+        gemm_results['layernorm2'] = {'forward': layernorm2_f, 'backward': layernorm2_b}
 
         linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
-        results['linear_softmax'] = {'forward': linear_softmax_f, 'backward': linear_softmax_b}
+        gemm_results['linear_softmax'] = {'forward': linear_softmax_f, 'backward': linear_softmax_b}
 
-        return results
-
-    def get_node_latency(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim, pre_computed_results=None):
-        """Calculate latency for each node in the computation graph."""
-
-        # Get all GEMM computation results (use pre-computed if available)
-        if pre_computed_results is not None:
-            results = pre_computed_results
-        else:
-            results = self._compute_all_gemm_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim)
-
-        # Extract individual times for backward compatibility
-        embedding_f = results['embedding']['forward']
-        embedding_b = results['embedding']['backward']
-        qkv_proj_f = results['qkv_proj']['forward']
-        qkv_proj_b = results['qkv_proj']['backward']
-        attention_score_f = results['attention_score']['forward']
-        attention_score_b = results['attention_score']['backward']
-        attention_scale_softmax_f = results['attention_scale_softmax']['forward']
-        attention_scale_softmax_b = results['attention_scale_softmax']['backward']
-        attention_output_f = results['attention_output']['forward']
-        attention_output_b = results['attention_output']['backward']
-        output_proj_f = results['output_proj']['forward']
-        output_proj_b = results['output_proj']['backward']
-        residual1_f = results['residual1']['forward']
-        residual1_b = results['residual1']['backward']
-        layernorm1_f = results['layernorm1']['forward']
-        layernorm1_b = results['layernorm1']['backward']
-        ffn1_f = results['ffn1']['forward']
-        ffn1_b = results['ffn1']['backward']
-        ffn2_f = results['ffn2']['forward']
-        ffn2_b = results['ffn2']['backward']
-        residual2_f = results['residual2']['forward']
-        residual2_b = results['residual2']['backward']
-        layernorm2_f = results['layernorm2']['forward']
-        layernorm2_b = results['layernorm2']['backward']
-        linear_softmax_f = results['linear_softmax']['forward']
-        linear_softmax_b = results['linear_softmax']['backward']
-
-        # Calculate MHA and FFN times
+        # Calculate MHA and FFN times directly from results dict
         mha_time_f = (
-            qkv_proj_f + attention_score_f + attention_output_f + output_proj_f + attention_scale_softmax_f
+            gemm_results['qkv_proj']['forward'] + gemm_results['attention_score']['forward'] +
+            gemm_results['attention_output']['forward'] + gemm_results['output_proj']['forward'] +
+            gemm_results['attention_scale_softmax']['forward']
         )
-        ffn_time_f = ffn1_f + ffn2_f
+        ffn_time_f = gemm_results['ffn1']['forward'] + gemm_results['ffn2']['forward']
         mha_time_b = (
-            qkv_proj_b + attention_score_b + attention_output_b + output_proj_b + attention_scale_softmax_b
+            gemm_results['qkv_proj']['backward'] + gemm_results['attention_score']['backward'] +
+            gemm_results['attention_output']['backward'] + gemm_results['output_proj']['backward'] +
+            gemm_results['attention_scale_softmax']['backward']
         )
-        ffn_time_b = ffn1_b + ffn2_b
+        ffn_time_b = gemm_results['ffn1']['backward'] + gemm_results['ffn2']['backward']
 
-        # Calculate transformer times
+        # Calculate transformer times directly
         transformer_time_f = (
-            mha_time_f + ffn_time_f + residual1_f + residual2_f + layernorm1_f + layernorm2_f
+            mha_time_f + ffn_time_f + gemm_results['residual1']['forward'] +
+            gemm_results['residual2']['forward'] + gemm_results['layernorm1']['forward'] +
+            gemm_results['layernorm2']['forward']
         )
         transformer_time_b = (
-            mha_time_b + ffn_time_b + residual1_b + residual2_b + layernorm1_b + layernorm2_b
+            mha_time_b + ffn_time_b + gemm_results['residual1']['backward'] +
+            gemm_results['residual2']['backward'] + gemm_results['layernorm1']['backward'] +
+            gemm_results['layernorm2']['backward']
         )
 
         # Write results to file
@@ -1065,44 +1044,51 @@ class TimeCalculationLLM(TimeCalculation):
             f.write("\n\n==============================================\n")
             f.write("Performance Results\n")
             f.write("==============================================\n")
-            f.write(f"qkv_proj_f: {qkv_proj_f * m}{second}\n")
-            f.write(f"attention_score_f: {attention_score_f * m}{second}\n")
-            f.write(f"attention_scale_softmax_f: {attention_scale_softmax_f * m}{second}\n")
-            f.write(f"attention_output_f: {attention_output_f * m}{second}\n")
-            f.write(f"output_proj_f: {output_proj_f * m}{second}\n")
-            f.write(f"residual1_f: {residual1_f * m}{second}\n")
-            f.write(f"layernorm1_f: {layernorm1_f * m}{second}\n")
-            f.write(f"ffn1_f: {ffn1_f * m}{second}\n")
-            f.write(f"ffn2_f: {ffn2_f * m}{second}\n")
-            f.write(f"residual2_f: {residual2_f * m}{second}\n")
-            f.write(f"layernorm2_f: {layernorm2_f * m}{second}\n")
-            f.write(f"linear_softmax_f: {linear_softmax_f * m}{second}\n")
+            f.write(f"qkv_proj_f: {gemm_results['qkv_proj']['forward'] * m}{second}\n")
+            f.write(f"attention_score_f: {gemm_results['attention_score']['forward'] * m}{second}\n")
+            f.write(f"attention_scale_softmax_f: {gemm_results['attention_scale_softmax']['forward'] * m}{second}\n")
+            f.write(f"attention_output_f: {gemm_results['attention_output']['forward'] * m}{second}\n")
+            f.write(f"output_proj_f: {gemm_results['output_proj']['forward'] * m}{second}\n")
+            f.write(f"residual1_f: {gemm_results['residual1']['forward'] * m}{second}\n")
+            f.write(f"layernorm1_f: {gemm_results['layernorm1']['forward'] * m}{second}\n")
+            f.write(f"ffn1_f: {gemm_results['ffn1']['forward'] * m}{second}\n")
+            f.write(f"ffn2_f: {gemm_results['ffn2']['forward'] * m}{second}\n")
+            f.write(f"residual2_f: {gemm_results['residual2']['forward'] * m}{second}\n")
+            f.write(f"layernorm2_f: {gemm_results['layernorm2']['forward'] * m}{second}\n")
+            f.write(f"linear_softmax_f: {gemm_results['linear_softmax']['forward'] * m}{second}\n")
             f.write(f"MHA Time: {mha_time_f * m}{second}\n")
             f.write(f"FFN Time: {ffn_time_f * m}{second}\n")
             f.write(f"Transformer Time (1 layer): {transformer_time_f * m}{second}\n")
 
         # Debugging output
         if debug:
-            print(f"embedding_f: {embedding_f * m:.1f}{second}")
-            print(f"qkv_proj_f: {qkv_proj_f * m:.1f}{second}")
-            print(f"attention_score_f: {attention_score_f * m:.1f}{second}")
-            print(f"attention_output_f: {attention_output_f * m:.1f}{second}")
-            print(f"output_proj_f: {output_proj_f * m:.1f}{second}")
-            print(f"residual1_f: {residual1_f * m:.1f}{second}")
-            print(f"layernorm1_f: {layernorm1_f * m:.1f}{second}")
-            print(f"ffn1_f: {ffn1_f * m:.1f}{second}")
-            print(f"ffn2_f: {ffn2_f * m:.1f}{second}")
-            print(f"residual2_f: {residual2_f * m:.1f}{second}")
-            print(f"layernorm2_f: {layernorm2_f * m:.1f}{second}")
-            print(f"linear_softmax_f: {linear_softmax_f * m:.1f}{second}")
+            print(f"embedding_f: {gemm_results['embedding']['forward'] * m:.1f}{second}")
+            print(f"qkv_proj_f: {gemm_results['qkv_proj']['forward'] * m:.1f}{second}")
+            print(f"attention_score_f: {gemm_results['attention_score']['forward'] * m:.1f}{second}")
+            print(f"attention_output_f: {gemm_results['attention_output']['forward'] * m:.1f}{second}")
+            print(f"output_proj_f: {gemm_results['output_proj']['forward'] * m:.1f}{second}")
+            print(f"residual1_f: {gemm_results['residual1']['forward'] * m:.1f}{second}")
+            print(f"layernorm1_f: {gemm_results['layernorm1']['forward'] * m:.1f}{second}")
+            print(f"ffn1_f: {gemm_results['ffn1']['forward'] * m:.1f}{second}")
+            print(f"ffn2_f: {gemm_results['ffn2']['forward'] * m:.1f}{second}")
+            print(f"residual2_f: {gemm_results['residual2']['forward'] * m:.1f}{second}")
+            print(f"layernorm2_f: {gemm_results['layernorm2']['forward'] * m:.1f}{second}")
+            print(f"linear_softmax_f: {gemm_results['linear_softmax']['forward'] * m:.1f}{second}")
             print(f"MHA Time: {mha_time_f * m:.1f}{second}")
             print(f"FFN Time: {ffn_time_f * m:.1f}{second}")
             print(f"Transformer Time (1 layer): {transformer_time_f * m:.1f}{second}")
 
-        return (
-            transformer_time_f, transformer_time_b, embedding_f, embedding_b,
-            linear_softmax_f, linear_softmax_b
-        )
+        # Create node breakdown dict for pipeline graph construction
+        node_breakdown = {
+            'transformer_time_f': transformer_time_f,
+            'transformer_time_b': transformer_time_b,
+            'embedding_f': gemm_results['embedding']['forward'],
+            'embedding_b': gemm_results['embedding']['backward'],
+            'linear_softmax_f': gemm_results['linear_softmax']['forward'],
+            'linear_softmax_b': gemm_results['linear_softmax']['backward']
+        }
+
+        return gemm_results, node_breakdown
 
 
     def _effective_transformer_batch(self) -> int:
@@ -1254,48 +1240,6 @@ class TimeCalculationLLM(TimeCalculation):
             'kp2': (self.IBK2, self.LLK2)
         }
 
-    def _build_pipeline_graph(
-        self,
-        num_micro_batches: int,
-        num_layers: int,
-        transformer_time_f: float,
-        transformer_time_b: float,
-        embedding_f: float,
-        embedding_b: float,
-        linear_softmax_f: float,
-        linear_softmax_b: float,
-        comm_metadata: Dict[str, Dict[str, Any]],
-    ) -> Tuple[Graph, Any, Dict[str, Tuple[float, float]]]:
-        comp_times = {
-            "embedding_f": embedding_f,
-            "embedding_b": embedding_b,
-            "linear_softmax_f": linear_softmax_f,
-            "linear_softmax_b": linear_softmax_b,
-            "transformer_f": transformer_time_f,
-            "transformer_b": transformer_time_b,
-            "cross_layer_f": 0.0,
-            "cross_layer_b": 0.0,
-        }
-        misc_metadata = {
-            "num_batch": num_micro_batches,
-            "num_layer": num_layers,
-            "all_reduce": self.all_reduce,
-        }
-
-        graph = simulate_LLM.Graph(
-            mode="pipeline",
-            dp=self.dp,
-            lp=self.lp,
-            kp1=self.kp1,
-            kp2=self.kp2,
-            tp_mode=self.t,
-            comp_times=comp_times,
-            comm_metadata=comm_metadata,
-            misc_metadata=misc_metadata,
-        )
-        root = graph.construct_fwd_bwd_graph()
-        interconnect_params = self._build_interconnect_params()
-        return graph, root, interconnect_params
 
     def _tp_degree(self) -> int:
         kp1 = self.kp1 if self.kp1 else 1
@@ -1318,9 +1262,8 @@ class TimeCalculationLLM(TimeCalculation):
         # Adjust types and calculate node latencies
         self.readjust_type()
 
-        # Get structured GEMM results for both node latency calculation and graph construction
-        gemm_results = self._compute_all_gemm_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim)
-        transformer_time_f, transformer_time_b, embedding_f, embedding_b, linear_softmax_f, linear_softmax_b = self.get_node_latency(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim, gemm_results)
+        # Get structured GEMM results and node breakdown in one efficient call
+        gemm_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim)
 
         if self.debug:
             print(
@@ -1458,27 +1401,39 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_forward_root = self.transformer_graph.construct_transformer_graph(direction="forward")
         self.transformer_backward_root = self.transformer_graph.construct_transformer_graph(direction="backward")
 
-        analytical_forward = 0.0
-        analytical_backward = 0.0
-        for entry in transformer_gemm_entries:
-            forward_component = entry["forward"]["duration"] + entry["forward"].get("reduction", 0.0)
-            backward_component = entry["backward"]["duration"] + entry["backward"].get("reduction", 0.0)
-            analytical_forward += forward_component
-            analytical_backward += backward_component
-        self.transformer_analytical_time_forward = analytical_forward
-        self.transformer_analytical_time_backward = analytical_backward
+        self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
+        self.transformer_analytical_time_backward = node_breakdown['transformer_time_b']
 
-        pipeline_graph_obj, graph_root, interconnect_params = self._build_pipeline_graph(
-            num_micro_batches=num_micro_batches,
-            num_layers=num_layers,
-            transformer_time_f=transformer_time_f,
-            transformer_time_b=transformer_time_b,
-            embedding_f=embedding_f,
-            embedding_b=embedding_b,
-            linear_softmax_f=linear_softmax_f,
-            linear_softmax_b=linear_softmax_b,
+        # Build pipeline graph directly using node breakdown dict
+        comp_times = {
+            "embedding_f": node_breakdown['embedding_f'],
+            "embedding_b": node_breakdown['embedding_b'],
+            "linear_softmax_f": node_breakdown['linear_softmax_f'],
+            "linear_softmax_b": node_breakdown['linear_softmax_b'],
+            "transformer_f": node_breakdown['transformer_time_f'],
+            "transformer_b": node_breakdown['transformer_time_b'],
+            "cross_layer_f": 0.0,
+            "cross_layer_b": 0.0,
+        }
+        misc_metadata = {
+            "num_batch": num_micro_batches,
+            "num_layer": num_layers,
+            "all_reduce": self.all_reduce,
+        }
+
+        pipeline_graph_obj = simulate_LLM.Graph(
+            mode="pipeline",
+            dp=self.dp,
+            lp=self.lp,
+            kp1=self.kp1,
+            kp2=self.kp2,
+            tp_mode=self.t,
+            comp_times=comp_times,
             comm_metadata=comm_metadata,
+            misc_metadata=misc_metadata,
         )
+        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph()
+        interconnect_params = self._build_interconnect_params()
 
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
@@ -1532,6 +1487,20 @@ class TimeCalculationLLM(TimeCalculation):
                 graph_folder,
                 "transformer_graph_backward",
             )
+        if self._generate_graphs and self.pipeline_root is not None:
+            self.pipeline_graph.save_graph(
+                self.pipeline_root,
+                graph_folder,
+                "pipeline_graph_post",
+            )
+
+        # use generate graphs as temp debug. If set, print analytical transformer time and actual transformer time
+        if self._generate_graphs:
+            print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.1f}s")
+            print(f"Analytical transformer backward time: {self.transformer_analytical_time_backward:.1f}s")
+            if self.transformer_astrasim_time_forward is not None and self.transformer_astrasim_time_backward is not None:
+                print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.1f}s")
+                print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.1f}s")
 
         self.tot_time = time_fw_bw
 
@@ -1651,6 +1620,12 @@ class LLMExecutionDispatcher:
             raise RuntimeError("Pipeline flattening produced an empty graph")
 
         setattr(self.time_calc, "flattened_pipeline_root", flattened_root)
+        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+            self.pipeline_graph.save_graph(
+                self.pipeline_root,
+                self.time_calc.output_dir,
+                "pipeline_graph_pre`",
+            )
         self.pipeline_root = flattened_root
 
         # output_dir = "./astra_flattened_graph"

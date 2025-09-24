@@ -1504,7 +1504,7 @@ class TimeCalculation:
 
         return gradclip_time
 
-    def applyGrad(self, Dim0=None, Dim1=None, name=None):
+    def apply_grad(self, Dim0=None, Dim1=None, name=None):
         if Dim0 == None:
             Dim0 = 2 * self.D
         if Dim1 == None:
@@ -1711,7 +1711,7 @@ class TimeCalculation:
                 local_bytes=0.0,
                 debug_label=name or "comm",
             )
-            apply_grad_time = self.applyGrad(Dim0=k / dim1, Dim1=n, name=name)
+            apply_grad_time = self.apply_grad(Dim0=k / dim1, Dim1=n, name=name)
 
         elif self.kp_hidden_type == 2:  # RC
             total_bytes = math.ceil(self.precision * (k / dim1) * (n / dim2))
@@ -1737,7 +1737,7 @@ class TimeCalculation:
                 local_bytes=3 * total_bytes,
                 debug_label=name or "comm",
             )
-            apply_grad_time = self.applyGrad(Dim0=k, Dim1=n / dim2, name=name)
+            apply_grad_time = self.apply_grad(Dim0=k, Dim1=n / dim2, name=name)
         else:
             reduction_time_wt_kp = 0
             total_bytes = math.ceil(self.precision * k * n)
@@ -1750,7 +1750,7 @@ class TimeCalculation:
                 local_bytes=0.0,
                 debug_label=name or "comm",
             )
-            apply_grad_time = self.applyGrad(Dim0=k, Dim1=n, name=name)
+            apply_grad_time = self.apply_grad(Dim0=k, Dim1=n, name=name)
         if self.debug:
             print(f"reduction_time_wt_kp: {reduction_time_wt_kp}")
             print(f"reduction_time_wt_dp: {reduction_time_wt_dp}")

@@ -392,6 +392,20 @@ def run_cache_astrasim(
     per_node_sec: List[float] = []
     max_sec: float = 0.0
     last_outcome_zero = False
+
+    # Capture command details for debugging
+    bin_path = _astrasim_binary_path()
+    debug_cmd = [
+        bin_path,
+        f"--workload-configuration={workload_prefix}",
+        f"--system-configuration={files['system_json']}",
+        f"--network-configuration={files['network_yaml']}",
+    ]
+    if remote_mem_path:
+        debug_cmd.append(f"--remote-memory-configuration={remote_mem_path}")
+    if comm_group_json and os.path.exists(comm_group_json):
+        debug_cmd.append(f"--comm-group-configuration={comm_group_json}")
+
     while attempts < 5:
         attempts += 1
         per_node_sec, max_sec = run_astrasim_analytical(
@@ -407,8 +421,10 @@ def run_cache_astrasim(
         last_outcome_zero = True
         time.sleep(0.5)
     if last_outcome_zero:
+        cmd_str = " ".join(debug_cmd)
         raise RuntimeError(
-            f"AstraSim returned zero time for {comm} size={size_bytes} npus={npus_count} after 5 retries"
+            f"AstraSim returned zero time for {comm} size={size_bytes} npus={npus_count} after 5 retries.\n"
+            f"Full AstraSim command:\n{cmd_str}"
         )
 
     cache_entry = {

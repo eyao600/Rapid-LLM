@@ -271,7 +271,7 @@ def _simulate_accesses_sig(inner_code: int, M: int, K: int, N: int,
         + 2 * mn_load * (l2_M * l2_N * dtype_size) * factor_K
     )
 
-    l2f0 = M // l2_M
+    l2f0 = M // l2_M # are we sure these are floor and should not be ceil? (ceil is -(-M // l2_M))
     l2f1 = K // l2_K
     l2f2 = N // l2_N
     reload_mk = 1

@@ -162,7 +162,12 @@ memory_hierarchy:
 scheduling_param:
     auto: False 
     dp: 1
-    lp: 1
+    lp: 1 # pipeline stages 
+    mb: 1 # number of micro-batches
+    t: "CR"
+    kp1: 1
+    kp2: 1
+    # LSTM LEGACY PARAMS
     kp_hidden_dim1: 1
     kp_hidden_dim2: 1
     kp_softmax_dim1: 1
@@ -175,9 +180,6 @@ scheduling_param:
     kp_softmax_type: -1
     kp_embedding_type: -1
     kp_projection_type: -1
-    t: "RC" #modification of t and kp1 and kp2 will update the scheduling algorithm if they are not null
-    kp1: 1
-    kp2: 1
 
 execution_backend:
   model: astra # analytical | astra
@@ -191,3 +193,7 @@ execution_backend:
       all_reduce: auto
       reduce_scatter: auto
       all_to_all: auto
+    sys_options:
+      endpoint_delay: 10
+      active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
+      preferred_dataset_splits: 32 # Should be same as active_chunks_per_dimension
