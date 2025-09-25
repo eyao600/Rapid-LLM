@@ -1,15 +1,16 @@
 model_param:
     mode: "LLM"  # Mode of operation
-    run_type: "training"
-    batch_size: 2048  # Batch size
+    run_type: "inference"
+    batch_size: 2048  # Batch size for prefill tokens
     seq_len: 16384
+    decode_len: 512
     hidden_dim: 8192
     num_heads: 64
     ffn_dim: 32768 # First FFN layer output dimension, typically 4 * D used when ffn_mult is NULL.
     ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
     vocab_size: 800000  # Vocabulary size
     num_layers: 2  # only 1 layer for now
-    n_tokens: 10000000000  # Number of tokens to train on. Set to 1T for now.
+    n_tokens: 10000000000  # Number of tokens processed historically (training reference)
     communication_time: 0  # Communication time in seconds
     N_PP: 1  # pipeline degree
     all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"

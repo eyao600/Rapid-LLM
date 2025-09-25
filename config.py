@@ -392,11 +392,13 @@ LLMConfig = _namedtuple(
     "model_param",
     [
         "mode",
+        "run_type",
         "num_layers",
         "hidden_dim",
         "num_heads",
         "batch_size",
         "seq_len",
+        "decode_len",
         "ffn_dim",
         "ffn_mult",
         "vocab_size",
@@ -644,7 +646,10 @@ def parse_config(filename, config_type):
         model_config = GEMMConfig(**mp)
         config = MODELConfig(model_config=model_config)
     elif config_type == "LLM":
-        model_config = LLMConfig(**config_dict["model_param"])
+        mp = dict(config_dict["model_param"])
+        mp.setdefault("run_type", "training")
+        mp.setdefault("decode_len", None)
+        model_config = LLMConfig(**mp)
         config = MODELConfig(model_config=model_config)
     else:
         raise ValueError("Invalid config type: {}".format(config_type))

@@ -13,6 +13,8 @@ import shutil
 from tile import TiledGEMM, formatBytes
 from time_calculation import TimeCalculation
 from time_calculation_LLM import TimeCalculationLLM
+from timecalculation_inf import calculate_llm_inference_prefill
+from simulate_inf import simulate_llm_inference_prefill
 from LLM_util import  process_gemm_shapes, caltime
 
 algByte = False  # algorithmic ops false
@@ -225,6 +227,11 @@ def run_LLM(
     _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
 
+    llm_run_type = getattr(exp_model_config.model_config, "run_type", "training")
+    if str(llm_run_type).lower() == "inference":
+        _run_llm_inference_prefill(exp_hw_config, exp_model_config, exp_dir, mode)
+        return
+
     variant = llm_execution_variant.strip().upper()
     if variant == "LEGACY_HEURISTIC":
         _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode)
@@ -244,6 +251,12 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
         f.write("Total Time: {0:.8f}\n".format(total_time))
 
     print("Total training time: {}".format(tc_llm.get_time()))
+
+
+def _run_llm_inference_prefill(exp_hw_config, exp_model_config, exp_dir, mode):
+    artifacts = calculate_llm_inference_prefill(exp_hw_config, exp_model_config, mode, exp_dir)
+    summary = simulate_llm_inference_prefill(artifacts, exp_dir)
+    print(f"LLM inference prefill completed. Total time: {summary.total_time}")
 
 def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
     base_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)

@@ -207,7 +207,7 @@ class Graph:
         traverse_and_convert(roots)
         return roots
 
-    def construct_fwd_bwd_graph(self):
+    def construct_fwd_bwd_graph(self, include_backward: bool = True):
         embedding_node = []
         data_batch_node = []
         softmax_node = []
@@ -225,17 +225,15 @@ class Graph:
         cross_layer_time = self._time("cross_layer_f")
 
 
-        embedding_node_b = [[] for _ in range(self.num_batch)]
-        softmax_node_b = [[] for _ in range(self.num_batch)]
-        # data_batch_node = [[] for _ in range(self.num_batch)]
+        if include_backward:
+            embedding_node_b = [[] for _ in range(self.num_batch)]
+            softmax_node_b = [[] for _ in range(self.num_batch)]
+            R_edge = [[] for _ in range(self.num_batch)]
+            G_edge = [[] for _ in range(self.num_batch)]
 
-        R_edge = [[] for _ in range(self.num_batch)]
-        G_edge = [[] for _ in range(self.num_batch)]
-        
-        #######
-        transformer_nodes_b = [[] for _ in range(self.num_batch)]  # 
-        for b in range(self.num_batch):
-            transformer_nodes_b[b] = [[] for _ in range(self.num_layer)]
+            transformer_nodes_b = [[] for _ in range(self.num_batch)]  #
+            for b in range(self.num_batch):
+                transformer_nodes_b[b] = [[] for _ in range(self.num_layer)]
 
         op_id = 0  # operation ID, used to distinguish nodes and edges
         batch_id = 0  # batch ID, used to distinguish data batches
@@ -324,6 +322,9 @@ class Graph:
 
         for db_node in data_batch_node:
             db_node.remove_self_from_children()
+
+        if not include_backward:
+            return embedding_node[0]
 
         for b in reversed(range(self.num_batch)): #connect each data batch node with corresponding nodes
             emb_b = Node("embedding_b", op_id, 0, embedding_b_time, fwd=False)      # hw_id = 0
