@@ -5,6 +5,7 @@ import os
 from typing import Dict, Tuple
 from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM
 from simulate_inf import InferenceConfig, InferenceEngine
+import LLM_util
 
 
 class TimeCalculationLLMInference(TimeCalculationLLM):
@@ -30,8 +31,24 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         )
         attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
 
-        kv_cache_enabled = getattr(self.model, "kv_cache_enabled", True)
-        output_seq_len = 1 if kv_cache_enabled else total_seq_len
+        token_bytes = LLM_util.kv_cache_token_bytes(
+            batch_size=batch_size,
+            num_heads=self.num_heads,
+            head_dim=head_dim,
+            precision_bytes=self.kv_cache_precision,
+        )
+        kv_cache_fetch_time = self.roofline(
+            0,
+            token_bytes * total_seq_len,
+            name="kv_cache_fetch",
+        ) + self.O
+        kv_cache_store_time = self.roofline(
+            0,
+            token_bytes,
+            name="kv_cache_store",
+        ) + self.O
+
+        output_seq_len = 1
 
         output_proj_shape = (
             batch_size,
@@ -78,8 +95,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         _inject("layernorm1", layernorm1_f)
         _inject("residual2", residual2_f)
         _inject("layernorm2", layernorm2_f)
+        _inject("kv_cache_fetch", kv_cache_fetch_time)
+        _inject("kv_cache_store", kv_cache_store_time)
 
-        layer_time = (
+        core_time = (
             gemm_results["qkv_proj"]["forward"]
             + gemm_results["attention_score"]["forward"]
             + attention_scale_softmax_f
@@ -93,6 +112,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             + layernorm2_f
         )
 
+        layer_time = core_time
+        kv_fetch_node_time = kv_cache_fetch_time
+
         return {
             "transformer_time_f": layer_time,
             "transformer_time_b": 0.0,
@@ -100,6 +122,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "linear_softmax_b": 0.0,
             "embedding_f": 0.0,
             "embedding_b": 0.0,
+            "kv_cache_fetch": kv_fetch_node_time,
+            "kv_cache_store": kv_cache_store_time,
         }
 
     def prepare_decode_graphs(
@@ -151,6 +175,39 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             num_heads,
             ffn_dim,
         )
+
+        head_dim = hidden_dim // num_heads
+        token_bytes = LLM_util.kv_cache_token_bytes(
+            batch_size=batch_size,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            precision_bytes=self.kv_cache_precision,
+        )
+        prefill_store_time = self.roofline(
+            0,
+            token_bytes * prefill_len,
+            name="kv_cache_store_prefill",
+        ) + self.O
+
+        node_breakdown["kv_cache_store"] = prefill_store_time
+        node_breakdown["kv_cache_fetch"] = 0.0
+
+        gemm_results["kv_cache_store"] = {
+            "forward": prefill_store_time,
+            "backward": 0.0,
+            "forward_gemm": prefill_store_time,
+            "forward_reduction": 0.0,
+            "backward_gemm": 0.0,
+            "backward_reduction": 0.0,
+        }
+        gemm_results["kv_cache_fetch"] = {
+            "forward": 0.0,
+            "backward": 0.0,
+            "forward_gemm": 0.0,
+            "forward_reduction": 0.0,
+            "backward_gemm": 0.0,
+            "backward_reduction": 0.0,
+        }
 
         (
             pipeline_graph,
@@ -254,9 +311,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             kp1=self.kp1,   
             kp2=self.kp2,
             tp_mode=self.t,
-            kv_cache_enabled=inference_config_dict.get('kv_cache_enabled', True),
             sample_every=sample_every,
-            force_sample_last=force_sample_last
+            force_sample_last=force_sample_last,
+            kv_cache_fetch_overlap=self.kv_cache_fetch_overlap,
         )
 
 
@@ -284,18 +341,47 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         # Calculate decode time (new functionality)
         decode_time = self.calc_decode_time()
+        total_time = prefill_time + decode_time
+
+        head_dim = self.hidden_dim // self.num_heads
+        token_bytes = LLM_util.kv_cache_token_bytes(
+            batch_size=self._effective_transformer_batch(),
+            num_heads=self.num_heads,
+            head_dim=head_dim,
+            precision_bytes=self.kv_cache_precision,
+        )
+        prefill_len = max(self.seq_len - self.model.decode_len, 0)
+        decode_len = self.model.decode_len
+        num_layers = self.num_layers
+
+        prefill_store_bytes = token_bytes * prefill_len * num_layers
+        decode_store_bytes = token_bytes * decode_len * num_layers
+        decode_fetch_bytes = token_bytes * num_layers * (
+            decode_len * prefill_len + decode_len * (decode_len + 1) // 2
+        )
+
+        def _to_gib(byte_val: int) -> float:
+            return byte_val / (1024 ** 3)
+
         print(
             f"[prefill] time: {prefill_time:.6f}s, "
             f"[decode] time: {decode_time:.6f}s, "
-            f"[total] time: {prefill_time + decode_time:.6f}s"
+            f"[total] time: {total_time:.6f}s"
+        )
+        print(
+            f"[kv-cache] prefill_store={_to_gib(prefill_store_bytes):.2f} GiB, "
+            f"decode_store={_to_gib(decode_store_bytes):.2f} GiB, "
+            f"decode_fetch={_to_gib(decode_fetch_bytes):.2f} GiB"
         )
 
-        total_time = prefill_time + decode_time
 
         return {
             "prefill_time": prefill_time,
             "decode_time": decode_time,
-            "total_inference_time": total_time
+            "total_inference_time": total_time,
+            "kv_cache_prefill_store_bytes": prefill_store_bytes,
+            "kv_cache_decode_store_bytes": decode_store_bytes,
+            "kv_cache_decode_fetch_bytes": decode_fetch_bytes,
         }
 
 

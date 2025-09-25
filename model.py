@@ -35,7 +35,6 @@ class Model_LLM:
       self.all_reduce       = exp_config.model_config.all_reduce
       self.run_type         = exp_config.model_config.run_type
       self.inference        = getattr(exp_config.model_config, 'inference', {})
-      self.kv_cache_enabled = self.inference.get('kv_cache_enabled', True)
       
       
       

@@ -489,6 +489,15 @@ ExecutionBackend = _namedtuple(
     ],
 )
 
+InferenceHWConfig = _namedtuple(
+    "InferenceHWConfig",
+    [
+        "kvcache_precision",
+        "kvcache_type",
+        "kvcache_fetch_overlap",
+    ],
+)
+
 HWConfig = _namedtuple(
     "HWConfig",
     [
@@ -502,6 +511,7 @@ HWConfig = _namedtuple(
         "memory_hierarchy",
         "network_topology",
         "execution_backend",
+        "inference_config",
     ],
 )
 
@@ -625,6 +635,13 @@ def parse_config(filename, config_type):
             eb_astra = None
         exec_backend = ExecutionBackend(model=eb_model, astra=eb_astra)
 
+        inference_dict = config_dict.get("inference", {}) or {}
+        inference_cfg = InferenceHWConfig(
+            kvcache_precision=inference_dict.get("kvcache_precision", sw_config.precision),
+            kvcache_type=inference_dict.get("kvcache_type", "hbm_only"),
+            kvcache_fetch_overlap=bool(inference_dict.get("kvcache_fetch_overlap", False)),
+        )
+
         config = HWConfig(
             sw_config=sw_config,
             tech_config=tech_config,
@@ -636,6 +653,7 @@ def parse_config(filename, config_type):
             memory_hierarchy=memory_hierarchy_config,
             network_topology=network_topology_config,
             execution_backend=exec_backend,
+            inference_config=inference_cfg,
         )
     elif config_type == "LSTM":
         model_config = ModelLSTMConfig(**config_dict["model_param"])

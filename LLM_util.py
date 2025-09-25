@@ -301,14 +301,19 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
 # DECODE-SPECIFIC UTILITIES FOR AUTOREGRESSIVE INFERENCE
 # ====================================================================
 
-def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size, kv_cache_enabled=True):
+def kv_cache_token_bytes(batch_size, num_heads, head_dim, precision_bytes):
+    """Return total bytes to store K+V for a single new token."""
+    return batch_size * num_heads * head_dim * precision_bytes * 2
+
+
+def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size):
     """
     Generate GEMM shapes for a single decode step in autoregressive generation.
 
     Key differences from training/prefill GEMMs:
     - Sequence length is typically 1 (generating one token at a time)
     - Attention over growing KV-cache (current_seq_len)
-    - Different computational patterns for cached vs. non-cached attention
+    - Always uses KV-cache (one-token query, cached keys/values)
 
     Parameters:
         batch_size (int): Batch size (B)
@@ -317,7 +322,6 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
         num_heads (int): Number of attention heads (H)
         ffn_dim (int): First FFN layer output dimension (typically 4 * D)
         vocab_size (int): Vocabulary size (V)
-        kv_cache_enabled (bool): Whether KV-cache is used for efficiency
 
     Returns:
         OrderedDict: GEMM shapes [M, K, N] for decode step operations
@@ -326,68 +330,39 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
     head_dim = d_model // num_heads
     gemms = OrderedDict()
 
-    # Decode-specific GEMM shapes with proper KV-cache handling
+    # Decode-specific GEMM shapes with KV-cache handling (always enabled)
 
-    if kv_cache_enabled:
-        # === KV-CACHE ENABLED (Standard Inference) ===
+    # QKV Projection: Only the new token (seq_len = 1)
+    gemms["qkv_proj"] = (batch_size, 1, d_model, 3 * d_model)
 
-        # QKV Projection: Combined for compatibility with existing infrastructure
-        # Only new token computation: seq_len = 1
-        gemms["qkv_proj"] = (batch_size, 1, d_model, 3 * d_model)
+    # Attention Score: Q(new) @ K(cached+new)
+    gemms["attention_score"] = (
+        batch_size * num_heads,
+        1,                    # query seq_len (new token only)
+        head_dim,
+        current_seq_len,      # key seq_len (grows with decode steps)
+    )
 
-        # Attention Score: Q(new) @ K(cached+new) = [B*H, 1, head_dim] @ [B*H, head_dim, current_seq_len]
-        gemms["attention_score"] = (
-            batch_size * num_heads,
-            1,                    # query seq_len (new token only)
-            head_dim,
-            current_seq_len,      # key seq_len (grows with decode steps)
-        )
-
-        # Attention Output: attention_weights @ V(cached+new) = [B*H, 1, current_seq_len] @ [B*H, current_seq_len, head_dim]
-        gemms["attention_output"] = (
-            batch_size * num_heads,
-            1,                    # output seq_len (new token only)
-            current_seq_len,      # attention weight dim (grows with decode)
-            head_dim,
-        )
-
-    else:
-        # === NO KV-CACHE (Recompute Everything) ===
-
-        # QKV Projection: Full sequence recomputation
-        gemms["qkv_proj"] = (batch_size, current_seq_len, d_model, 3 * d_model)
-
-        # Attention Score: Full Q @ K computation
-        gemms["attention_score"] = (
-            batch_size * num_heads,
-            current_seq_len,
-            head_dim,
-            current_seq_len,
-        )
-
-        # Attention Output: Full attention weights @ V
-        gemms["attention_output"] = (
-            batch_size * num_heads,
-            current_seq_len,
-            current_seq_len,
-            head_dim,
-        )
+    # Attention Output: attention_weights @ V(cached+new)
+    gemms["attention_output"] = (
+        batch_size * num_heads,
+        1,                    # output seq_len (new token only)
+        current_seq_len,      # attention weight dim (grows with decode)
+        head_dim,
+    )
 
     # === POST-ATTENTION LAYERS (same regardless of cache) ===
 
-    # Output projection: Only for new token when cached, full sequence otherwise
-    output_seq_len = 1 if kv_cache_enabled else current_seq_len
-    gemms["output_proj"] = (batch_size, output_seq_len, d_model, d_model)
-
-    # FFN layers: Only for new token when cached, full sequence otherwise
-    gemms["ffn1"] = (batch_size, output_seq_len, d_model, ffn_dim)
-    gemms["ffn2"] = (batch_size, output_seq_len, ffn_dim, d_model)
+    # Output projection & FFNs only process the new token
+    gemms["output_proj"] = (batch_size, 1, d_model, d_model)
+    gemms["ffn1"] = (batch_size, 1, d_model, ffn_dim)
+    gemms["ffn2"] = (batch_size, 1, ffn_dim, d_model)
 
     return gemms
 
 
 def process_decode_gemm_shapes(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size,
-                              kv_cache_enabled=True, option="multiply_batch_into_m"):
+                              option="multiply_batch_into_m"):
     """
     Process decode GEMM shapes and reshape them into 3D.
 
@@ -397,7 +372,7 @@ def process_decode_gemm_shapes(batch_size, current_seq_len, d_model, num_heads, 
     """
     # Generate decode GEMM shapes in 4D
     gemm_shapes_4d = autoregressive_decoder_gemm(
-        batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size, kv_cache_enabled
+        batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size
     )
 
     processed = OrderedDict()

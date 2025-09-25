@@ -7,6 +7,7 @@ workflows including both prefill and autoregressive decode phases.
 
 import math
 import os
+import shutil
 from typing import Any, Callable, Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
@@ -30,10 +31,10 @@ class InferenceConfig:
     kp1: int = 1  # tensor parallel dim 1
     kp2: int = 1  # tensor parallel dim 2
     tp_mode: str = "row_col"
-    kv_cache_enabled: bool = True
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
     force_sample_last: bool = True  # Always sample final step
+    kv_cache_fetch_overlap: bool = False
 @dataclass
 class DecodeSample:
     """Represents a sampled decode step with execution results."""
@@ -66,6 +67,8 @@ class DecodeGraph(Graph):
         self.hw_config = hw_config
         self.model_config = model_config
         self.time_calc_cls = time_calc_cls
+        self.overlap_fetch = config.kv_cache_fetch_overlap
+        self._decode_sample_root: Optional[str] = None
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
         """
@@ -93,7 +96,6 @@ class DecodeGraph(Graph):
                 num_heads=self.config.num_heads,
                 ffn_dim=self.config.ffn_dim,
                 vocab_size=self.config.vocab_size,
-                kv_cache_enabled=self.config.kv_cache_enabled,
                 option="multiply_batch_into_m"
             )
 
@@ -193,6 +195,11 @@ class DecodeGraph(Graph):
 
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
         sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
+        root_dir = os.path.dirname(sample_dir)
+        if self._decode_sample_root is None:
+            self._decode_sample_root = root_dir
+            if self._should_cleanup_decode_samples() and os.path.isdir(root_dir):
+                shutil.rmtree(root_dir, ignore_errors=True)
         os.makedirs(sample_dir, exist_ok=True)
         prev_output_dir = temp_time_calc.output_dir
         temp_time_calc.output_dir = sample_dir
@@ -279,6 +286,12 @@ class DecodeGraph(Graph):
 
         return total_time
 
+    def _should_cleanup_decode_samples(self) -> bool:
+        flag = os.environ.get("DEEPFLOW_VISUALIZE_GRAPHS")
+        if flag is None:
+            return False
+        return flag.strip().lower() not in {"", "0", "false", "no"}
+
 
 
 class InferenceEngine:
@@ -325,12 +338,10 @@ class InferenceEngine:
             tp_mode=self.config.tp_mode,
             comp_times={},
             comm_metadata={},
-            misc_metadata={},
+            misc_metadata={"kv_cache_fetch_overlap": self.config.kv_cache_fetch_overlap},
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,
         )
 
         return self.decode_graph.build_decode_graph()
-
-

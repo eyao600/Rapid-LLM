@@ -126,6 +126,7 @@ class PipelineGraphFlattener:
                     self._hw_id_for_rank(obj.hw_id, 0),
                     obj.duration,
                     fwd=obj.fwd,
+                    is_kv_cache=getattr(obj, "is_kv_cache", False),
                 )
             else:
                 cloned = simulate_LLM.Node(
@@ -134,6 +135,7 @@ class PipelineGraphFlattener:
                     obj.hw_id,
                     obj.duration,
                     fwd=obj.fwd,
+                    is_kv_cache=getattr(obj, "is_kv_cache", False),
                 )
 
             self._clone_cache[obj_id] = cloned
@@ -391,6 +393,7 @@ class PipelineGraphFlattener:
             "direction",
             "stage_id",
             "tp_rank",
+            "is_kv_cache",
         ):
             if hasattr(source, attr):
                 setattr(target, attr, getattr(source, attr))
@@ -446,6 +449,13 @@ class TimeCalculationLLM(TimeCalculation):
         self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
         self.execution_mode = execution_mode
+        inference_cfg = getattr(hw_config, "inference_config", None)
+        if inference_cfg and getattr(inference_cfg, "kvcache_precision", None) is not None:
+            self.kv_cache_precision = inference_cfg.kvcache_precision
+        else:
+            self.kv_cache_precision = self.precision
+        self.kv_cache_type = getattr(inference_cfg, "kvcache_type", "hbm_only") if inference_cfg else "hbm_only"
+        self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
         self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
@@ -1402,6 +1412,8 @@ class TimeCalculationLLM(TimeCalculation):
             "linear_softmax_b": node_breakdown.get('linear_softmax_b', 0.0) if include_pipeline_backward else 0.0,
             "transformer_f": node_breakdown.get('transformer_time_f', 0.0),
             "transformer_b": node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0,
+            "kv_cache_fetch": node_breakdown.get('kv_cache_fetch', 0.0),
+            "kv_cache_store": node_breakdown.get('kv_cache_store', 0.0),
             "cross_layer_f": 0.0,
             "cross_layer_b": 0.0,
         }
@@ -1410,6 +1422,8 @@ class TimeCalculationLLM(TimeCalculation):
             "num_layer": self.num_layers,
             "all_reduce": getattr(self, "all_reduce", "the end"),
         }
+        if getattr(self, "kv_cache_fetch_overlap", False):
+            misc_metadata["kv_cache_fetch_overlap"] = True
 
         pipeline_graph_obj = simulate_LLM.Graph(
             mode="pipeline",
@@ -1913,9 +1927,24 @@ class LLMExecutionDispatcher:
         )
         attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
 
-        model = getattr(self, "model", None)
-        kv_cache_enabled = getattr(model, "kv_cache_enabled", True) if model else True
-        output_seq_len = 1 if kv_cache_enabled else total_seq_len
+        token_bytes = LLM_util.kv_cache_token_bytes(
+            batch_size=batch_size,
+            num_heads=self.num_heads,
+            head_dim=head_dim,
+            precision_bytes=self.kv_cache_precision,
+        )
+        kv_cache_fetch_time = self.roofline(
+            0,
+            token_bytes * total_seq_len,
+            name="kv_cache_fetch",
+        ) + self.O
+        kv_cache_store_time = self.roofline(
+            0,
+            token_bytes,
+            name="kv_cache_store",
+        ) + self.O
+
+        output_seq_len = 1
 
         output_proj_shape = (
             batch_size,
@@ -1946,8 +1975,24 @@ class LLMExecutionDispatcher:
         linear_softmax_f = self.get_linear_softmax_f(linear_shape)
         if "linear" in gemm_results:
             gemm_results["linear"]["forward"] = linear_softmax_f
+        gemm_results["kv_cache_fetch"] = {
+            "forward": kv_cache_fetch_time,
+            "backward": 0.0,
+            "forward_gemm": kv_cache_fetch_time,
+            "forward_reduction": 0.0,
+            "backward_gemm": 0.0,
+            "backward_reduction": 0.0,
+        }
+        gemm_results["kv_cache_store"] = {
+            "forward": kv_cache_store_time,
+            "backward": 0.0,
+            "forward_gemm": kv_cache_store_time,
+            "forward_reduction": 0.0,
+            "backward_gemm": 0.0,
+            "backward_reduction": 0.0,
+        }
 
-        layer_time = (
+        core_time = (
             gemm_results["qkv_proj"]["forward"]
             + gemm_results["attention_score"]["forward"]
             + attention_scale_softmax_f
@@ -1960,6 +2005,8 @@ class LLMExecutionDispatcher:
             + residual2_f
             + layernorm2_f
         )
+
+        layer_time = core_time
 
         total_transformer_time = layer_time * self.num_layers
 

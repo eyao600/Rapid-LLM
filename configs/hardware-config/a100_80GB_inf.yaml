@@ -168,10 +168,10 @@ scheduling_param:
 
 
 execution_backend:
-  model: astra # analytical | astra
+  model: analytical # analytical | astra
   astra:
     backend: astra
-    mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree
       # Note: if topology is 'switch' and value is 'auto', we default to 'halvingDoubling'.
@@ -186,3 +186,4 @@ execution_backend:
 inference:
   kvcache_precision: 2  # bytes per element
   kvcache_type: "hbm_only"
+  kvcache_fetch_overlap: false
