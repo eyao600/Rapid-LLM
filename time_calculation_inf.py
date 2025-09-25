@@ -1,17 +1,16 @@
 """LLM inference prefill time-calculation entry points."""
 
-from __future__ import annotations
 import os
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM
-from simulate_inf import InferenceConfig, InferenceEngine
+from simulate_inf import DecodeSample, InferenceConfig, InferenceEngine
 import LLM_util
 
 
 class TimeCalculationLLMInference(TimeCalculationLLM):
     """Inference-specialized facade for ``TimeCalculationLLM``."""
 
-    def __init__(self, hw_config, model_config, mode, output_dir: str | None = None):
+    def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
         super().__init__(hw_config, model_config, mode, output_dir)
         self._raw_model_config = model_config
         if getattr(self.model, "run_type", "") == "inference" and self.mb != 1:
@@ -267,7 +266,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         return total_time
 
-    def calc_decode_time(self) -> float:
+    def calc_decode_time(self) -> Tuple[float, List[DecodeSample]]:
         """
         Calculate autoregressive decode phase execution time.
 
@@ -284,7 +283,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len = self.model.decode_len
         if decode_len == 0:
             print("Skipping decode")
-            return 0.0
+            return 0.0, []
 
         # Create inference configuration from model parameters
         inference_config = InferenceConfig(
@@ -316,7 +315,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         # Build decode phase using sample-based approach with real DeepFlow integration
         decode_time, decode_samples = inference_engine._build_decode_graph()
-        return decode_time
+        return decode_time, decode_samples
 
     def calc_total_inference_time(self) -> dict:
         """
@@ -329,7 +328,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         prefill_time = self.calc_time()
 
         # Calculate decode time (new functionality)
-        decode_time = self.calc_decode_time()
+        decode_time, decode_samples = self.calc_decode_time()
         total_time = prefill_time + decode_time
 
         head_dim = self.hidden_dim // self.num_heads
@@ -352,6 +351,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         def _to_gib(byte_val: int) -> float:
             return byte_val / (1024 ** 3)
 
+        if decode_samples:
+            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time)
+        else:
+            decode_rates = None
+
         print(
             f"[prefill] time: {prefill_time:.6f}s, "
             f"[decode] time: {decode_time:.6f}s, "
@@ -371,6 +375,56 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             "kv_cache_prefill_store_bytes": prefill_store_bytes,
             "kv_cache_decode_store_bytes": decode_store_bytes,
             "kv_cache_decode_fetch_bytes": decode_fetch_bytes,
+            "decode_tokens_per_s": decode_rates,
+        }
+
+    @staticmethod
+    def _decode_token_rates(
+        samples: List[DecodeSample],
+        decode_len: int,
+        total_decode_time: float,
+    ) -> Dict[str, float]:
+        if decode_len <= 0:
+            return {}
+
+        def token_time_at(step: int) -> float:
+            if not samples:
+                return 0.0
+            if step <= samples[0].step_id:
+                return samples[0].execution_time
+            for idx in range(1, len(samples)):
+                prev = samples[idx - 1]
+                curr = samples[idx]
+                if step <= curr.step_id:
+                    gap = curr.step_id - prev.step_id
+                    if gap <= 0:
+                        return curr.execution_time
+                    ratio = (step - prev.step_id) / gap
+                    return prev.execution_time + ratio * (curr.execution_time - prev.execution_time)
+            return samples[-1].execution_time
+
+        def safe_rate(token_time: float) -> float:
+            if token_time <= 0.0:
+                return 0.0
+            return 1.0 / token_time
+
+        last_step = max(decode_len - 1, 0)
+        mid_step = decode_len // 2
+
+        start_rate = safe_rate(token_time_at(0))
+        mid_rate = safe_rate(token_time_at(mid_step))
+        end_rate = safe_rate(token_time_at(last_step))
+
+        overall_rate = 0.0
+        if total_decode_time > 0.0:
+            overall_rate = decode_len / total_decode_time
+
+        return {
+            "start": start_rate,
+            "midpoint": mid_rate,
+            "end": end_rate,
+            "midpoint_step": mid_step,
+            "overall": overall_rate,
         }
 
 

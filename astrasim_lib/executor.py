@@ -216,7 +216,7 @@ def _visualize_et_files(et_paths: List[str]) -> None:
             print(f"[WARN] Failed to render Graphviz graph for {et_path}: {exc}")
 
     for et_path in et_paths:
-        message = f" | Saved ET graph visualization to {et_path}.png"
+        message = f" | ET Graph saved to {et_path}.png"
         graphviz_async.submit(
             f"et:{os.path.basename(et_path)}",
             _render_et_file,

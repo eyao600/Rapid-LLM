@@ -4,7 +4,10 @@ model_param:
     batch_size: 2048  # Batch size
     seq_len: 16384
     hidden_dim: 8192
-    num_heads: 64
+    attention:
+        attention_type: "mha"  # one of "mha","gqa","mla"
+        num_heads: 64
+        # kv_heads: 8  # set only when attention_type is "gqa"
     ffn_dim: 32768 # First FFN layer output dimension, typically 4 * D used when ffn_mult is NULL.
     ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
     vocab_size: 800000  # Vocabulary size

@@ -307,7 +307,7 @@ class InferenceEngine:
         hw_config=None,
         model_config=None,
         *,
-        time_calc_cls: Callable[..., Any] | None = None,
+        time_calc_cls: Optional[Callable[..., Any]] = None,
     ):
         self.config = config
         self.hw_config = hw_config

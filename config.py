@@ -3,6 +3,7 @@ import ruamel as _ruamel
 import ruamel.yaml as _yaml
 import math
 from collections import namedtuple as _namedtuple
+from typing import Optional
 
 
 @dataclass
@@ -388,24 +389,32 @@ GEMMConfig = _namedtuple(
         "backward",
     ],
 )
-LLMConfig = _namedtuple(
-    "model_param",
-    [
-        "mode",
-        "run_type",
-        "num_layers",
-        "hidden_dim",
-        "num_heads",
-        "batch_size",
-        "seq_len",
-        "decode_len",
-        "ffn_dim",
-        "ffn_mult",
-        "vocab_size",
-        "n_tokens",
-        "all_reduce",
-    ],
-)
+@dataclass
+class LLMAttentionConfig:
+    attention_type: str
+    num_heads: int
+    kv_heads: Optional[int] = None
+
+
+@dataclass
+class LLMConfig:
+    mode: str
+    run_type: str
+    num_layers: int
+    hidden_dim: int
+    batch_size: int
+    seq_len: int
+    decode_len: Optional[int]
+    ffn_dim: Optional[int]
+    ffn_mult: Optional[float]
+    vocab_size: int
+    n_tokens: int
+    all_reduce: str
+    attention: LLMAttentionConfig
+
+    @property
+    def num_heads(self) -> int:
+        return self.attention.num_heads
 LLMInferenceConfig = _namedtuple(
     "inference_param",
     [
@@ -669,13 +678,50 @@ def parse_config(filename, config_type):
         config = MODELConfig(model_config=model_config, inference_config=None)
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
-        mp.setdefault("run_type", "training")
-        mp.setdefault("decode_len", None)
+        attention_dict = mp.pop("attention", None)
+
+        if attention_dict is None:
+            legacy_heads = mp.pop("num_heads", None)
+            if legacy_heads is None:
+                raise ValueError(
+                    "model_param.attention section missing and no legacy num_heads provided"
+                )
+            attention_cfg = LLMAttentionConfig(
+                attention_type="mha",
+                num_heads=int(legacy_heads),
+            )
+        else:
+            attn_type = str(attention_dict.get("attention_type", "mha")).lower()
+            if "num_heads" not in attention_dict:
+                raise ValueError("model_param.attention.num_heads must be specified")
+            kv_heads_raw = attention_dict.get("kv_heads") if attn_type == "gqa" else None
+            attention_cfg = LLMAttentionConfig(
+                attention_type=attn_type,
+                num_heads=int(attention_dict["num_heads"]),
+                kv_heads=int(kv_heads_raw) if kv_heads_raw is not None else None,
+            )
+
+        run_type = mp.pop("run_type", "training")
+        decode_len = mp.pop("decode_len", None)
         inference_dict = dict(config_dict.get("inference_param", {}) or {})
         inference_config = LLMInferenceConfig(
             sample_every=inference_dict["sample_every"],
         )
-        model_config = LLMConfig(**mp)
+        model_config = LLMConfig(
+            mode=mp.pop("mode"),
+            run_type=run_type,
+            num_layers=mp.pop("num_layers"),
+            hidden_dim=mp.pop("hidden_dim"),
+            batch_size=mp.pop("batch_size"),
+            seq_len=mp.pop("seq_len"),
+            decode_len=decode_len,
+            ffn_dim=mp.pop("ffn_dim", None),
+            ffn_mult=mp.pop("ffn_mult", None),
+            vocab_size=mp.pop("vocab_size"),
+            n_tokens=mp.pop("n_tokens"),
+            all_reduce=mp.pop("all_reduce"),
+            attention=attention_cfg,
+        )
         config = MODELConfig(model_config=model_config, inference_config=inference_config)
     else:
         raise ValueError("Invalid config type: {}".format(config_type))

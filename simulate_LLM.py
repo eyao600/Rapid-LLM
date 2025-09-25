@@ -772,7 +772,7 @@ class Graph:
     def save_graph(self, roots, output_folder = "output_graph/", filename="graph"):
         os.makedirs(output_folder, exist_ok=True)
 
-        printstr = " | Graph saved to %s%s.png" % (output_folder, filename)
+        printstr = " | Graph saved to    %s%s.png" % (output_folder, filename)
         def _render_graph() -> None:
             dot_fw = visualize_graph(roots, filename=output_folder + filename)
             dot_fw.render(output_folder + filename, format="png", cleanup=True)

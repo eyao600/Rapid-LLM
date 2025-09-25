@@ -237,7 +237,6 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
     output_file = os.path.join(exp_dir, "summary_LLM.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
     total_time = tc_llm.calc_time_llm()
-    graphviz_async.wait_for_all()
 
     with open(output_file, "a+") as f:
         f.write("\n\n==============================================\n")
@@ -255,7 +254,7 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     # Get total inference time (prefill + decode)
     inference_timing = tc_inf.calc_total_inference_time()
     total_time = inference_timing["total_inference_time"]
-    graphviz_async.wait_for_all()
+    decode_rates = inference_timing.get("decode_tokens_per_s") or {}
 
     output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
     os.makedirs(exp_dir, exist_ok=True)
@@ -273,6 +272,19 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
             total_time, tc_inf.execution_mode.value
         )
     )
+    if decode_rates:
+        start_rate = decode_rates.get("start", 0.0)
+        mid_rate = decode_rates.get("midpoint", 0.0)
+        end_rate = decode_rates.get("end", 0.0)
+        mid_step = int(decode_rates.get("midpoint_step", 0.0))
+        print(
+            "Decode throughput tok/s: start={:.2f}, mid(step {})={:.2f}, end={:.2f}".format(
+                start_rate,
+                mid_step,
+                mid_rate,
+                end_rate,
+            )
+        )
 
 if __name__ == "__main__":
     args = parse_arguments()

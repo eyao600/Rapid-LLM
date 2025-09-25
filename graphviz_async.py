@@ -67,7 +67,6 @@ class _GraphVizAsyncManager:
 
         completed: List[str] = []
 
-        print("[Debug] Generating graph visualizations...")
 
         for description, future, message in tasks:
             try:
