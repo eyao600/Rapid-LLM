@@ -159,7 +159,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
         decode_len = self.model.decode_len
-        prefill_len = max(self.seq_len - decode_len, 0)
+        prefill_len = self.seq_len - decode_len
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
@@ -167,6 +167,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         if prefill_len == 0:
             print("Skipping prefill")
             return 0.0
+        elif prefill_len < 0:
+            raise ValueError(f"Prefill length is negative. Prefill len = seq_len ({self.seq_len}) - decode_len ({decode_len})")
 
         self.readjust_type()
 
@@ -338,9 +340,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             head_dim=head_dim,
             precision_bytes=self.kv_cache_precision,
         )
-        prefill_len = max(self.seq_len - self.model.decode_len, 0)
+        prefill_len = self.seq_len - self.model.decode_len
         decode_len = self.model.decode_len
         num_layers = self.num_layers
+
+        if prefill_len < 0:
+            raise ValueError(f"Prefill length is negative. Prefill len = seq_len ({self.seq_len}) - decode_len ({decode_len})")
 
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers
@@ -352,7 +357,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             return byte_val / (1024 ** 3)
 
         if decode_samples:
-            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time)
+            decode_rates = self._decode_token_rates(decode_samples, decode_len, decode_time, self._effective_transformer_batch())
         else:
             decode_rates = None
 
@@ -383,6 +388,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         samples: List[DecodeSample],
         decode_len: int,
         total_decode_time: float,
+        batch_size: int,
     ) -> Dict[str, float]:
         if decode_len <= 0:
             return {}
@@ -406,7 +412,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         def safe_rate(token_time: float) -> float:
             if token_time <= 0.0:
                 return 0.0
-            return 1.0 / token_time
+            return (1.0 / token_time) * batch_size
 
         last_step = max(decode_len - 1, 0)
         mid_step = decode_len // 2

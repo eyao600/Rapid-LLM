@@ -16,7 +16,7 @@ tech_param:
     FMA_d1: 8
     FMA_d2: 4
     dataflow: best
-    util: 0.75
+    util: 1.0
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB
@@ -186,4 +186,4 @@ execution_backend:
 inference:
   kvcache_precision: 2  # bytes per element
   kvcache_type: "hbm_only"
-  kvcache_fetch_overlap: true
+  kvcache_fetch_overlap: false

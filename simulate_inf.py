@@ -66,7 +66,6 @@ class DecodeGraph(Graph):
         self.hw_config = hw_config
         self.model_config = model_config
         self.time_calc_cls = time_calc_cls
-        self.overlap_fetch = config.kv_cache_fetch_overlap
         self._decode_sample_root: Optional[str] = None
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
