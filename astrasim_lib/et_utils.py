@@ -86,7 +86,7 @@ def new_recv_node(node_id: int, name: str, size_bytes: int, src_rank: int, tag: 
     return node
 
 
-def new_comp_node(node_id: int, name: str, duration_micros: int) -> pb.Node:
+def new_comp_node(node_id: int, name: str, duration_micros: float) -> pb.Node:
     """Return a compute placeholder node lasting ``duration_micros`` microseconds."""
 
     node = pb.Node()

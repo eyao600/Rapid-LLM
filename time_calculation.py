@@ -90,13 +90,10 @@ class NetworkModel:
                 debug_label=debug_label,
             )
 
+        # TODO TODO TODO
+        # We want to ignore this in the future. Skipping it directly so that we match astrasim for now.
+        # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
         local_time = 0.0
-        if local_ops or local_bytes:
-            local_time = self._roofline(
-                local_ops,
-                local_bytes_int,
-                name=f"{debug_label}-local",
-            )
 
         overhead_kinds = {"all_reduce", "reduce_scatter", "all_gather"}
         overhead = self.O if (network_bytes and kind in overhead_kinds) else 0.0
@@ -304,23 +301,21 @@ class TimeCalculation:
         self.updateParParams(self.t, self.kp1, self.kp2)
         # # Define miniBatch size
         # self.miniB = math.ceil(self.B / self.dp)
-        if self.num_workers % (self.kp_hidden_dim1 * self.kp_hidden_dim2) != 0:
-            raise ValueError("num_workers must be divisible by (kp_hidden_dim1 * kp_hidden_dim2)")
+        
+        # Validate that total number of workers equals the product of all parallelism dimensions
+        expected_workers = self.dp * self.lp * self.kp_hidden_dim1 * self.kp_hidden_dim2
+        if self.num_workers != expected_workers:
+            raise ValueError(
+                f"Total number of workers (num_devices_per_node * num_nodes = {self.num_workers}) must equal "
+                f"dp * lp * kp_hidden_dim1 * kp_hidden_dim2 = "
+                f"{self.dp} * {self.lp} * {self.kp_hidden_dim1} * {self.kp_hidden_dim2} = {expected_workers}"
+            )
+        
+        # Calculate worker distribution across parallelism dimensions
         num_workers = self.num_workers/(self.kp_hidden_dim1*self.kp_hidden_dim2)
-        # print(f'num_workers after kp_hidden_dim1 and kp_hidden_dim2: {num_workers}')
-
-        if num_workers % self.dp != 0:
-            raise ValueError("num_workers must be divisible by dp")
         self.num_workers_dp = num_workers / self.dp # number of workers for each data parallelism batch
-        # print(f'num_workers_dp after dividing by dp: {self.num_workers_dp}')
-
-        if self.num_workers_dp % self.lp != 0:
-            raise ValueError("num_workers_dp must be divisible by lp")
         self.num_workers_lp = self.num_workers_dp / self.lp if self.lp > 1 else self.num_workers_dp #number of workers per pipeline stage
-        # print(f'num_workers_lp after dividing by lp: {self.num_workers_lp}')
-        # print(f'lp: {self.lp}')
-        if self.num_workers_lp != 1:
-            raise ValueError("num_workers_lp must be equal to 1")
+
         
         
         #check parallelism parameters
@@ -396,8 +391,6 @@ class TimeCalculation:
             else:
                 self.ffn_dim = self.model.ffn_dim
             self.n_tokens = self.model.n_tokens
-            self.communication_time = self.model.communication_time
-            self.N_PP = self.model.N_PP
             if self.batch_size % self.dp != 0:
                 raise ValueError("Batch size must be divisible by data parallelism degree")
             self.miniB = math.ceil(self.batch_size / self.dp) # mini-batch size for each data parallel node
@@ -1551,11 +1544,13 @@ class TimeCalculation:
     # - Confirm the intended collective is REDUCE-SCATTER (partial=True, allReduce=True).
     #   * Use RS if downstream consumers expect a sharded C[m, n] along kp1.
     #   * If the next op needs full C immediately, switch to ALL-REDUCE (partial=False, allReduce=True).
-    def getDistGEMM_f_kp1(self, m, k, n, dim1, name):
+    def getDistGEMM_f_kp1(self, m, k, n, dim1, name, batch = 1):
         gemm_time = self.getGEMMTime(m, k // dim1, n, name)[0]
-
+        gemm_time *= batch
         # Sum-Reduce within each row for use in the next time step
         total_bytes = math.ceil(self.precision * m * n)
+        total_bytes *= batch
+        
         reduction_time = self.network_model.collective(
             kind="reduce_scatter",
             size_bytes=total_bytes,
@@ -1566,13 +1561,15 @@ class TimeCalculation:
             local_ops=0.0,
             debug_label=name or "comm",
         )
+
         return gemm_time, reduction_time
 
-    def getDistGEMM_b_kp1(self, m, k, n, dim1, name):
+    def getDistGEMM_b_kp1(self, m, k, n, dim1, name, batch = 1):
         # calculate grad wrt. act (A'. W^T)
         # gather whole(A') before MM
         # A' is distibuted as columns across different nodes
         total_bytes = math.ceil(self.precision * m * n)
+        total_bytes *= batch
         size_bytes = math.ceil(total_bytes / dim1)
         reduction_time = self.network_model.collective(
             kind="all_gather",
@@ -1586,12 +1583,15 @@ class TimeCalculation:
         grad_wt_time, _, _, _ = self.getGEMMTime(k, (m // dim1), n, name + "wt")
         grad_act_time, _, _, _ = self.getGEMMTime(m, (n // dim1), k, name + "act")
         gemm_time = grad_wt_time + grad_act_time
+        gemm_time *= batch
         return gemm_time, reduction_time
 
     # all-reduce across M // kp1 GPUs
-    def getDistGEMM_f_kp2(self, m, k, n, dim1, dim2, name):
+    def getDistGEMM_f_kp2(self, m, k, n, dim1, dim2, name, batch = 1):
         gemm_time = self.getGEMMTime(m // dim1, k, n // dim2, name)[0]
+        gemm_time *= batch
         total_bytes = math.ceil(self.precision * (m // dim1) * n)
+        total_bytes *= batch
         size_bytes = math.ceil(total_bytes / dim2)
         reduction_time = self.network_model.collective(
             kind="all_gather",
@@ -1615,11 +1615,12 @@ class TimeCalculation:
     # TODO TODO TODO: We have removed the heuristic /2 scaling for ANALYTICAL *AND* ASTRA mode. This will change results.
     # BEFORE MERGE: CAREFULLY CONSIDER AND ADDRESS THIS.
     # IF YOU SEE THIS MESSAGE IN MAINLINE DEEPFLOW PLEASE LET ME KNOW. -GK
-    def getDistGEMM_b_kp2(self, m, k, n, dim1, dim2, name):
+    def getDistGEMM_b_kp2(self, m, k, n, dim1, dim2, name, batch = 1):
         ######################################################################################
         # calculate grad wrt. weights (A^T. grad(A'))
         # gather row(A^T)
         total_bytes = math.ceil(self.precision * k * m)
+        total_bytes *= batch
         size_bytes = math.ceil(total_bytes / dim1)
         reduction_time_wt1 = self.network_model.collective(
             kind="all_gather",
@@ -1633,6 +1634,7 @@ class TimeCalculation:
         # To calculate grad wrt weights (A^T, grad(A')),
         # gather column grad(A')
         total_bytes = math.ceil(self.precision * m * (n / dim2))
+        total_bytes *= batch
         size_bytes = math.ceil(total_bytes / dim1)
         reduction_time_wt2 = self.network_model.collective(
             kind="all_gather",
@@ -1648,6 +1650,7 @@ class TimeCalculation:
         # calculate grad wrt. act (grad(A'). w^T)
         # gather row grad(A')
         total_bytes = math.ceil(self.precision * (m / dim1) * n)
+        total_bytes *= batch
         size_bytes = math.ceil(total_bytes / dim2)
         reduction_time_act1 = self.network_model.collective(
             kind="all_gather",
@@ -1661,6 +1664,7 @@ class TimeCalculation:
         # calculate grad wrt. act (grad(A'). w^T)
         # gather col(w^T)
         total_bytes = math.ceil(self.precision * k * n)
+        total_bytes *= batch
         size_bytes = math.ceil(total_bytes / dim2)
         reduction_time_act2 = self.network_model.collective(
             kind="all_gather",
@@ -1683,9 +1687,9 @@ class TimeCalculation:
         grad_wt_time, _, _, _ = self.getGEMMTime(k / dim1, m, n / dim2, name + "wt")
         # Multiply full grad-activation with shards of activations
         grad_act_time, _, _, _ = self.getGEMMTime(m / dim1, n, k / dim2, name + "act")
-
+    
         GEMM_time = grad_wt_time + grad_act_time
-
+        GEMM_time *= batch
         return GEMM_time, reduction_time
 
 

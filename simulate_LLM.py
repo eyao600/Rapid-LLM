@@ -4,10 +4,12 @@ import sys
 from typing import Any, Dict
 from graphviz import Digraph
 import os
+
+import graphviz_async
 debug = False
 
 class Node:
-    def __init__(self, name, op_id, hw_id, duration, fwd=True):
+    def __init__(self, name, op_id, hw_id, duration, fwd=True, *, is_kv_cache=False):
         self.name = name
         self.op_id = op_id
         self.hw_id = hw_id
@@ -19,6 +21,7 @@ class Node:
         self.memory = 0  # memory usage
         self.fwd = fwd  # forward or backward
         self.scheduled = False
+        self.is_kv_cache = is_kv_cache
 
     def add_child(self, obj):
         self.children.append(obj)
@@ -138,6 +141,7 @@ class Graph:
         comm_data = self.comm_metadata[comm_key]
 
         # Create communication edge with metadata
+        # print(f"Creating edge with name: {name}, size: {comm_data['size']}, type: {comm_data['type']}")
         comm_edge = Edge(
             name=name,
             op_id=op_id,
@@ -152,15 +156,10 @@ class Graph:
         # If there's local computation time, create local node after edge
         local_comp_time = comm_data.get('local_comp_time', 0)
         if local_comp_time > 0:
-            if local_hw_id is None:
-                raise ValueError(f"Local compute time requires a hardware id for edge '{name}'")
-            local_node = Node(
-                name=f"{name}_local_comp",
-                op_id=op_id + 100000,  # Offset to avoid ID conflicts
-                hw_id=local_hw_id,
-                duration=local_comp_time
-            )
-            comm_edge.add_child(local_node)
+            # TODO TODO TODO
+            # We want to ignore this in the future. Skipping it directly so that we match astrasim for now.
+            # FIX THIS (FIGURE OUT IF WE WANT TO SKIP OR NOT)
+            local_comp_time = 0
 
         return comm_edge
 
@@ -207,11 +206,14 @@ class Graph:
         traverse_and_convert(roots)
         return roots
 
-    def construct_fwd_bwd_graph(self):
+    def construct_fwd_bwd_graph(self, include_backward: bool = True):
         embedding_node = []
         data_batch_node = []
         softmax_node = []
-        transformer_nodes = [[] for _ in range(self.num_batch)]  # 
+        transformer_nodes = [[] for _ in range(self.num_batch)]  # transformer compute nodes per layer
+        layer_entry_nodes = [[] for _ in range(self.num_batch)]  # lists of entry nodes per layer
+        layer_exit_nodes = [[] for _ in range(self.num_batch)]   # transformer nodes per layer
+        fetch_nodes = [[] for _ in range(self.num_batch)]        # kv-fetch nodes per layer
 
         embedding_b_time = self._time("embedding_b")
         linear_softmax_b_time = self._time("linear_softmax_b")
@@ -223,19 +225,20 @@ class Graph:
         embedding_f_time = self._time("embedding_f")
         embedding_b_time = self._time("embedding_b")
         cross_layer_time = self._time("cross_layer_f")
+        kv_cache_fetch_time = self._time("kv_cache_fetch")
+        kv_cache_store_time = self._time("kv_cache_store")
+        fetch_overlap_enabled = bool(self.misc_metadata.get("kv_cache_fetch_overlap", False))
 
 
-        embedding_node_b = [[] for _ in range(self.num_batch)]
-        softmax_node_b = [[] for _ in range(self.num_batch)]
-        # data_batch_node = [[] for _ in range(self.num_batch)]
+        if include_backward:
+            embedding_node_b = [[] for _ in range(self.num_batch)]
+            softmax_node_b = [[] for _ in range(self.num_batch)]
+            R_edge = [[] for _ in range(self.num_batch)]
+            G_edge = [[] for _ in range(self.num_batch)]
 
-        R_edge = [[] for _ in range(self.num_batch)]
-        G_edge = [[] for _ in range(self.num_batch)]
-        
-        #######
-        transformer_nodes_b = [[] for _ in range(self.num_batch)]  # 
-        for b in range(self.num_batch):
-            transformer_nodes_b[b] = [[] for _ in range(self.num_layer)]
+            transformer_nodes_b = [[] for _ in range(self.num_batch)]  #
+            for b in range(self.num_batch):
+                transformer_nodes_b[b] = [[] for _ in range(self.num_layer)]
 
         op_id = 0  # operation ID, used to distinguish nodes and edges
         batch_id = 0  # batch ID, used to distinguish data batches
@@ -257,9 +260,12 @@ class Graph:
             embedding_node.append(emb)
             data_batch_node[b].add_child(embedding_node[b])
 
-            for l in range(self.num_layer):
-                transformer_nodes[b].append([])
+            transformer_nodes[b] = []
+            layer_entry_nodes[b] = []
+            layer_exit_nodes[b] = []
+            fetch_nodes[b] = []
 
+            for l in range(self.num_layer):
                 hw_id = min(l // self.layer_per_device , self.lp - 1)#assign hw_id for transformer
                 transformer_node = Node("transformer", op_id, hw_id, transformer_f_time)
                 transformer_node.micro_batch_index = b
@@ -268,12 +274,59 @@ class Graph:
                 transformer_node.stage_id = hw_id
                 op_id += 1
 
-                transformer_nodes[b][l]=transformer_node
+                fetch_node = None
+                if kv_cache_fetch_time > 0:
+                    fetch_node = Node(
+                        f"kv_cache_fetch_b{b}_l{l}",
+                        op_id,
+                        hw_id,
+                        kv_cache_fetch_time,
+                        fwd=True,
+                        is_kv_cache=True,
+                    )
+                    fetch_node.micro_batch_index = b
+                    fetch_node.layer_index = l
+                    fetch_node.direction = "forward"
+                    fetch_node.stage_id = hw_id
+                    op_id += 1
+
+                store_node = None
+                if kv_cache_store_time > 0:
+                    store_node = Node(
+                        f"kv_cache_store_b{b}_l{l}",
+                        op_id,
+                        hw_id,
+                        kv_cache_store_time,
+                        fwd=True,
+                        is_kv_cache=True,
+                    )
+                    store_node.micro_batch_index = b
+                    store_node.layer_index = l
+                    store_node.direction = "forward"
+                    store_node.stage_id = hw_id
+                    op_id += 1
+                    transformer_node.add_child(store_node)
+
+                if fetch_overlap_enabled and fetch_node is not None:
+                    entry_nodes = [fetch_node, transformer_node]
+                elif fetch_node is not None:
+                    fetch_node.add_child(transformer_node)
+                    entry_nodes = [fetch_node]
+                else:
+                    entry_nodes = [transformer_node]
+
+                transformer_nodes[b].append(transformer_node)
+                layer_entry_nodes[b].append(entry_nodes)
+                layer_exit_nodes[b].append(transformer_node)
+                fetch_nodes[b].append(fetch_node)
 
             for l in range(1, self.num_layer):
 
-                prev_node = transformer_nodes[b][l-1]        # previous layer
-                curr_node  = transformer_nodes[b][l]            # current layer
+                prev_node = transformer_nodes[b][l-1]        # previous layer compute node
+                curr_node  = transformer_nodes[b][l]            # current layer compute node
+                prev_exit = layer_exit_nodes[b][l-1]
+                curr_entries = layer_entry_nodes[b][l]
+                prev_fetch = fetch_nodes[b][l-1]
 
 
                 if prev_node.hw_id == curr_node.hw_id:
@@ -282,27 +335,36 @@ class Graph:
                     edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')  # on different GPU
                 op_id += 1
 
-                prev_node.add_child(edge); edge.add_child(curr_node)#connect previous layer and current layer
+                prev_exit.add_child(edge)
+                for entry in curr_entries:
+                    edge.add_child(entry)
+                if fetch_overlap_enabled and prev_fetch is not None:
+                    prev_fetch.add_child(edge)
 
-            first_node = transformer_nodes[b][0]   # first layer
-            if first_node.hw_id == embedding_node[b].hw_id:
+            first_entries = layer_entry_nodes[b][0]   # first layer entry nodes list
+            primary_entry = first_entries[0]
+            if primary_entry.hw_id == embedding_node[b].hw_id:
                 edge = Edge("Emb_node0", op_id, 0, comm_type="pipeline")
             else:
                 edge = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
             op_id += 1
             embedding_node[b].add_child(edge) #connect embedding node and first transformer layer
-            edge.add_child(first_node)
+            for entry in first_entries:
+                edge.add_child(entry)
 
 
-            last_node = transformer_nodes[b][-1]  # last layer
-            if last_node.hw_id == softmax_node[b].hw_id:
+            last_exit = layer_exit_nodes[b][-1]  # last layer transformer node
+            if last_exit.hw_id == softmax_node[b].hw_id:
                 node_Softmax = Edge("node_Softmax", op_id, 0, comm_type="pipeline")  # same GPU
             else:
                 node_Softmax = self.create_comm_edge('cross_layer', op_id, 'cross_layer')
             op_id += 1
-            last_node.add_child(node_Softmax) #connect last layer and softmax layer
+            last_exit.add_child(node_Softmax) #connect last layer and softmax layer
             node_Softmax.add_child(softmax_node[b])
-        
+            last_fetch = fetch_nodes[b][-1]
+            if fetch_overlap_enabled and last_fetch is not None:
+                last_fetch.add_child(node_Softmax)
+
             #add dependency edges
         for b in range(self.num_batch - 1):
             gpu_index = 0
@@ -316,14 +378,22 @@ class Graph:
                     first_transformer_layer.append(l+1) # record first layer on each GPU
                     gpu_index += 1
                     if transformer_nodes[b][l].hw_id == 0: #if first pipeline stage
-                        transformer_nodes[b][l].add_child(embedding_node[b+1]) #add dependency edge between embedding of next batch and last transformer in stage 0
+                        layer_exit_nodes[b][l].add_child(embedding_node[b+1]) # dependency: finish stage before next batch embedding starts
                     else:
-                        transformer_nodes[b][l].add_child(transformer_nodes[b+1][first_transformer_layer[gpu_index-1]]) #add dependency edge between last transformer of current batch and first transformer of next batch
+                        next_entries = layer_entry_nodes[b+1][first_transformer_layer[gpu_index-1]]
+                        for entry in next_entries:
+                            layer_exit_nodes[b][l].add_child(entry)
+                        # fetch nodes already connected to cross-layer edges above when overlap is enabled
 
-            softmax_node[b].add_child(transformer_nodes[b+1][first_transformer_layer[-1]]) #add dependency edge between softmax of current batch and transformer node of next batch
+            next_entries = layer_entry_nodes[b+1][first_transformer_layer[-1]]
+            for entry in next_entries:
+                softmax_node[b].add_child(entry)
 
         for db_node in data_batch_node:
             db_node.remove_self_from_children()
+
+        if not include_backward:
+            return embedding_node[0]
 
         for b in reversed(range(self.num_batch)): #connect each data batch node with corresponding nodes
             emb_b = Node("embedding_b", op_id, 0, embedding_b_time, fwd=False)      # hw_id = 0
@@ -498,8 +568,14 @@ class Graph:
                     op_id += 1
                     previous.add_child(node)
                     previous = node
+                    comm_key = forward_cfg.get("comm_keys",None)
+                    if comm_key:
+                        if len(comm_key) > 1:
+                            print(f"*CONSTRUCT INFO: Multiple comm keys for {entry_name}")
+                            print(f"*CONSTRUCT INFO: Comm keys: {comm_key}")
+                            raise ValueError(f"Multiple comm keys for {entry_name}")
 
-                    for comm_idx, comm_key in enumerate(forward_cfg.get("comm_keys", [])):
+                        comm_key = comm_key[0]
                         if comm_key not in self.comm_metadata:
                             raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
                         comm_type = self.comm_metadata[comm_key]['type']
@@ -607,7 +683,8 @@ class Graph:
                         print("child {}  ready at time {} ".format(child.name, time))
 
             if isinstance(event, Node):
-                GPU_list[event.hw_id] = True
+                if not getattr(event, "is_kv_cache", False):
+                    GPU_list[event.hw_id] = True
             
             # if isinstance(event, Data_batch):
                 
@@ -630,18 +707,26 @@ class Graph:
                     ready_list.remove(event)
 
                 elif isinstance(event, Node): 
-                    # print("Node event")
-                    # print("Node event hw id ", event.hw_id, "name ", event.name)
-                    if GPU_list[event.hw_id] == True:
+                    if getattr(event, "is_kv_cache", False):
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
                         event.scheduled = True
                         enqueued = True
                         if debug:
-                            print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                            print("{}.{} (kv_cache) enqueued at time {}".format(event.name, event.op_id, time))
                         counter = counter + 1
-                        GPU_list[event.hw_id] = False
                         ready_list.remove(event)
+                    else:
+                        if GPU_list[event.hw_id] == True:
+                            new_time = time + event.duration
+                            heappush(event_queue, (new_time, counter, event))
+                            event.scheduled = True
+                            enqueued = True
+                            if debug:
+                                print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                            counter = counter + 1
+                            GPU_list[event.hw_id] = False
+                            ready_list.remove(event)
                 elif isinstance(event, Edge): 
                     new_time = time + event.duration
                     heappush(event_queue, (new_time, counter, event))
@@ -687,12 +772,14 @@ class Graph:
     #     return time_fw , time_bw
 
     def save_graph(self, roots, output_folder = "output_graph/", filename="graph"):
-        dot_fw = visualize_graph(roots, filename=output_folder + filename)
-        dot_fw.render(output_folder + filename , format="png", cleanup=True)
-        # dot_bw = visualize_graph(roots, filename=output_folder + filename + "_bwd")
-        # dot_bw.render(output_folder + filename + "_bwd" , format="png", cleanup=True)
-        # print("Forward graph saved to %s%s.png" % (output_folder , filename))
-        print("graph saved to %s%s.png" % (output_folder , filename ))
+        os.makedirs(output_folder, exist_ok=True)
+
+        printstr = " | Graph saved to    %s%s.png" % (output_folder, filename)
+        def _render_graph() -> None:
+            dot_fw = visualize_graph(roots, filename=output_folder + filename)
+            dot_fw.render(output_folder + filename, format="png", cleanup=True)
+
+        graphviz_async.submit(f"{filename}.png", _render_graph, print_message=printstr)
 
 # dedeepyo : 27-May-25 : Print DFS traversal of the graph.
 def print_graph(root_nodes, visited=None):
@@ -738,9 +825,17 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
     if root in visited:
         return dot
     visited.add(root)
+    def _format_duration(value: float) -> str:
+        ms = value * 1e3
+        if abs(ms) > 1000:
+            return f"{value:.2f}s"
+        return f"{ms:.2f}ms"
+
     if isinstance(root, Node):
         root_type = "Node"
-        if root.fwd:
+        if getattr(root, "is_kv_cache", False):
+            color = "mediumorchid"
+        elif root.fwd:
             color = "lightblue"
         else:
             color = "lightcoral"
@@ -759,13 +854,19 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
 
     node_id = str(id(root))
     if isinstance(root, Data_batch):
-            label = f"{root.name}\n( batch_id={root.batch_id}, dur={root.duration})"
+            label = f"{root.name}\n( batch_id={root.batch_id}, dur={_format_duration(root.duration)})"
     elif isinstance(root, Node):
-            label = f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, dur={root.duration})"
+            label = (
+                f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, "
+                f"dur={_format_duration(root.duration)})"
+            )
     elif isinstance(root, Edge):
-            label = f"{root.name}\n(op_id={root.op_id}, dur={root.duration})"
+            label = f"{root.name}\n(op_id={root.op_id}, dur={_format_duration(root.duration)})"
     elif isinstance(root, Gradient):
-            label = f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, dur={root.duration})"
+            label = (
+                f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, "
+                f"dur={_format_duration(root.duration)})"
+            )
     # color = "lightblue" if isinstance(root, Node) else "gray" if isinstance(root, Data_batch) else "lightgreen"
 
     dot.node(node_id, label=label, style='filled', fillcolor=color, shape='box')
@@ -773,15 +874,32 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
     for child in root.children:
         child_id = str(id(child))
         if isinstance(child, Data_batch):
-            child_label = f"{child.name}\n( batch_id={child.batch_id}, dur={child.duration})"
+            child_label = f"{child.name}\n( batch_id={child.batch_id}, dur={_format_duration(child.duration)})"
         elif isinstance(child, Edge):
-            child_label = f"{child.name}\n(op_id={child.op_id}, dur={child.duration})"
+            child_label = f"{child.name}\n(op_id={child.op_id}, dur={_format_duration(child.duration)})"
         elif isinstance(child, Node):
-            child_label = f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, dur={child.duration})"
+            child_label = (
+                f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, "
+                f"dur={_format_duration(child.duration)})"
+            )
         elif isinstance(child, Gradient):
-            child_label = f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, dur={child.duration})"
+            child_label = (
+                f"{child.name}\n(op_id={child.op_id}, hw_id={child.hw_id}, "
+                f"dur={_format_duration(child.duration)})"
+            )
 
-        child_color = "lightblue" if isinstance(child, Node) and child.fwd else "lightcoral" if isinstance(child, Node) and not child.fwd else "yellow" if isinstance(child, Data_batch) else "green" if isinstance(child, Edge) and child.is_all_reduce else "white"
+        if isinstance(child, Node) and getattr(child, "is_kv_cache", False):
+            child_color = "mediumorchid"
+        elif isinstance(child, Node) and child.fwd:
+            child_color = "lightblue"
+        elif isinstance(child, Node) and not child.fwd:
+            child_color = "lightcoral"
+        elif isinstance(child, Data_batch):
+            child_color = "gray"
+        elif isinstance(child, Edge) and child.is_all_reduce:
+            child_color = "green"
+        else:
+            child_color = "white"
 
         dot.node(child_id, label=child_label, style='filled', fillcolor=child_color, shape='box')
         dot.edge(node_id, child_id)

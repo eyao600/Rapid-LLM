@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 sys.setrecursionlimit(10000)
 
+import graphviz_async
 from graphviz import Digraph
 
 from .config_generation import ASTRA_DEBUG, generate_astrasim_configs_from_hw
@@ -135,18 +136,18 @@ def _visualize_et_files(et_paths: List[str]) -> None:
     if not et_paths:
         return
 
-    for et_path in et_paths:
+    def _render_et_file(et_path: str) -> None:
         try:
             fh = chakra_open(et_path)
         except OSError as exc:
             print(f"[WARN] Failed to open {et_path} for visualization: {exc}")
-            continue
+            return
 
         meta = pb.GlobalMetadata()
         if not chakra_decode(fh, meta):
             print(f"[WARN] {et_path} does not contain GlobalMetadata; skipping graph output")
             fh.close()
-            continue
+            return
 
         nodes: List[pb.Node] = []
         while True:
@@ -211,9 +212,17 @@ def _visualize_et_files(et_paths: List[str]) -> None:
                 except FileNotFoundError:
                     # Some graphviz versions return path without creating file when empty graph
                     pass
-            print(f"[AstraSim] Saved ET graph visualization to {final_png}")
         except Exception as exc:
             print(f"[WARN] Failed to render Graphviz graph for {et_path}: {exc}")
+
+    for et_path in et_paths:
+        message = f" | ET Graph saved to {et_path}.png"
+        graphviz_async.submit(
+            f"et:{os.path.basename(et_path)}",
+            _render_et_file,
+            et_path,
+            print_message=message,
+        )
 
 
 
@@ -959,7 +968,9 @@ def run_astra_simulation_only_onepath(
 
         # For now, just convert forward graph (can extend to include backward later)
         print(f"[AstraSim] Converting graph...")
-        dp_count = dp_override if dp_override is not None else time_calc_obj.dp
+        user_dp = max(1, getattr(time_calc_obj, "dp", 1))
+        run_type = getattr(getattr(time_calc_obj, "model", None), "run_type", "")
+        dp_count = dp_override if dp_override is not None else user_dp
         fwd_et_prefix, rank_ids, fwd_manifest = convert_deepflow_graph_to_chakra_et(
             fwdbwd_root,
             dp_count,
@@ -991,20 +1002,10 @@ def run_astra_simulation_only_onepath(
                 _visualize_et_files(et_paths)
                 _dump_et_text(et_paths)
 
-        # Debug visualization (separate from persistence)
-        for rank in rank_ids:
-            if rank > 10:
-                break
-            if ASTRA_DEBUG:
-                et_path = os.path.join(work_dir, f"llm_graph.{rank}.et")
-                _visualize_et_files([et_path])
-                _dump_et_text([et_path])
-        # exit()
-
         # Generate AstraSim configuration files using actual hardware config
         print(f"[AstraSim] Generating configuration files...")
         astra_configs = generate_astrasim_configs_from_hw(time_calc_obj.hw_config, work_dir, rank_count)
-        comm_groups_dp = dp_count if dp_override is not None else getattr(time_calc_obj, "dp", 1)
+        comm_groups_dp = dp_count if dp_override is not None else user_dp
         comm_groups_path = _write_comm_groups_json(work_dir, comm_groups_dp, rank_ids)
 
         # Run AstraSim simulation on forward graph (cached via manifest)

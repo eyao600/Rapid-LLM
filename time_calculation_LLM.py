@@ -126,6 +126,7 @@ class PipelineGraphFlattener:
                     self._hw_id_for_rank(obj.hw_id, 0),
                     obj.duration,
                     fwd=obj.fwd,
+                    is_kv_cache=getattr(obj, "is_kv_cache", False),
                 )
             else:
                 cloned = simulate_LLM.Node(
@@ -134,6 +135,7 @@ class PipelineGraphFlattener:
                     obj.hw_id,
                     obj.duration,
                     fwd=obj.fwd,
+                    is_kv_cache=getattr(obj, "is_kv_cache", False),
                 )
 
             self._clone_cache[obj_id] = cloned
@@ -391,6 +393,7 @@ class PipelineGraphFlattener:
             "direction",
             "stage_id",
             "tp_rank",
+            "is_kv_cache",
         ):
             if hasattr(source, attr):
                 setattr(target, attr, getattr(source, attr))
@@ -446,6 +449,13 @@ class TimeCalculationLLM(TimeCalculation):
         self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
         self.execution_mode = execution_mode
+        inference_cfg = getattr(hw_config, "inference_config", None)
+        if inference_cfg and getattr(inference_cfg, "kvcache_precision", None) is not None:
+            self.kv_cache_precision = inference_cfg.kvcache_precision
+        else:
+            self.kv_cache_precision = self.precision
+        self.kv_cache_type = getattr(inference_cfg, "kvcache_type", "hbm_only") if inference_cfg else "hbm_only"
+        self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
         self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
@@ -507,18 +517,20 @@ class TimeCalculationLLM(TimeCalculation):
     def _distributed_gemm_forward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         if self.t is None or (self.kp1 == 1 and self.kp2 == 1):
-            gemm_time = self.getGEMMTime(m, k, n, name)[0]
+            gemm_time, _, _, mem_access = self.getGEMMTime(m, k, n, name)
+            # dram_access = mem_access[3]
+            # in GB:
+            # dram_access = dram_access / 1e9
+            # print(f"{name} gemm_time: {gemm_time}, mem_access: {dram_access} GB")
             reduction_time = 0.0
+            gemm_time *= batch # handled internally for CR and RC
         elif self.t == "CR":
-            gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name)
+            gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name, batch = batch)
         elif self.t == "RC":
-            gemm_time, reduction_time = self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name)
+            gemm_time, reduction_time = self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name, batch = batch)
         else:
             raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
 
-        if batch > 1:
-            gemm_time *= batch
-            reduction_time *= batch
         return gemm_time, reduction_time
 
     def _distributed_gemm_backward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
@@ -528,16 +540,13 @@ class TimeCalculationLLM(TimeCalculation):
             grad_wt_time, _, _, _ = self.getGEMMTime(k, m, n, f"{name}_wt")
             gemm_time = grad_act_time + grad_wt_time
             reduction_time = 0.0
+            gemm_time *= batch # handled internally for CR and RC
         elif self.t == "CR":
-            gemm_time, reduction_time = self.getDistGEMM_b_kp1(m, k, n, self.kp1, name)
+            gemm_time, reduction_time = self.getDistGEMM_b_kp1(m, k, n, self.kp1, name, batch = batch)
         elif self.t == "RC":
-            gemm_time, reduction_time = self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name)
+            gemm_time, reduction_time = self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name, batch = batch)
         else:
             raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
-
-        if batch > 1:
-            gemm_time *= batch
-            reduction_time *= batch
         return gemm_time, reduction_time
 
 
@@ -561,14 +570,16 @@ class TimeCalculationLLM(TimeCalculation):
         return embedding_time + embedding_transfer_time
 
     def get_linear_softmax_f(self, gemm):
-        """
-        Calculates the total computation time for a linear softmax operation using GEMM (General Matrix Multiply) and pointwise operations.
-        """
+        """Estimate time for final projection + softmax forward."""
         _, effective_m, k, n = self._effective_dims(gemm)
 
         gemm_time, reduction_time = self._distributed_gemm_forward(gemm, "linear_softmax_f")
-        point_flop = effective_m * (3 * n - 1)
-        point_mem = self.precision * effective_m * (7 * n)
+
+        # Softmax forward: subtract max, exponentiate, sum, normalize (≈5 ops/elt)
+        point_flop = effective_m * n * 5
+        # read logits, write normalized probs, read/write intermediate buffers
+        point_mem = self.precision * effective_m * n * 8
+
         point_time = (
             self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-f")
             + 4 * self.O
@@ -576,24 +587,25 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.debug:
             print(
-                "Linear Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Linear Softmax (f) point_flop: {:,}, point_mem: {:,}".format(
                     int(point_flop / 1e9), int(point_mem / 1e9)
                 )
             )
-            print("point_time: {:,}\n".format(point_time))
+            print("Linear Softmax (f) point_time: {:,}\n".format(point_time))
 
-        total = gemm_time + reduction_time + point_time
-        return total
+        return gemm_time + reduction_time + point_time
     def get_scale_softmax_f(self, gemm):
 
         _, effective_m, _, n = self._effective_dims(gemm)
-        scale_flop = effective_m * n
-        scale_mem = self.precision * scale_flop * 2
-        softmax_flop = effective_m * n * 3
-        softmax_mem = self.precision * effective_m * n * 7
+        scale_flop = effective_m * n  # multiply by 1/sqrt(d)
+        scale_mem = self.precision * effective_m * n * 3  # read, write, reuse
+
+        softmax_flop = effective_m * n * 5  # subtract max, exp, sum, div
+        softmax_mem = self.precision * effective_m * n * 8
+
         scale_time = (
             self.roofline(scale_flop, scale_mem, name="pointwise-scale-f")
-            + 1 * self.O
+            + self.O
         )
         softmax_time = (
             self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-f")
@@ -602,130 +614,132 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.debug:
             print(
-                "Scale Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Scale (f) flop: {:,}, mem: {:,}".format(
                     int(scale_flop / 1e9), int(scale_mem / 1e9)
                 )
             )
-            print("scale point_time: {:,}\n".format(scale_time))
-            print("softmax point_flop: {:,}, softmax point_mem: {:,}".format(
-                int(softmax_flop / 1e9), int(softmax_mem / 1e9)
-            ))
-            print("softmax point_time: {:,}\n".format(softmax_time))
+            print("Scale (f) time: {:,}".format(scale_time))
+            print(
+                "Softmax (f) flop: {:,}, mem: {:,}".format(
+                    int(softmax_flop / 1e9), int(softmax_mem / 1e9)
+                )
+            )
+            print("Softmax (f) time: {:,}\n".format(softmax_time))
 
         return scale_time + softmax_time
     def get_scale_softmax_b(self, gemm):
         _, effective_m, _, n = self._effective_dims(gemm)
         scale_flop = effective_m * n
-        scale_mem = self.precision * scale_flop * 2
-        softmax_flop = effective_m * n * 5
-        softmax_mem = self.precision * effective_m * n * 11
+        scale_mem = self.precision * effective_m * n * 3
+
+        # Backward softmax uses forward probabilities and gradient accumulation (≈6 ops/elt)
+        softmax_flop = effective_m * n * 6
+        softmax_mem = self.precision * effective_m * n * 10
+
         scale_time = (
-            self.roofline(scale_flop, scale_mem, name="pointwise-scale-f")
-            + 1 * self.O
+            self.roofline(scale_flop, scale_mem, name="pointwise-scale-b")
+            + self.O
         )
         softmax_time = (
-            self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-f")
+            self.roofline(softmax_flop, softmax_mem, name="pointwise-softmax-b")
             + 4 * self.O
         )
 
         if self.debug:
             print(
-                "(gr)Scale Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Scale (b) flop: {:,}, mem: {:,}".format(
                     int(scale_flop / 1e9), int(scale_mem / 1e9)
                 )
             )
-            print("(gr)scale point_time: {:,}\n".format(scale_time))
-            print("(gr)softmax point_flop: {:,}, softmax point_mem: {:,}".format(
-                int(softmax_flop / 1e9), int(softmax_mem / 1e9)
-            ))
-            print("(gr)softmax point_time: {:,}\n".format(softmax_time))
+            print("Scale (b) time: {:,}".format(scale_time))
+            print(
+                "Softmax (b) flop: {:,}, mem: {:,}".format(
+                    int(softmax_flop / 1e9), int(softmax_mem / 1e9)
+                )
+            )
+            print("Softmax (b) time: {:,}\n".format(softmax_time))
 
         return scale_time + softmax_time
-    def get_residual_f(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        residual_flop = effective_m * n
-        residual_mem = self.precision * residual_flop * 3
+    def get_residual_f(self, tensor_shape):
+        _, elements, _, _ = self._effective_dims(tensor_shape)
+        flops = 2 * elements  # add + bias
+        mem = self.precision * elements * 3  # read main, read residual, write out
 
-        residual_time = (
-            self.roofline(residual_flop, residual_mem, name="pointwise-scale-f")
-            + 1 * self.O
-        )
-    
+        time = self.roofline(flops, mem, name="pointwise-residual-f") + self.O
 
         if self.debug:
             print(
-                "Residual point_flop: {:,}, point_mem: {:,}".format(
-                    int(residual_flop / 1e9), int(residual_mem / 1e9)
+                "Residual (f) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(flops / 1e9), int(mem / 1e9)
                 )
             )
-            print("Residual point_time: {:,}\n".format(residual_time))
-            
-        return residual_time
-    def get_residual_b(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        residual_flop = effective_m * n
-        residual_mem = self.precision * residual_flop * 3
-        residual_time = (
-            self.roofline(residual_flop, residual_mem, name="pointwise-scale-f")
-            + 1 * self.O
-        )
-        if self.debug:
-            print(
-                "(gr)Residual point_flop: {:,}, point_mem: {:,}".format(
-                    int(residual_flop / 1e9), int(residual_mem / 1e9)
-                )
-            )
-            print("(gr)Residual point_time: {:,}\n".format(residual_time))
-            
-        return residual_time
-    def get_layernorm_f(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        flops = effective_m * n * 5
-        mem = self.precision * effective_m * n * 9
-        time = (
-            self.roofline(flops, mem, name="pointwise-scale-f")
-            + 3 * self.O
-        )
-        if self.debug:
-            print(
-                "Layernorm point_flop: {:,}, point_mem: {:,}".format(
-                    int(flops / 1e9), int(mem / 1e9)
-                )
-            )
-            print("Layernorm point_time: {:,}\n".format(time))
-            
+            print("Residual (f) time: {:,}\n".format(time))
+
         return time
-    def get_layernorm_b(self, gemm):
-        _, effective_m, _, n = self._effective_dims(gemm)
-        flops = effective_m * n * 7
-        mem = self.precision * effective_m * n * 11
-        time = (
-            self.roofline(flops, mem, name="pointwise-scale-f")
-            + 4 * self.O
-        )
+
+    def get_residual_b(self, tensor_shape):
+        _, elements, _, _ = self._effective_dims(tensor_shape)
+        flops = elements  # dL/dx = dL/dy passthrough
+        mem = self.precision * elements * 3  # read grad, read forward residual, write grad
+
+        time = self.roofline(flops, mem, name="pointwise-residual-b") + self.O
+
         if self.debug:
             print(
-                "(gr)Layernorm point_flop: {:,}, point_mem: {:,}".format(
-                    int(flops / 1e9), int(mem / 1e9)
+                "Residual (b) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(flops / 1e9), int(mem / 1e9)
                 )
             )
-            print("(gr)Layernorm point_time: {:,}\n".format(time))
-            
+            print("Residual (b) time: {:,}\n".format(time))
+
+        return time
+
+    def get_layernorm_f(self, tensor_shape):
+        _, elements, _, hidden = self._effective_dims(tensor_shape)
+
+        # LayerNorm forward (in LN2-style batch): mean + variance + normalize + affine
+        compute_flops = elements * (2 * hidden)  # mean
+        compute_flops += elements * (3 * hidden)  # variance: square, add, divide
+        compute_flops += elements * (4 * hidden)  # normalize: x - mean, * inv_std
+        compute_flops += elements * (2 * hidden)  # affine: gamma/beta
+
+        mem_bytes = self.precision * elements * hidden * 10
+
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
+
+        if self.debug:
+            print(
+                "LayerNorm (f) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(compute_flops / 1e9), int(mem_bytes / 1e9)
+                )
+            )
+            print("LayerNorm (f) time: {:,}\n".format(time))
+
+        return time
+
+    def get_layernorm_b(self, tensor_shape):
+        _, elements, _, hidden = self._effective_dims(tensor_shape)
+
+        compute_flops = elements * hidden * 8
+        mem_bytes = self.precision * elements * hidden * 12
+
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
+
+        if self.debug:
+            print(
+                "LayerNorm (b) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                    int(elements / 1e6), int(compute_flops / 1e9), int(mem_bytes / 1e9)
+                )
+            )
+            print("LayerNorm (b) time: {:,}\n".format(time))
+
         return time
     def get_linear_softmax_b(self, gemm):
         _, effective_m, k, n = self._effective_dims(gemm)
         gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
-        point_flop = effective_m * n * 5
-        # 1: one for one of the divisions, grad(A) (y=A/B)
-        # 2: one for division and multiplication, grad(B)
-        # 1: one for addition, copies turn into add
-        # 1: one for sigmoid
 
-        point_mem = self.precision * effective_m * 11
-        # 3: grad(A) in pointwise division
-        # 3: grad(B) in pointwise division
-        # 3: addition in copy backprop
-        # 2: sigmoid
+        point_flop = effective_m * n * 6
+        point_mem = self.precision * effective_m * n * 10
 
         point_time = (
             self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-b")
@@ -734,14 +748,13 @@ class TimeCalculationLLM(TimeCalculation):
 
         if self.debug:
             print(
-                "(gr) Linear Softmax point_flop: {:,}, point_mem: {:,}".format(
+                "Linear Softmax (b) point_flop: {:,}, point_mem: {:,}".format(
                     int(point_flop / 1e9), int(point_mem / 1e9)
                 )
             )
-            print("(gr) Linear Softmax point_time: {:,}\n".format(point_time))
+            print("Linear Softmax (b) point_time: {:,}\n".format(point_time))
 
-        total = gemm_time + reduction_time + point_time
-        return total
+        return gemm_time + reduction_time + point_time
     
     def get_embedding_b(self):
         batch = self._effective_transformer_batch()
@@ -988,28 +1001,28 @@ class TimeCalculationLLM(TimeCalculation):
         embedding_b = self.get_embedding_b()
         gemm_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
 
-        attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
-        attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
+        attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
+        attention_scale_softmax_b = self.get_scale_softmax_b(gemm_attention_score)
         gemm_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
-        residual1_f = self.get_residual_f(gemm=gemm_output_proj)
-        residual1_b = self.get_residual_b(gemm=gemm_output_proj)
+        residual1_f = self.get_residual_f(gemm_output_proj)
+        residual1_b = self.get_residual_b(gemm_output_proj)
         gemm_results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
 
-        layernorm1_f = self.get_layernorm_f(gemm=gemm_output_proj)
-        layernorm1_b = self.get_layernorm_b(gemm=gemm_output_proj)
+        layernorm1_f = self.get_layernorm_f(gemm_output_proj)
+        layernorm1_b = self.get_layernorm_b(gemm_output_proj)
         gemm_results['layernorm1'] = {'forward': layernorm1_f, 'backward': layernorm1_b}
 
-        residual2_f = self.get_residual_f(gemm=gemm_ffn2)
-        residual2_b = self.get_residual_b(gemm=gemm_ffn2)
+        residual2_f = self.get_residual_f(gemm_ffn2)
+        residual2_b = self.get_residual_b(gemm_ffn2)
         gemm_results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
 
-        layernorm2_f = self.get_layernorm_f(gemm=gemm_ffn2)
-        layernorm2_b = self.get_layernorm_b(gemm=gemm_ffn2)
+        layernorm2_f = self.get_layernorm_f(gemm_ffn2)
+        layernorm2_b = self.get_layernorm_b(gemm_ffn2)
         gemm_results['layernorm2'] = {'forward': layernorm2_f, 'backward': layernorm2_b}
 
-        linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
-        linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
+        linear_softmax_f = self.get_linear_softmax_f(gemm_linear)
+        linear_softmax_b = self.get_linear_softmax_b(gemm_linear)
         gemm_results['linear_softmax'] = {'forward': linear_softmax_f, 'backward': linear_softmax_b}
 
         # Calculate MHA and FFN times directly from results dict
@@ -1245,19 +1258,204 @@ class TimeCalculationLLM(TimeCalculation):
         kp1 = self.kp1 if self.kp1 else 1
         kp2 = self.kp2 if self.kp2 else 1
         return int(kp1 * kp2)
-    
+
+    def _prepare_execution_graphs(
+        self,
+        *,
+        node_breakdown: Dict[str, float],
+        gemm_results: Dict[str, Dict[str, Any]],
+        batch_size: int,
+        seq_len: int,
+        hidden_dim: int,
+        num_heads: int,
+        ffn_dim: int,
+        vocab_size: int,
+        include_pipeline_backward: bool,
+        include_transformer_backward: bool,
+        gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None, # optional override, decode only.
+    ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
+        """Build pipeline/transformer graphs shared across training and inference."""
+
+        if not include_pipeline_backward and not include_transformer_backward:
+            # Forward-only inference: skip training all-reduce bookkeeping.
+            reduction_sizes = {
+                'qkv_size': 0,
+                'output_size': 0,
+                'ffn_size': 0,
+                'total_size': 0,
+            }
+            local_comp = {
+                'qkv_local': 0.0,
+                'output_local': 0.0,
+                'ffn_local': 0.0,
+                'total_local': 0.0,
+            }
+        else:
+            reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
+            local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
+
+        embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
+        softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
+        # Below, we fix pipeline comm sizes for decode
+        attn_shape = (gemm_shapes or {}).get("attention_score")
+        pipeline_seq_len = max(1, int(attn_shape[1])) if attn_shape and len(attn_shape) > 1 else seq_len
+
+        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, pipeline_seq_len)[1]
+
+        comm_metadata = self._build_comm_metadata(
+            reduction_sizes=reduction_sizes,
+            local_comp=local_comp,
+            embedding_size=embedding_size,
+            softmax_size=softmax_size,
+            cross_layer_bytes=cross_layer_bytes,
+        )
+
+        shapes = gemm_shapes or LLM_util.process_gemm_shapes(
+            batch_size,
+            seq_len,
+            hidden_dim,
+            num_heads,
+            ffn_dim,
+            vocab_size,
+            option="multiply_batch_into_m",
+        )
+
+        transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
+        transformer_gemm_entries: List[Dict[str, Any]] = []
+
+        gemm_shapes = {
+            "qkv_proj": shapes["qkv_proj"],
+            "attention_score": shapes["attention_score"],
+            "attention_output": shapes["attention_output"],
+            "output_proj": shapes["output_proj"],
+            "ffn1": shapes["ffn1"],
+            "ffn2": shapes["ffn2"],
+        }
+        gemm_ops = tuple(gemm_shapes.keys())
+
+        op_sequence = (
+            "layernorm1",
+            "qkv_proj",
+            "attention_score",
+            "attention_scale_softmax",
+            "attention_output",
+            "output_proj",
+            "residual1",
+            "ffn1",
+            "ffn2",
+            "residual2",
+            "layernorm2",
+        )
+
+        for op_name in op_sequence:
+            op_results = gemm_results.get(op_name)
+            if not op_results:
+                raise ValueError(f"Operation {op_name} not found in gemm_results")
+
+            entry_name = op_name if op_name in gemm_ops else f"pt_{op_name}"
+            entry = {
+                "name": entry_name,
+                "forward": {
+                    "duration": op_results.get("forward_gemm", op_results.get("forward", 0.0)),
+                    "reduction": op_results.get("forward_reduction", 0.0),
+                    "comm_keys": [],
+                },
+                "backward": {
+                    "duration": op_results.get("backward_gemm", op_results.get("backward", 0.0)),
+                    "reduction": op_results.get("backward_reduction", 0.0),
+                    "comm_keys": [],
+                },
+            }
+
+            if op_name in gemm_ops:
+                self._populate_transformer_comm_metadata(
+                    entry=entry,
+                    metadata=transformer_comm_metadata,
+                    gemm_spec=gemm_shapes[op_name],
+                )
+
+            transformer_gemm_entries.append(entry)
+
+        transformer_graph: Optional[Graph] = None
+        transformer_forward_root: Optional[Any] = None
+        transformer_backward_root: Optional[Any] = None
+
+        tp_degree = self._tp_degree()
+        transformer_comp_times = {
+            "transformer": {
+                "gemms": transformer_gemm_entries,
+                "tp_degree": tp_degree,
+            }
+        }
+
+        transformer_graph = simulate_LLM.Graph(
+            mode="transformer",
+            dp=self.dp,
+            lp=self.lp,
+            kp1=self.kp1,
+            kp2=self.kp2,
+            tp_mode=self.t,
+            comp_times=transformer_comp_times,
+            comm_metadata=transformer_comm_metadata,
+            misc_metadata={},
+        )
+        transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
+        if include_transformer_backward:
+            transformer_backward_root = transformer_graph.construct_transformer_graph(direction="backward")
+
+        comp_times = {
+            "embedding_f": node_breakdown.get('embedding_f', 0.0),
+            "embedding_b": node_breakdown.get('embedding_b', 0.0) if include_pipeline_backward else 0.0,
+            "linear_softmax_f": node_breakdown.get('linear_softmax_f', 0.0),
+            "linear_softmax_b": node_breakdown.get('linear_softmax_b', 0.0) if include_pipeline_backward else 0.0,
+            "transformer_f": node_breakdown.get('transformer_time_f', 0.0),
+            "transformer_b": node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0,
+            "kv_cache_fetch": node_breakdown.get('kv_cache_fetch', 0.0),
+            "kv_cache_store": node_breakdown.get('kv_cache_store', 0.0),
+            "cross_layer_f": 0.0,
+            "cross_layer_b": 0.0,
+        }
+        misc_metadata = {
+            "num_batch": self.mb,
+            "num_layer": self.num_layers,
+            "all_reduce": getattr(self, "all_reduce", "the end"),
+        }
+        if getattr(self, "kv_cache_fetch_overlap", False):
+            misc_metadata["kv_cache_fetch_overlap"] = True
+
+        pipeline_graph_obj = simulate_LLM.Graph(
+            mode="pipeline",
+            dp=self.dp,
+            lp=self.lp,
+            kp1=self.kp1,
+            kp2=self.kp2,
+            tp_mode=self.t,
+            comp_times=comp_times,
+            comm_metadata=comm_metadata,
+            misc_metadata=misc_metadata,
+        )
+        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(include_backward=include_pipeline_backward)
+        interconnect_params = self._build_interconnect_params()
+
+        return (
+            pipeline_graph_obj,
+            graph_root,
+            transformer_graph,
+            transformer_forward_root,
+            transformer_backward_root,
+            interconnect_params,
+        )
+
     def calc_time_llm(self):
         """Calculate time for LLM model."""
         # Extract model parameters
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
-        num_layers = self.num_layers
         hidden_dim = self.hidden_dim
         seq_len = self.seq_len
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
-        num_micro_batches = self.mb
 
         # Adjust types and calculate node latencies
         self.readjust_type()
@@ -1296,144 +1494,31 @@ class TimeCalculationLLM(TimeCalculation):
         print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
         print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
 
-        reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
-        local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
-        embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
-        softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
-        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
-
-        comm_metadata = self._build_comm_metadata(
-            reduction_sizes=reduction_sizes,
-            local_comp=local_comp,
-            embedding_size=embedding_size,
-            softmax_size=softmax_size,
-            cross_layer_bytes=cross_layer_bytes,
+        (
+            pipeline_graph_obj,
+            graph_root,
+            transformer_graph,
+            transformer_forward_root,
+            transformer_backward_root,
+            interconnect_params,
+        ) = self._prepare_execution_graphs(
+            node_breakdown=node_breakdown,
+            gemm_results=gemm_results,
+            batch_size=batch_size,
+            seq_len=seq_len,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            ffn_dim=ffn_dim,
+            vocab_size=vocab_size,
+            include_pipeline_backward=True,
+            include_transformer_backward=True,
         )
 
-        shapes = LLM_util.process_gemm_shapes(
-            batch_size,
-            seq_len,
-            hidden_dim,
-            num_heads,
-            ffn_dim,
-            vocab_size,
-            option="multiply_batch_into_m",
-        )
-        gemm_qkv_proj = shapes["qkv_proj"]
-        gemm_attention_score = shapes["attention_score"]
-        gemm_attention_output = shapes["attention_output"]
-        gemm_output_proj = shapes["output_proj"]
-        gemm_ffn1 = shapes["ffn1"]
-        gemm_ffn2 = shapes["ffn2"]
-
-        gemm_specs = [
-            ("gemm_qkv_proj", gemm_qkv_proj),
-            ("gemm_attn_score", gemm_attention_score),
-            ("gemm_attn_output", gemm_attention_output),
-            ("gemm_output_proj", gemm_output_proj),
-            ("gemm_ffn1", gemm_ffn1),
-            ("gemm_ffn2", gemm_ffn2),
-        ]
-
-        transformer_gemm_entries = []
-        transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
-
-        # Map gemm_specs names to structured results keys
-        gemm_name_mapping = {
-            "gemm_qkv_proj": "qkv_proj",
-            "gemm_attn_score": "attention_score",
-            "gemm_attn_output": "attention_output",
-            "gemm_output_proj": "output_proj",
-            "gemm_ffn1": "ffn1",
-            "gemm_ffn2": "ffn2",
-        }
-
-        # Use structured results from node latency phase
-        for base_name, gemm_spec in gemm_specs:
-            result_key = gemm_name_mapping[base_name]
-            result_data = gemm_results[result_key]
-            fwd_time = result_data['forward_gemm']
-            fwd_red = result_data['forward_reduction']
-            bwd_time = result_data['backward_gemm']
-            bwd_red = result_data['backward_reduction']
-
-            entry = {
-                "name": base_name,
-                "forward": {
-                    "duration": fwd_time,
-                    "reduction": fwd_red,
-                    "comm_keys": [],
-                },
-                "backward": {
-                    "duration": bwd_time,
-                    "reduction": bwd_red,
-                    "comm_keys": [],
-                },
-            }
-
-            self._populate_transformer_comm_metadata(
-                entry=entry,
-                metadata=transformer_comm_metadata,
-                gemm_spec=gemm_spec,
-            )
-
-            transformer_gemm_entries.append(entry)
-
-        tp_degree = self._tp_degree()
-
-        transformer_comp_times = {
-            "transformer": {
-                "gemms": transformer_gemm_entries,
-                "tp_degree": tp_degree,
-            }
-        }
-        self.transformer_graph = simulate_LLM.Graph(
-            mode="transformer",
-            dp=self.dp,
-            lp=self.lp,
-            kp1=self.kp1,
-            kp2=self.kp2,
-            tp_mode=self.t,
-            comp_times=transformer_comp_times,
-            comm_metadata=transformer_comm_metadata,
-            misc_metadata={},
-        )
-        self.transformer_forward_root = self.transformer_graph.construct_transformer_graph(direction="forward")
-        self.transformer_backward_root = self.transformer_graph.construct_transformer_graph(direction="backward")
-
+        self.transformer_graph = transformer_graph
+        self.transformer_forward_root = transformer_forward_root
+        self.transformer_backward_root = transformer_backward_root
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
         self.transformer_analytical_time_backward = node_breakdown['transformer_time_b']
-
-        # Build pipeline graph directly using node breakdown dict
-        comp_times = {
-            "embedding_f": node_breakdown['embedding_f'],
-            "embedding_b": node_breakdown['embedding_b'],
-            "linear_softmax_f": node_breakdown['linear_softmax_f'],
-            "linear_softmax_b": node_breakdown['linear_softmax_b'],
-            "transformer_f": node_breakdown['transformer_time_f'],
-            "transformer_b": node_breakdown['transformer_time_b'],
-            "cross_layer_f": 0.0,
-            "cross_layer_b": 0.0,
-        }
-        misc_metadata = {
-            "num_batch": num_micro_batches,
-            "num_layer": num_layers,
-            "all_reduce": self.all_reduce,
-        }
-
-        pipeline_graph_obj = simulate_LLM.Graph(
-            mode="pipeline",
-            dp=self.dp,
-            lp=self.lp,
-            kp1=self.kp1,
-            kp2=self.kp2,
-            tp_mode=self.t,
-            comp_times=comp_times,
-            comm_metadata=comm_metadata,
-            misc_metadata=misc_metadata,
-        )
-        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph()
-        interconnect_params = self._build_interconnect_params()
 
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
@@ -1461,18 +1546,17 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = pipeline_root
         self.pipeline_interconnect = dispatcher.interconnect_params
 
-        # self.pipeline_graph.save_graph(pipeline_root, "output_graph/", "fw_bw_graph")
 
-        # if self.transformer_analytical_time_forward is not None:
-        #     print(
-        #         f"Analytical transformer forward time: "
-        #         f"{self.transformer_analytical_time_forward:.1f}s"
-        #     )
-        # if self.transformer_analytical_time_backward is not None:
-        #     print(
-        #         f"Analytical transformer backward time: "
-        #         f"{self.transformer_analytical_time_backward:.1f}s"
-        #     )
+        self.transformer_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
+            self.transformer_forward_root,
+            self.network_model,
+            self.pipeline_interconnect,
+        )
+        self.transformer_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
+            self.transformer_backward_root,
+            self.network_model,
+            self.pipeline_interconnect,
+        )
 
         graph_folder = self.output_dir.rstrip(os.sep) + os.sep
         if self._generate_graphs and self.transformer_forward_root is not None:
@@ -1494,13 +1578,13 @@ class TimeCalculationLLM(TimeCalculation):
                 "pipeline_graph_post",
             )
 
-        # use generate graphs as temp debug. If set, print analytical transformer time and actual transformer time
+        # debug helper. If set, print analytical transformer time and actual transformer time
         if self._generate_graphs:
-            print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.1f}s")
-            print(f"Analytical transformer backward time: {self.transformer_analytical_time_backward:.1f}s")
+            print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.4f}s")
+            print(f"Analytical transformer backward time: {self.transformer_analytical_time_backward:.4f}s")
             if self.transformer_astrasim_time_forward is not None and self.transformer_astrasim_time_backward is not None:
-                print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.1f}s")
-                print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.1f}s")
+                print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.4f}s")
+                print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.4f}s")
 
         self.tot_time = time_fw_bw
 
@@ -1554,18 +1638,50 @@ class LLMExecutionDispatcher:
         raise ValueError(f"Unsupported execution mode: {mode}")
 
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
-        timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
-            self.pipeline_root,
-            self.time_calc.network_model,
-            self.interconnect_params,
-        )
+        if declared_mode == ExecutionMode.HYBRID:
+            filename = "/hybrid_graph"
+            timed_root = self.pipeline_root
+        else: # must be "ANALYTICAL"
+            filename = "/analytical_graph"
+            timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
+                self.pipeline_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            
+        generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
+        if generate_graphs:
+            self.pipeline_graph.save_graph(
+                self.pipeline_root,
+                self.time_calc.output_dir,
+                filename,
+            )
+
         # Persist timed root for any downstream consumer
         self.pipeline_root = timed_root
         total_time = self.pipeline_graph.simulate(timed_root)
         return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
+        generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
+        if generate_graphs:
+            self.transformer_graph.save_graph(
+                self.transformer_forward_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer",
+            )
+            timed_root = self.transformer_graph.convert_comm_sizes_to_times(
+                self.transformer_forward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            self.transformer_graph.save_graph(
+                timed_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer_deepflow_annotated",
+            )
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
+
         if transformer_time is not None:
             self._apply_transformer_time(transformer_time)
         return self._run_pipeline_with_analytical_comm(ExecutionMode.HYBRID)
@@ -1584,11 +1700,19 @@ class LLMExecutionDispatcher:
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
 
+        run_kwargs = {
+            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
+        }
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+        if run_type == "inference":
+            run_kwargs["dp_override"] = 1
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             self.pipeline_root,
             self.time_calc,
             artifact_dir,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            **run_kwargs,
         )
         self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
         self.time_calc.pipeline_astrasim_time = max_sec
@@ -1619,12 +1743,12 @@ class LLMExecutionDispatcher:
         if flattened_root is None:
             raise RuntimeError("Pipeline flattening produced an empty graph")
 
-        setattr(self.time_calc, "flattened_pipeline_root", flattened_root)
+        self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
                 self.time_calc.output_dir,
-                "pipeline_graph_pre`",
+                "/pipeline_graph_pre",
             )
         self.pipeline_root = flattened_root
 
@@ -1646,18 +1770,35 @@ class LLMExecutionDispatcher:
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_flat")
 
+        run_kwargs = {
+            "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
+        }
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
+        if run_type == "inference":
+            run_kwargs["dp_override"] = 1
+
         per_rank_sec, max_sec = run_astra_simulation_only_onepath(
             flattened_root,
             self.time_calc,
             artifact_dir,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            **run_kwargs,
         )
 
         if not per_rank_sec:
             raise RuntimeError("AstraSim flattened execution returned no per-rank timings")
 
-        dp_count = max(1, getattr(self.time_calc, "dp", 1))
-        expected_rank_count = dp_count * len(unique_hw_ids)
+        expected_rank_count = effective_dp * len(unique_hw_ids)
+        # Special case: If expected rank count is 1, then 2 is fine, but we prune the extra result
+        # this is done, since astrasim backend only supports >1 ranks, so we generate extra fake result for that case.
+        if expected_rank_count == 1:
+            if len(per_rank_sec) > 2:
+                raise RuntimeError(
+                    "AstraSim rank count mismatch for flattened execution: "
+                    f"expected {expected_rank_count}, got {len(per_rank_sec)}"
+                )
+            per_rank_sec = per_rank_sec[:1]
+
         if len(per_rank_sec) != expected_rank_count:
             raise RuntimeError(
                 "AstraSim rank count mismatch for flattened execution: "
@@ -1669,8 +1810,8 @@ class LLMExecutionDispatcher:
 
         self.time_calc.pipeline_astrasim_per_rank = per_rank_sec
         self.time_calc.pipeline_astrasim_time = max_sec
-        setattr(self.time_calc, "flattened_astrasim_per_rank", per_rank_sec)
-        setattr(self.time_calc, "flattened_astrasim_total", max_sec)
+        self.time_calc.flattened_astrasim_per_rank = per_rank_sec
+        self.time_calc.flattened_astrasim_total = max_sec
 
         return ExecutionResult(
             total_time=max_sec,
@@ -1710,8 +1851,6 @@ class LLMExecutionDispatcher:
 
     def _run_transformer_astrasim(self, mode: ExecutionMode) -> Optional[TransformerTimings]:
         del mode  # mode currently unused but kept for signature consistency
-        if not self.transformer_forward_root or not self.transformer_backward_root:
-            return None
 
         # Use hierarchical artifact directory when persisting artifacts for transformer simulation
         artifact_dir = self.time_calc.output_dir
@@ -1722,37 +1861,42 @@ class LLMExecutionDispatcher:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
             artifact_dir_fwd = os.path.join(artifact_dir, "fwd")
             artifact_dir_bwd = os.path.join(artifact_dir, "bwd")
-            os.makedirs(artifact_dir, exist_ok=True)
             os.makedirs(artifact_dir_fwd, exist_ok=True)
             os.makedirs(artifact_dir_bwd, exist_ok=True)
 
-        fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
-            self.transformer_forward_root,
-            self.time_calc,
-            artifact_dir_fwd,
-            dp_override=1,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
-        )
-        bwd_per_rank, bwd_max = run_astra_simulation_only_onepath(
-            self.transformer_backward_root,
-            self.time_calc,
-            artifact_dir_bwd,
-            dp_override=1,
-            persist_artifacts=self.time_calc.persist_astrasim_artifacts,
-        )
+        fwd_per_rank = None
+        bwd_per_rank = None
+        fwd_max = 0
+        bwd_max = 0
+        if self.transformer_forward_root:
+            fwd_per_rank, fwd_max = run_astra_simulation_only_onepath(
+                self.transformer_forward_root,
+                self.time_calc,
+                artifact_dir_fwd,
+                dp_override=1,
+                persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            )
+        if self.transformer_backward_root:
+            bwd_per_rank, bwd_max = run_astra_simulation_only_onepath(
+                self.transformer_backward_root,
+                self.time_calc,
+                artifact_dir_bwd,
+                dp_override=1,
+                persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+            )
 
         self.time_calc.transformer_astrasim_per_rank_forward = fwd_per_rank
         self.time_calc.transformer_astrasim_per_rank_backward = bwd_per_rank
         self.time_calc.transformer_astrasim_time_forward = fwd_max
         self.time_calc.transformer_astrasim_time_backward = bwd_max
 
-        if fwd_max <= 0 or bwd_max <= 0:
+        if fwd_max < 0 or bwd_max < 0:
             raise RuntimeError("AstraSim transformer execution returned non-positive duration")
 
         return TransformerTimings(forward=fwd_max, backward=bwd_max)
 
     def _apply_transformer_time(self, timings: TransformerTimings) -> None:
-        if timings.forward <= 0 or timings.backward <= 0:
+        if timings.forward < 0 or timings.backward < 0:
             raise ValueError("AstraSim transformer times must be positive")
 
         comp_times = getattr(self.pipeline_graph, "comp_times", None)
@@ -1788,3 +1932,105 @@ class LLMExecutionDispatcher:
 
         for child in getattr(node, "children", []):
             self._assign_transformer_durations(child, visited, forward_value, backward_value)
+
+    def compute_decode_layer_time(
+        self,
+        *,
+        gemm_results: Dict[str, Dict[str, float]],
+        batch_size: int,
+        seq_len: int,
+        total_seq_len: int,
+    ) -> Tuple[float, float]:
+        head_dim = self.hidden_dim // self.num_heads
+        attention_score_shape = (
+            batch_size * self.num_heads,
+            1,
+            head_dim,
+            total_seq_len,
+        )
+        attention_scale_softmax_f = self.get_scale_softmax_f(attention_score_shape)
+
+        token_bytes = LLM_util.kv_cache_token_bytes(
+            batch_size=batch_size,
+            num_heads=self.num_heads,
+            head_dim=head_dim,
+            precision_bytes=self.kv_cache_precision,
+        )
+        kv_cache_fetch_time = self.roofline(
+            0,
+            token_bytes * total_seq_len,
+            name="kv_cache_fetch",
+        ) + self.O
+        kv_cache_store_time = self.roofline(
+            0,
+            token_bytes,
+            name="kv_cache_store",
+        ) + self.O
+
+        output_seq_len = 1
+
+        output_proj_shape = (
+            batch_size,
+            output_seq_len,
+            self.hidden_dim,
+            self.hidden_dim,
+        )
+        residual1_f = self.get_residual_f(output_proj_shape)
+        layernorm1_f = self.get_layernorm_f(output_proj_shape)
+
+        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+
+        ffn2_shape = (
+            batch_size,
+            output_seq_len,
+            ffn_dim,
+            self.hidden_dim,
+        )
+        residual2_f = self.get_residual_f(ffn2_shape)
+        layernorm2_f = self.get_layernorm_f(ffn2_shape)
+
+        linear_shape = (
+            batch_size,
+            output_seq_len,
+            self.hidden_dim,
+            self.vocab_size,
+        )
+        linear_softmax_f = self.get_linear_softmax_f(linear_shape)
+        if "linear" in gemm_results:
+            gemm_results["linear"]["forward"] = linear_softmax_f
+        gemm_results["kv_cache_fetch"] = {
+            "forward": kv_cache_fetch_time,
+            "backward": 0.0,
+            "forward_gemm": kv_cache_fetch_time,
+            "forward_reduction": 0.0,
+            "backward_gemm": 0.0,
+            "backward_reduction": 0.0,
+        }
+        gemm_results["kv_cache_store"] = {
+            "forward": kv_cache_store_time,
+            "backward": 0.0,
+            "forward_gemm": kv_cache_store_time,
+            "forward_reduction": 0.0,
+            "backward_gemm": 0.0,
+            "backward_reduction": 0.0,
+        }
+
+        core_time = (
+            gemm_results["qkv_proj"]["forward"]
+            + gemm_results["attention_score"]["forward"]
+            + attention_scale_softmax_f
+            + gemm_results["attention_output"]["forward"]
+            + gemm_results["output_proj"]["forward"]
+            + residual1_f
+            + layernorm1_f
+            + gemm_results["ffn1"]["forward"]
+            + gemm_results["ffn2"]["forward"]
+            + residual2_f
+            + layernorm2_f
+        )
+
+        layer_time = core_time
+
+        total_transformer_time = layer_time * self.num_layers
+
+        return total_transformer_time, linear_softmax_f

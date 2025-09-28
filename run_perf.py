@@ -10,10 +10,12 @@ from astrasim_lib import ensure_chakra_available
 import pandas as pd
 import yaml
 import shutil
+
+import graphviz_async
 from tile import TiledGEMM, formatBytes
 from time_calculation import TimeCalculation
 from time_calculation_LLM import TimeCalculationLLM
-from LLM_util import  process_gemm_shapes, caltime
+from time_calculation_inf import TimeCalculationLLMInference
 
 algByte = False  # algorithmic ops false
 proj = False  # consider projection layer, turn off for end-2-end validation, as baeline model does not have projection layer
@@ -31,9 +33,8 @@ os.environ["DEEPFLOW_ASTRA_CACHE_MODE"] = _CACHE_MODE_MAP.get(
     cache_handling.strip().upper(), "CACHE_READWRITE"
 )
 
-# Execution backend for LLM workloads.
-# Options: "LLMTEST" (TimeCalculationLLM) or "LEGACY_HEURISTIC" (historical pipeline).
-llm_execution_variant = "LLMTEST"
+# Default location for artifacts emitted by run_perf.
+DEFAULT_OUTPUT_DIR = "output"
 
 # Global wall-clock timer: report total program runtime at exit
 _program_start_time = time.perf_counter()
@@ -52,7 +53,6 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Run performance analysis for LSTM, GEMM, or LLM models.")
     parser.add_argument("--hardware_config", required=True, help="Path to the hardware configuration file.")
     parser.add_argument("--model_config", required=True, help="Path to the model configuration file.")
-    parser.add_argument("--output_dir", required=False, help="Directory to save the output files.")
     return parser.parse_args()
 
 def get_mode_from_config(model_config_path):
@@ -225,11 +225,12 @@ def run_LLM(
     _validate_network_topology(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
 
-    variant = llm_execution_variant.strip().upper()
-    if variant == "LEGACY_HEURISTIC":
-        _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode)
-    else:
-        _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode)
+    llm_run_type = getattr(exp_model_config.model_config, "run_type", "training")
+    if str(llm_run_type).lower() == "inference":
+        _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
+        return
+
+    _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode)
 
 
 def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
@@ -245,59 +246,74 @@ def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
 
     print("Total training time: {}".format(tc_llm.get_time()))
 
-def _run_llm_heuristic(exp_hw_config, exp_model_config, exp_dir, mode):
-    base_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)
-    gemm_shapes = process_gemm_shapes(
-        base_tc.batch_size,
-        base_tc.seq_len,
-        base_tc.hidden_dim,
-        base_tc.num_heads,
-        base_tc.ffn_dim,
-        option="multiply_batch_into_m",
-    )
-    print(gemm_shapes)
 
-    flattened = []
-    for name, dims in gemm_shapes.items():
-        if len(dims) == 4:
-            batch, m, k, n = dims
-            flattened.append((name, (batch * m, k, n)))
-        else:
-            flattened.append((name, dims))
+def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
+    """Run LLM inference simulation including prefill + decode phases."""
+    tc_inf = TimeCalculationLLMInference(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
 
-    for i, (name, (m, k, n)) in enumerate(flattened):
-        print(f"Running main for GEMM dimensions: M={m}, K={k}, N={n} ({name}, Layer {i + 1})")
-        output_file = os.path.join(
-            exp_dir, f"summary_m{m}_n{n}_k{k}_layer{i + 1}.txt"
+    # Get total inference time (prefill + decode)
+    inference_timing = tc_inf.calc_total_inference_time()
+    total_time = inference_timing["total_inference_time"]
+    decode_rates = inference_timing.get("decode_tokens_per_s") or {}
+
+    output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
+    os.makedirs(exp_dir, exist_ok=True)
+    with open(output_path, "w") as handle:
+        handle.write("\n\n==============================================\n")
+        handle.write("LLM Inference Results\n")
+        handle.write("==============================================\n")
+        handle.write(f"Execution Mode: {tc_inf.execution_mode.value}\n")
+        handle.write(f"Total Inference Time: {total_time:.8f}s\n")
+        handle.write(f"Prefill Time: {inference_timing['prefill_time']:.8f}s\n")
+        handle.write(f"Decode Time: {inference_timing['decode_time']:.8f}s\n")
+        handle.write(f"Time to First Token: {inference_timing['time_to_first_token']:.8f}s\n")
+        dp_replicas = max(1, getattr(tc_inf, "dp", 1))
+        if dp_replicas > 1:
+            handle.write(f"Data Parallel Replicas: {dp_replicas}\n")
+
+    print(
+        "LLM inference time: {:.6f}s (mode={})".format(
+            total_time, tc_inf.execution_mode.value
         )
-
-        layer_tc = TimeCalculation(exp_hw_config, exp_model_config, mode)
-        gemm_time_info = layer_tc.getGEMMTime(m, k, n, "Cf")
-
-        with open(output_file, "w") as f:
-            f.write("Best Order: {}\n".format(gemm_time_info[1]))
-            f.write("Best Tile: {}\n".format(gemm_time_info[2]))
-            f.write("Time: {}\n".format(gemm_time_info[0]))
-
-    caltime(
-        base_tc.num_layers,
-        base_tc.batch_size,
-        base_tc.seq_len,
-        base_tc.n_tokens,
-        base_tc.communication_time,
-        base_tc.N_PP,
-        exp_dir,
-        exp_dir,
     )
-
+    print(
+        "LLM time to first token: {:.6f}s".format(
+            inference_timing["time_to_first_token"],
+        )
+    )
+    dp_replicas = max(1, getattr(tc_inf, "dp", 1))
+    if dp_replicas > 1:
+        print(f"Data parallel replicas: {dp_replicas}")
+    if decode_rates:
+        start_rate = decode_rates.get("start", 0.0)
+        mid_rate = decode_rates.get("midpoint", 0.0)
+        end_rate = decode_rates.get("end", 0.0)
+        mid_step = int(decode_rates.get("midpoint_step", 0.0))
+        print(
+            "Decode throughput tok/s: start={:.2f}, mid(step {})={:.2f}, end={:.2f}".format(
+                start_rate,
+                mid_step,
+                mid_rate,
+                end_rate,
+            )
+        )
+        if dp_replicas > 1:
+            print(
+                "Aggregate decode throughput tok/s (dp={}): start={:.2f}, mid(step {})={:.2f}, end={:.2f}".format(
+                    dp_replicas,
+                    start_rate * dp_replicas,
+                    mid_step,
+                    mid_rate * dp_replicas,
+                    end_rate * dp_replicas,
+                )
+            )
 
 if __name__ == "__main__":
     args = parse_arguments()
     # Load configurations
     config_hardware_path = args.hardware_config
     config_model_path = args.model_config
-    output_dir = args.output_dir if args.output_dir else "output"
-
+    output_dir = DEFAULT_OUTPUT_DIR
 
     # Read mode from the model configuration file
     mode = get_mode_from_config(config_model_path)

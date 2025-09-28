@@ -3,8 +3,6 @@ import math
 import os
 from collections import OrderedDict
 
-import pandas as pd
-
 import config
 
 def reshape_gemm_to_3d(arg,options=None):
@@ -115,84 +113,6 @@ def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_
 
     return processed
 
-def caltime(N_L, B, S, ntokens, comm_time, N_PP, directory, output_dir):
-
-    
-    # Directory containing the files
-    # directory = "output/Trans/"
-    
-    # os.makedirs(output_dir, exist_ok=True)
-     # Ensure the output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Define the output log file
-    log_file = os.path.join(output_dir, "summary_LLM.txt")
-    
-    
-    t_elapsed =0.0
-    # print("Time spent in different GEMMs")
-    
-    
-    with open(log_file, "w") as log:
-        t_elapsed = 0.0
-        log.write("Time spent in different GEMMs:\n")
-        print("Time spent in different GEMMs")
-
-        # Loop through files in the directory
-        for filename in os.listdir(directory):
-            if filename.endswith(".txt") and filename != "summary_LLM.txt":  # Exclude the log file
-                file_path = os.path.join(directory, filename)
-
-                data = pd.read_csv(file_path, sep=':', header=None, names=['Field', 'Value'], skipinitialspace=True)
-                # Extract the time value
-                time_row = data[data['Field'] == 'Time']
-                if not time_row.empty:
-                    time_value = float(time_row['Value'].iloc[0])
-                    print(time_value)
-                    log.write(f"{filename}: {time_value} seconds\n")
-                else:
-                    print("Time value not found in the file.")
-                
-                t_elapsed += time_value
-
-        t_elapsed *= 3.0  # FW pass + BW pass (~2x FW pass)
-        comp_time = t_elapsed
-        nbatch = ntokens / (S * B)
-        time = N_L * nbatch * t_elapsed / N_PP + comm_time
-
-        # Log and print the results
-        log.write(f"\nTotal computation time (FW + BW): {comp_time} seconds\n")
-        log.write(f"Number of tokens: {ntokens}\n")
-        log.write(f"Time to exhaust all tokens: {time} seconds ({time / 3600.0 / 24.0} days)\n")
-
-    
-    
-    # Loop through files in the directory
-    # for filename in os.listdir(directory):
-    #     if filename.endswith(".txt"):  # You can adjust the file extension as needed
-    #         file_path = os.path.join(directory, filename)
-
-    #         data = pd.read_csv(file_path, sep=':', header=None, names=['Field', 'Value'], skipinitialspace=True)
-    #         # Extract the time value
-    #         time_row = data[data['Field'] == 'Time']
-    #         if not time_row.empty:
-    #             time_value = float(time_row['Value'].iloc[0])
-    #             print(time_value)
-    #         else:
-    #             print("Time value not found in the file.")
-            
-    #         t_elapsed += time_value
-
-    # t_elapsed = t_elapsed*3.0 #FW pass + BW pass (~ 2x FW pass)
-    # comp_time = t_elapsed
-    # #comm_time = 8.85 # (hours) comes from AMPED
-    # nbatch = ntokens/(S*B)
-    # time = N_L*nbatch*t_elapsed/N_PP + comm_time
-
-    print("number of tokens:", ntokens, " | time to exhaust all tokens:", time, "(s)", " or ", time/3600.0/24.0, " days")
-    print("Performance Results written to {}".format(log_file))
-
-
 def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/?utm_source=chatgpt.com
     #Activations refer to output activations that need to be stored
     alpha = 16 + ffn_dim/hidden_dim #parameter need to be changed accordingly
@@ -295,6 +215,101 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
     
 
     return tot_mem, embedding_mem, transformer_mem_layer*n_layers,transformer_act_layer*n_layers,transformer_static_layer*n_layers, gradient_mem_layer*n_layers, optimizer_mem_layer*n_layers, weight_memory_layer*n_layers, softmax_mem#, projection_mem, wt_mem, act_mem, point_mem
+
+
+# ====================================================================
+# DECODE-SPECIFIC UTILITIES FOR AUTOREGRESSIVE INFERENCE
+# ====================================================================
+
+def kv_cache_token_bytes(batch_size, num_heads, head_dim, precision_bytes):
+    """Return total bytes to store K+V for a single new token."""
+    return batch_size * num_heads * head_dim * precision_bytes * 2
+
+
+def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size):
+    """
+    Generate GEMM shapes for a single decode step in autoregressive generation.
+
+    Key differences from training/prefill GEMMs:
+    - Sequence length is typically 1 (generating one token at a time)
+    - Attention over growing KV-cache (current_seq_len)
+    - Always uses KV-cache (one-token query, cached keys/values)
+
+    Parameters:
+        batch_size (int): Batch size (B)
+        current_seq_len (int): Current sequence length including cache (growing: 1, 2, 3, ...)
+        d_model (int): Hidden size (D)
+        num_heads (int): Number of attention heads (H)
+        ffn_dim (int): First FFN layer output dimension (typically 4 * D)
+        vocab_size (int): Vocabulary size (V)
+
+    Returns:
+        OrderedDict: GEMM shapes [M, K, N] for decode step operations
+    """
+    assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+    head_dim = d_model // num_heads
+    gemms = OrderedDict()
+
+    # Decode-specific GEMM shapes with KV-cache handling (always enabled)
+
+    # QKV Projection: Only the new token (seq_len = 1)
+    gemms["qkv_proj"] = (batch_size, 1, d_model, 3 * d_model)
+
+    # Attention Score: Q(new) @ K(cached+new)
+    gemms["attention_score"] = (
+        batch_size * num_heads,
+        1,                    # query seq_len (new token only)
+        head_dim,
+        current_seq_len,      # key seq_len (grows with decode steps)
+    )
+
+    # Attention Output: attention_weights @ V(cached+new)
+    gemms["attention_output"] = (
+        batch_size * num_heads,
+        1,                    # output seq_len (new token only)
+        current_seq_len,      # attention weight dim (grows with decode)
+        head_dim,
+    )
+
+    # === POST-ATTENTION LAYERS (same regardless of cache) ===
+
+    # Output projection & FFNs only process the new token
+    gemms["output_proj"] = (batch_size, 1, d_model, d_model)
+    gemms["ffn1"] = (batch_size, 1, d_model, ffn_dim)
+    gemms["ffn2"] = (batch_size, 1, ffn_dim, d_model)
+
+    return gemms
+
+
+def process_decode_gemm_shapes(batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size,
+                              option="multiply_batch_into_m"):
+    """
+    Process decode GEMM shapes and reshape them into 3D.
+
+    Similar to process_gemm_shapes but for decode-specific patterns.
+
+    Integrates with existing DeepFlow GEMM processing infrastructure.
+    """
+    # Generate decode GEMM shapes in 4D
+    gemm_shapes_4d = autoregressive_decoder_gemm(
+        batch_size, current_seq_len, d_model, num_heads, ffn_dim, vocab_size
+    )
+
+    processed = OrderedDict()
+    for key, shape in gemm_shapes_4d.items():
+        if key in ATTENTION_GEMM_KEYS:
+            # Keep attention GEMMs in 4D for proper computation
+            processed[key] = tuple(shape)
+        else:
+            # Reshape other GEMMs to 3D using existing infrastructure
+            processed[key] = reshape_gemm_to_3d(shape, option)
+
+    return processed
+
+
+
+
+
 
 if __name__ == "__main__":
 

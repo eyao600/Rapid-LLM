@@ -8,6 +8,13 @@ Pre-requirement: Python3
 
 **Step 3**. Setup the environment:
 
+**Option A: Using uv (recommended)**
+	* pip install uv
+	* uv venv [/path/to/new/virtual/environment]
+	* source [/path/to/new/virtual/environment]/bin/activate
+	* uv sync
+
+**Option B: Using pip**
 	* python3 -m venv [/path/to/new/virtual/environment]
 	* source [/path/to/new/virtual/environment]/bin/activate
 	* pip install --upgrade pip
@@ -22,14 +29,14 @@ Pre-requirement: Python3
 	* ./build/astra_analytical/build.sh
 	* cd ..
 
+**Note**: If you encounter protobuf failures while building AstraSim, try:
+	* pip uninstall protobuf
+	* pip install protobuf==3.20.3
+
 **Step 5**. Test if the installation has been successful:
 
-	* ./examples/llm.sh
-
-
-## Execution Modes ##
-
-DeepFlow can be used in 6 different modes:
+	* ./examples/llm.sh # For analytical backend
+	* ./examples/llm_astra.sh # For AstraSim backend (requires AstraSim installation)
 
 ### Execution Backend Configuration
 
@@ -66,7 +73,7 @@ execution_backend:
 ```
 
 **(4) Full AstraSim Flattened** (AstraSim needed)
-- **Accuracy**: Most accurate - models congestion between all collectives with no separate network assumptions. Very slow but most comprehensive.
+- **Accuracy**: Most accurate - models congestion between all collectives with no separate network assumptions. Very slow for large systemsbut most comprehensive.
 - **Execution**: AstraSim executes one big flattened graph combining pipeline and transformer operations
 - **Configuration**:
 ```yaml
@@ -75,6 +82,9 @@ execution_backend:
   astra:
     mode: full_astrasim_flattened
 ```
+## Execution Modes ##
+
+DeepFlow can be used in 6 different modes:
 
 ### Model Prediction Modes
 
@@ -83,24 +93,26 @@ execution_backend:
  **How**:   
 * Specify the GEMM parameters in configs/model-config/GEMM.yaml
 * Specify the Hardware parameters in configs/hardware-config/[config.yaml]
-* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/GEMM.yaml --output_dir [/path/to/output/directory]
+* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/GEMM.yaml
 
-(2) Performance Prediction Mode (LSTM End-2-End Application)
- **When to use**: Use for End-2-End LSTM prediction  
- **How**:   
-* Specify the LSTM parameters in configs/model-config/LSTM.yaml
-* Specify the Hardware parameters in configs/hardware-config/[config.yaml]
-* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LSTM.yaml --output_dir [/path/to/output/directory]
-        
-
-(3) Performance Prediction Mode (LLM mode)
+(2) Performance Prediction Mode (LLM mode)
  **When to use**: Use for End-2-End LLM prediction  
  **How**:   
 * Specify the LLM parameters in configs/model-config/LLM.yaml
 * Specify the Hardware parameters in configs/hardware-config/[config.yaml]
-* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LLM.yaml --output_dir [/path/to/output/directory]
+* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LLM.yaml
 
-LLM Mode is WIP. Not all parallelism configs are supported, and limited validation has been performed.
+(3) Performance Prediction Mode (LSTM End-2-End Application)
+ **When to use**: Use for End-2-End LSTM prediction  
+ **Note**: This mode has not been tested/validated with AstraSim backend.
+ **How**:   
+* Specify the LSTM parameters in configs/model-config/LSTM.yaml
+* Specify the Hardware parameters in configs/hardware-config/[config.yaml]
+* python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LSTM.yaml
+        
+LLM Mode is WIP. Limited validation has been performed. Results are saved under `output/<mode>`.
+
+The below 3 modes are only tested/validated for LSTM (porting to LLM is WIP).
 
 (4) Performance Prediction Mode (using main.py standalone argument; this is somewhat equivalent of option 2, for running on slurm)
 * python main.py stand_alone --exp_dir [/path/to/output/result/directory] --exp_config configs/[config.yaml]
@@ -118,9 +130,10 @@ LLM Mode is WIP. Not all parallelism configs are supported, and limited validati
 DeepFlow can generate and visualize network communication artifacts when using AstraSim execution backend.
 
 **Environment Flags:**
-* `DEEPFLOW_VISUALIZE_GRAPHS=1`: Generate graph visualizations of computation graphs executed.
-* `DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1`: Enable artifact persistence to disk
-* `DEEPFLOW_PERSIST_ARTIFACT_VIZ=1`: Generate PNG visualizations and text dumps for persisted ET files (very slow for many nodes!)
+* `DEEPFLOW_VISUALIZE_GRAPHS=1`: Generate graph visualizations of DeepFlow computation graphs executed (no AstraSim artifact visualization)
+* `DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1`: Enable artifact persistence to disk (both AstraSim and DeepFlow artifacts)
+* `DEEPFLOW_PERSIST_ARTIFACT_VIZ=1`: Generate PNG visualizations and text dumps for persisted ET files (*very* slow for many nodes!)
+* Do not set `DEEPFLOW_PERSIST_ARTIFACT_VIZ=1` for multi-threaded runs.
 
 **Artifact Output Locations:**
 * Flattened execution mode: `output/LLM/astra_flat/`
@@ -135,13 +148,10 @@ DeepFlow can generate and visualize network communication artifacts when using A
 ```bash
 DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSIST_ARTIFACT_VIZ=1 python run_perf.py \
   --hardware_config configs/hardware-config/a100_80GB.yaml \
-  --model_config configs/model-config/LLM.yaml \
-  --output_dir output
+  --model_config configs/model-config/LLM.yaml
 ```
 
 ## Tips ##
 
-* Use --no_launch True to see the command that would be used to launch the application w/o running
+* AstraSim backend caches runs by default in ./astra_cache/. To disable caching, set the environment variable `DEEPFLOW_ASTRA_CACHE_MODE` to `NO_CACHE` or `CACHE_READONLY` (intended for multi-threaded runs) in your environment. `NO_CACHE` (or manual cache flushing) is necessary if the AstraSim binary itself is modified.
 * Check config directory for  different architecture templates and technology node configurations
-* Use --debug True to activate debugging mode
- 
