@@ -141,6 +141,7 @@ class Graph:
         comm_data = self.comm_metadata[comm_key]
 
         # Create communication edge with metadata
+        # print(f"Creating edge with name: {name}, size: {comm_data['size']}, type: {comm_data['type']}")
         comm_edge = Edge(
             name=name,
             op_id=op_id,
@@ -191,7 +192,7 @@ class Graph:
                         ib, ll = interconnect_params[interconnect_type]
                     else:
                         raise ValueError(f"Invalid interconnect type: {interconnect_type}") 
-
+                        
                     child.duration = network_model.collective(
                         kind=child.comm_type,
                         size_bytes=child.comm_size_bytes,
@@ -572,8 +573,14 @@ class Graph:
                     op_id += 1
                     previous.add_child(node)
                     previous = node
+                    comm_key = forward_cfg.get("comm_keys",None)
+                    if comm_key:
+                        if len(comm_key) > 1:
+                            print(f"*CONSTRUCT INFO: Multiple comm keys for {entry_name}")
+                            print(f"*CONSTRUCT INFO: Comm keys: {comm_key}")
+                            raise ValueError(f"Multiple comm keys for {entry_name}")
 
-                    for comm_idx, comm_key in enumerate(forward_cfg.get("comm_keys", [])):
+                        comm_key = comm_key[0]
                         if comm_key not in self.comm_metadata:
                             raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
                         comm_type = self.comm_metadata[comm_key]['type']

@@ -5,8 +5,8 @@ export DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1
 export DEEPFLOW_VISUALIZE_GRAPHS=1
 export DEEPFLOW_PERSIST_ARTIFACT_VIZ=1
 
-HW_CONFIG="configs/hardware-config/a100_80GB_inf.yaml"
-MODEL_CONFIG="configs/model-config/Llama2-7B.yaml"
+HW_CONFIG="configs/hardware-config/a100_80GB.yaml"
+MODEL_CONFIG="configs/model-config/Llama2-7B_inf.yaml"
 
 get_model() {
   python3 - "$HW_CONFIG" <<'PY'
@@ -88,9 +88,21 @@ run_and_capture() {
       ;;
   esac
 }
-
 run_and_capture analytical
+if [ -d "./output/LLM" ]; then
+  rm -rf "./output/LLM_analytical"
+  mv "./output/LLM" "./output/LLM_analytical"
+  rm -rf "./output_graph/decode_samples_analytical"
+  mv "./output_graph/decode_samples" "./output_graph/decode_samples_analytical"
+fi
+
 run_and_capture astra
+if [ -d "./output/LLM" ]; then
+  rm -rf "./output/LLM_astra"
+  mv "./output/LLM" "./output/LLM_astra"
+  rm -rf "./output_graph/decode_samples_astra"
+  mv "./output_graph/decode_samples" "./output_graph/decode_samples_astra"
+fi
 
 printf 'ANALYTICAL: %s\n' "${ANALYTICAL_INF_LINE:-LLM inference time not found}"
 printf 'ANALYTICAL: %s\n' "${ANALYTICAL_TPUT_LINE:-Decode throughput tok/s not found}"

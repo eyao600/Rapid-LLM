@@ -3,3 +3,4 @@
 [DONE] 2. Debug astrasim flattened vs analytical deepflow giving diff results for num gpus = 1.
 --- Microsecond rounding. Unavoidable. Document it in README.
 [] 3. Fix network weirdness with collectives during decode.
+--- GK. Skipped for now. Will get back to this later. Right now assume astra sim IS NOT compatible with inference.

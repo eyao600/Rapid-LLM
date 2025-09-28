@@ -523,16 +523,14 @@ class TimeCalculationLLM(TimeCalculation):
             # dram_access = dram_access / 1e9
             # print(f"{name} gemm_time: {gemm_time}, mem_access: {dram_access} GB")
             reduction_time = 0.0
+            gemm_time *= batch # handled internally for CR and RC
         elif self.t == "CR":
-            gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name)
+            gemm_time, reduction_time = self.getDistGEMM_f_kp1(m, k, n, self.kp1, name, batch = batch)
         elif self.t == "RC":
-            gemm_time, reduction_time = self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name)
+            gemm_time, reduction_time = self.getDistGEMM_f_kp2(m, k, n, self.kp1, self.kp2, name, batch = batch)
         else:
             raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
 
-        if batch > 1:
-            gemm_time *= batch
-            reduction_time *= batch
         return gemm_time, reduction_time
 
     def _distributed_gemm_backward(self, gemm: Tuple[int, ...], name: str) -> Tuple[float, float]:
@@ -542,16 +540,13 @@ class TimeCalculationLLM(TimeCalculation):
             grad_wt_time, _, _, _ = self.getGEMMTime(k, m, n, f"{name}_wt")
             gemm_time = grad_act_time + grad_wt_time
             reduction_time = 0.0
+            gemm_time *= batch # handled internally for CR and RC
         elif self.t == "CR":
-            gemm_time, reduction_time = self.getDistGEMM_b_kp1(m, k, n, self.kp1, name)
+            gemm_time, reduction_time = self.getDistGEMM_b_kp1(m, k, n, self.kp1, name, batch = batch)
         elif self.t == "RC":
-            gemm_time, reduction_time = self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name)
+            gemm_time, reduction_time = self.getDistGEMM_b_kp2(m, k, n, self.kp1, self.kp2, name, batch = batch)
         else:
             raise ValueError(f"Invalid tensor parallel strategy: {self.t}")
-
-        if batch > 1:
-            gemm_time *= batch
-            reduction_time *= batch
         return gemm_time, reduction_time
 
 
@@ -1297,6 +1292,7 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, ffn_dim)
             local_comp = self.get_data_parallel_local_computation(hidden_dim, ffn_dim)
+
         embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
         softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
@@ -1322,35 +1318,28 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         transformer_gemm_entries: List[Dict[str, Any]] = []
         gemm_specs = [
-            ("gemm_qkv_proj", shapes["qkv_proj"]),
-            ("gemm_attn_score", shapes["attention_score"]),
-            ("gemm_attn_output", shapes["attention_output"]),
-            ("gemm_output_proj", shapes["output_proj"]),
-            ("gemm_ffn1", shapes["ffn1"]),
-            ("gemm_ffn2", shapes["ffn2"]),
+            ("qkv_proj", shapes["qkv_proj"]),
+            ("attention_score", shapes["attention_score"]),
+            ("attention_output", shapes["attention_output"]),
+            ("output_proj", shapes["output_proj"]),
+            ("ffn1", shapes["ffn1"]),
+            ("ffn2", shapes["ffn2"]),
         ]
 
-        gemm_name_mapping = {
-            "gemm_qkv_proj": "qkv_proj",
-            "gemm_attn_score": "attention_score",
-            "gemm_attn_output": "attention_output",
-            "gemm_output_proj": "output_proj",
-            "gemm_ffn1": "ffn1",
-            "gemm_ffn2": "ffn2",
-        }
-
         for base_name, gemm_spec in gemm_specs:
-            result_key = gemm_name_mapping[base_name]
-            result_data = gemm_results[result_key]
+            result_data = gemm_results[base_name]
+            forward_duration = result_data["forward_gemm"]
+            backward_duration = result_data["backward_gemm"]
             entry = {
                 "name": base_name,
                 "forward": {
-                    "duration": result_data["forward"],
+                    # AstraSim models reductions through explicit comm edges, so only feed compute time here.
+                    "duration": forward_duration,
                     "reduction": result_data["forward_reduction"],
                     "comm_keys": [],
                 },
                 "backward": {
-                    "duration": result_data["backward"],
+                    "duration": backward_duration,
                     "reduction": result_data["backward_reduction"],
                     "comm_keys": [],
                 },
@@ -1363,7 +1352,6 @@ class TimeCalculationLLM(TimeCalculation):
             )
 
             transformer_gemm_entries.append(entry)
-
         # Inject non-GEMM pointwise operations so analytical and hybrid sums align
         extra_ops = (
             "attention_scale_softmax",
@@ -1563,18 +1551,17 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = pipeline_root
         self.pipeline_interconnect = dispatcher.interconnect_params
 
-        # self.pipeline_graph.save_graph(pipeline_root, "output_graph/", "fw_bw_graph")
 
-        # if self.transformer_analytical_time_forward is not None:
-        #     print(
-        #         f"Analytical transformer forward time: "
-        #         f"{self.transformer_analytical_time_forward:.1f}s"
-        #     )
-        # if self.transformer_analytical_time_backward is not None:
-        #     print(
-        #         f"Analytical transformer backward time: "
-        #         f"{self.transformer_analytical_time_backward:.1f}s"
-        #     )
+        self.transformer_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
+            self.transformer_forward_root,
+            self.network_model,
+            self.pipeline_interconnect,
+        )
+        self.transformer_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
+            self.transformer_backward_root,
+            self.network_model,
+            self.pipeline_interconnect,
+        )
 
         graph_folder = self.output_dir.rstrip(os.sep) + os.sep
         if self._generate_graphs and self.transformer_forward_root is not None:
@@ -1596,13 +1583,13 @@ class TimeCalculationLLM(TimeCalculation):
                 "pipeline_graph_post",
             )
 
-        # use generate graphs as temp debug. If set, print analytical transformer time and actual transformer time
+        # debug helper. If set, print analytical transformer time and actual transformer time
         if self._generate_graphs:
-            print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.1f}s")
-            print(f"Analytical transformer backward time: {self.transformer_analytical_time_backward:.1f}s")
+            print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.4f}s")
+            print(f"Analytical transformer backward time: {self.transformer_analytical_time_backward:.4f}s")
             if self.transformer_astrasim_time_forward is not None and self.transformer_astrasim_time_backward is not None:
-                print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.1f}s")
-                print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.1f}s")
+                print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.4f}s")
+                print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.4f}s")
 
         self.tot_time = time_fw_bw
 
@@ -1656,19 +1643,21 @@ class LLMExecutionDispatcher:
         raise ValueError(f"Unsupported execution mode: {mode}")
 
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
-        timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
-            self.pipeline_root,
-            self.time_calc.network_model,
-            self.interconnect_params,
-        )
+        if declared_mode == ExecutionMode.HYBRID:
+            filename = "/hybrid_graph"
+            timed_root = self.pipeline_root
+        else: # must be "ANALYTICAL"
+            filename = "/analytical_graph"
+            timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
+                self.pipeline_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            
         generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         if generate_graphs:
-            if declared_mode == ExecutionMode.HYBRID:
-                filename = "/hybrid_graph"
-            else:
-                filename = "/analytical_graph"
             self.pipeline_graph.save_graph(
-                timed_root,
+                self.pipeline_root,
                 self.time_calc.output_dir,
                 filename,
             )
@@ -1679,8 +1668,6 @@ class LLMExecutionDispatcher:
         return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
-        transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
-
         generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         if generate_graphs:
             self.transformer_graph.save_graph(
@@ -1688,6 +1675,18 @@ class LLMExecutionDispatcher:
                 self.time_calc.output_dir,
                 "/hybrid_graph_transformer",
             )
+            timed_root = self.transformer_graph.convert_comm_sizes_to_times(
+                self.transformer_forward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            self.transformer_graph.save_graph(
+                timed_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer_deepflow_annotated",
+            )
+        transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
+
         if transformer_time is not None:
             self._apply_transformer_time(transformer_time)
         return self._run_pipeline_with_analytical_comm(ExecutionMode.HYBRID)
@@ -1854,7 +1853,6 @@ class LLMExecutionDispatcher:
             artifact_dir_bwd = os.path.join(artifact_dir, "bwd")
             os.makedirs(artifact_dir_fwd, exist_ok=True)
             os.makedirs(artifact_dir_bwd, exist_ok=True)
-        should_mute = getattr(self.time_calc, "quiet_astrasim", False)
 
         fwd_per_rank = None
         bwd_per_rank = None

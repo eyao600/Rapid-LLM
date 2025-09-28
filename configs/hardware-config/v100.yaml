@@ -181,3 +181,8 @@ execution_backend:
       endpoint_delay: 10
       active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
       preferred_dataset_splits: 32 # Should be same as active_chunks_per_dimension
+
+inference:
+  kvcache_precision: 2  # bytes per element
+  kvcache_type: "hbm_only"
+  kvcache_fetch_overlap: false
