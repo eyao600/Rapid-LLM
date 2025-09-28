@@ -1272,6 +1272,7 @@ class TimeCalculationLLM(TimeCalculation):
         vocab_size: int,
         include_pipeline_backward: bool,
         include_transformer_backward: bool,
+        gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None, # optional override, decode only.
     ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
         """Build pipeline/transformer graphs shared across training and inference."""
 
@@ -1295,7 +1296,11 @@ class TimeCalculationLLM(TimeCalculation):
 
         embedding_size = math.ceil(self.precision * vocab_size * hidden_dim) + math.ceil(self.precision * seq_len * hidden_dim)
         softmax_size = math.ceil(self.precision * hidden_dim * vocab_size)
-        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
+        # Below, we fix pipeline comm sizes for decode
+        attn_shape = (gemm_shapes or {}).get("attention_score")
+        pipeline_seq_len = max(1, int(attn_shape[1])) if attn_shape and len(attn_shape) > 1 else seq_len
+
+        cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, pipeline_seq_len)[1]
 
         comm_metadata = self._build_comm_metadata(
             reduction_sizes=reduction_sizes,
@@ -1305,7 +1310,7 @@ class TimeCalculationLLM(TimeCalculation):
             cross_layer_bytes=cross_layer_bytes,
         )
 
-        shapes = LLM_util.process_gemm_shapes(
+        shapes = gemm_shapes or LLM_util.process_gemm_shapes(
             batch_size,
             seq_len,
             hidden_dim,

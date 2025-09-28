@@ -15,7 +15,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         self._raw_model_config = model_config
         if getattr(self.model, "run_type", "") == "inference" and self.mb != 1:
             raise ValueError(
-                "Inference mode requires scheduling_param.mb = 1 so pipeline stages receive full tokens."
+                "Inference mode requires scheduling_param.mb = 1 (WIP)."
             )
 
     def _decode_node_breakdown(
@@ -135,6 +135,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         gemm_results: Dict[str, Dict[str, float]],
         batch_size: int,
         total_seq_len: int,
+        gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
     ):
         ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
         return self._prepare_execution_graphs(
@@ -152,6 +153,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             vocab_size=self.vocab_size,
             include_pipeline_backward=False,
             include_transformer_backward=False,
+            gemm_shapes=gemm_shapes,
         )
 
     def calc_time(self) -> float:

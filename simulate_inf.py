@@ -213,6 +213,7 @@ class DecodeGraph(Graph):
             gemm_results=gemm_results,
             batch_size=self.config.batch_size,
             total_seq_len=total_seq_len,
+            gemm_shapes=gemm_shapes,
         )
 
         dispatcher = LLMExecutionDispatcher(
