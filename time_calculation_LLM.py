@@ -513,11 +513,27 @@ class TimeCalculationLLM(TimeCalculation):
     def _effective_dims(cls, gemm: Tuple[int, ...]) -> Tuple[int, int, int, int]:
         batch, m, k, n = cls._expand_gemm_descriptor(gemm)
         return batch, batch * m, k, n
+    # def sequence
+    def get_tensor_reduction_time(self, size_bytes: int, kind: str, name: str ) -> float:
+        
+        reduction_time = self.network_model.collective(
+                kind=kind, 
+                size_bytes=size_bytes,#for each rank or total?
+                participants=int(self.tp),
+                ib=self.IBK1, 
+                ll=self.LLK1,
+                local_bytes= 0, 
+                debug_label=name or "comm",
+        )
+        return reduction_time
+        
+        
     def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None, comm_after = False) -> Tuple[float, float]:
         # tensor_type:"row", "column" determines the way gemm is distributed
         # comm_after: whether there is communication after gemm, for example, in attention output projection and ffn2
+        
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        reduction_time = 0.0
+        # reduction_time = 0.0
         
         if batch > 1: # for attention gemm only
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch/self.tp #each gemm is independent, so multiply by batch size and divide by tp
@@ -533,18 +549,17 @@ class TimeCalculationLLM(TimeCalculation):
             else:
                 raise ValueError(f"Invalid tensor type: {tensor_type}")
         if comm_after: #only after output_projection and ffn2
-            size_bytes = math.ceil(self.precision * m * n / self.tp ) 
-            reduction_time = self.network_model.collective(
-                kind="all_reduce", 
-                size_bytes=size_bytes,#for each rank or total?
-                participants=int(self.tp),
-                ib=self.IBK1, 
-                ll=self.LLK1,
-                local_bytes= 0, 
-                debug_label=name or "comm",
-        )
+            if tensor_type == "column":
+                size_bytes = math.ceil(self.precision * m * n / self.tp )
+                print(f"communication after gemm of size {m,n} divided by tp {self.tp}: {size_bytes}")
+            elif tensor_type == "row":
+                size_bytes = math.ceil(self.precision * m * n )
+                print(f"communication after gemm of size {m,n} without tp division: {size_bytes}")
+            
 
-        return gemm_time, reduction_time, size_bytes if comm_after else 0
+
+
+        return gemm_time, size_bytes if comm_after else 0
     def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type = None, comm_after = False) -> Tuple[float, float]:
         # tensor_type:"row", "column" determines the way gemm is distributed
         # comm_after: whether there is communication after gemm, for example, in attention output projection and ffn2
@@ -560,7 +575,7 @@ class TimeCalculationLLM(TimeCalculation):
         if batch > 1: # for attention gemm only
             grad_time_act = self.getGEMMTime(m, n, k, name)[0] * batch/self.tp #each gemm is independent, so multiply by batch size and divide by tp
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch/self.tp
-            print("calculating attention gemm time of shape: %s and %s", (m,n,k) , (k,m,n))
+            print("calculating attention gemm time of shape: ", (m,n,k) , (k,m,n))
             print(f"grad_time for attention is multiplied by batch/tp: {batch}/{self.tp}")
             # print("calculating attention gemm time:", (k,m,n))
         else: # for qkv, output_projection, ffn1, ffn2
@@ -576,21 +591,22 @@ class TimeCalculationLLM(TimeCalculation):
                 print("calculating row wise gemm time of shape for gradient:", (m, n, math.ceil(k/self.tp)), (math.ceil(k/self.tp), m, n))
             else:
                 raise ValueError(f"Invalid tensor type: {tensor_type}")
-        if comm_after: #only after qkv_projection and ffn1 in backward pass
+        # if comm_after: #only after qkv_projection and ffn1 in backward pass
             
-            # size_bytes = math.ceil(self.precision * m * n / self.tp ) 
-            reduction_time = self.network_model.collective(
-                kind="all_reduce", 
-                size_bytes=act_bytes,#for each rank or total?
-                participants=int(self.tp),
-                ib=self.IBK1, 
-                ll=self.LLK1,
-                local_bytes= 0, 
-                debug_label=name or "comm",
-        )
+        #     # size_bytes = math.ceil(self.precision * m * n / self.tp ) 
+        #     print("all reduce size in backward:", act_bytes)
+        #     reduction_time = self.network_model.collective(
+        #         kind="all_reduce", 
+        #         size_bytes=act_bytes,#for each rank or total?
+        #         participants=int(self.tp),
+        #         ib=self.IBK1, 
+        #         ll=self.LLK1,
+        #         local_bytes= 0, 
+        #         debug_label=name or "comm",
+        # )
         gemm_time = grad_time_act + grad_time_wt
 
-        return gemm_time, reduction_time, act_bytes if comm_after else 0
+        return gemm_time,  act_bytes if comm_after else 0
                 
                 
     def _distributed_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type=None, comm_after = False) -> Tuple[float, float]:
@@ -655,8 +671,8 @@ class TimeCalculationLLM(TimeCalculation):
         # if self.tp >1:
         # gemm_time = 0 
         # reduction_time = 0
-        gemm_time, reduction_time, _ = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", tensor_type="row", comm_after=True)
-        
+        gemm_time,  size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", tensor_type="row", comm_after=True)
+        reduction_time = self.get_tensor_reduction_time(size_bytes, kind="all_reduce", name="linear_softmax_f")
         point_flop = effective_m * (3 * n - 1)
         point_mem = self.precision * effective_m * (7 * n)
         point_time = (
@@ -760,46 +776,95 @@ class TimeCalculationLLM(TimeCalculation):
 
         return time
 
-    def get_layernorm_f(self, tensor_shape):
+    def get_gelu_f(self, tensor_shape):
         _, elements, _, hidden = self._effective_dims(tensor_shape)
+        compute_flops = elements * hidden * 40  # approx 40 flops per element for GELU
+        mem_bytes = self.precision * elements * hidden * 2  # read, write
 
-        # LayerNorm forward (in LN2-style batch): mean + variance + normalize + affine
-        compute_flops = elements * (2 * hidden)  # mean
-        compute_flops += elements * (3 * hidden)  # variance: square, add, divide
-        compute_flops += elements * (4 * hidden)  # normalize: x - mean, * inv_std
-        compute_flops += elements * (2 * hidden)  # affine: gamma/beta
-
-        mem_bytes = self.precision * elements * hidden * 10
-
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-f") + 2 * self.O
 
         if self.debug:
             print(
-                "LayerNorm (f) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                "GELU (f) elements: {:,}, flops: {:,}, mem: {:,}".format(
                     int(elements / 1e6), int(compute_flops / 1e9), int(mem_bytes / 1e9)
                 )
             )
-            print("LayerNorm (f) time: {:,}\n".format(time))
+            print("GELU (f) time: {:,}\n".format(time))
 
         return time
-
-    def get_layernorm_b(self, tensor_shape):
+    def get_gelu_b(self, tensor_shape):
         _, elements, _, hidden = self._effective_dims(tensor_shape)
+        compute_flops = elements * hidden * 80  # approx 80 flops per element for GELU backward
+        mem_bytes = self.precision * elements * hidden * 3  # read grad, read forward, write grad
 
-        compute_flops = elements * hidden * 8
-        mem_bytes = self.precision * elements * hidden * 12
-
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
+        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-b") + 3 * self.O
 
         if self.debug:
             print(
-                "LayerNorm (b) elements: {:,}, flops: {:,}, mem: {:,}".format(
+                "GELU (b) elements: {:,}, flops: {:,}, mem: {:,}".format(
                     int(elements / 1e6), int(compute_flops / 1e9), int(mem_bytes / 1e9)
                 )
             )
-            print("LayerNorm (b) time: {:,}\n".format(time))
+            print("GELU (b) time: {:,}\n".format(time))
 
         return time
+    def get_layernorm_f(self, batch, seq_len, d_model, comm_after = False):
+        if self.sp ==1:
+            elements = batch * seq_len * d_model
+        else: #for sequence parallelism, layernorm is calculated within each sequence partition
+            elements = batch * math.ceil(seq_len/self.sp) * d_model
+        compute_flops = elements * 7
+        mem_bytes = self.precision * elements * 2
+        
+        if self.sp > 1: #all gather after layernorm when sequence parallelism is used
+            size_bytes = self.precision * elements
+            reduction_time = self.network_model.collective(
+                kind="all_gather", 
+                size_bytes=size_bytes,#for each rank or total?
+                participants=int(self.sp),
+                ib=self.IBK1, 
+                ll=self.LLK1, #TODO fix the bandwidth and latency for sequence parallelism
+                local_bytes= 0, 
+                debug_label="layernorm_f_all_gather",
+        )
+        else:
+            reduction_time = 0.0
+            size_bytes = 0
+
+        compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
+
+
+        return compute_time, reduction_time, size_bytes
+    
+    
+
+    def get_layernorm_b(self, batch, seq_len, d_model, comm_after = False):
+        if self.sp == 1:
+            elements = batch * seq_len * d_model
+        else: #for sequence parallelism, layernorm is calculated within each sequence partition
+            elements = batch * math.ceil(seq_len/self.sp) * d_model
+        compute_flops = elements * 14
+        mem_bytes = self.precision * elements * 4
+
+        compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
+        if self.sp > 1: #all gather after layernorm when sequence parallelism is used
+            size_bytes = self.precision * elements
+            reduction_time = self.network_model.collective(
+                kind="all_gather", 
+                size_bytes=size_bytes,#for each rank or total?
+                participants=int(self.sp),
+                ib=self.IBK1, 
+                ll=self.LLK1,
+                local_bytes= 0, 
+                debug_label="layernorm_b_all_gather",
+        )
+            
+        else:
+            reduction_time = 0.0
+            size_bytes = 0
+
+
+        return compute_time, reduction_time, size_bytes
     def get_linear_softmax_b(self, gemm):
         _, effective_m, k, n = self._effective_dims(gemm)
         gemm_time, reduction_time = self._distributed_gemm_backward(gemm, "linear_softmax_b")
@@ -978,13 +1043,14 @@ class TimeCalculationLLM(TimeCalculation):
     
     
     
-    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim):
+    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim):
         """Compute latency for all GEMM operations and node breakdown times in one function."""
 
         # Process GEMM shapes
         gemm_shapes = LLM_util.process_gemm_shapes(
-            batch_size, seq_len, hidden_dim, num_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
+            batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
         )
+        print("generating gemm shapes for transformer batch size:", batch_size, "seq_len:", seq_len, "hidden_dim:", hidden_dim, "num_heads:", num_heads,  "kv_heads", kv_heads, "ffn_dim:",ffn_dim)
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
         gemm_attention_score = gemm_shapes["attention_score"]
         gemm_attention_output = gemm_shapes["attention_output"]
@@ -995,77 +1061,91 @@ class TimeCalculationLLM(TimeCalculation):
 
         # Compute GEMM times and organize in structured dict
         transformer_results = {}
-
+        comm_kind_fwd = "all_reduce" if self.sp == 1 else "reduce_scatter"
+        comm_kind_bwd = "all_reduce" if self.sp == 1 else "reduce_scatter"
         # QKV Projection GEMM
-        qkv_proj_gemm_f, qkv_proj_reduction_f, qkv_proj_size = self._tensor_parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", tensor_type="column")
-        qkv_proj_gemm_b, qkv_proj_reduction_b, qkv_proj_size_b = self._tensor_parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", tensor_type="column", comm_after=True)
-        qkv_proj_f = qkv_proj_gemm_f + qkv_proj_reduction_f
+        # if self.sp == 1:
+        qkv_proj_gemm_f,  qkv_proj_size = self._tensor_parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", tensor_type="column")
+        # qkv_proj_reduction_f = self.get_tensor_reduction_time(qkv_proj_size, kind="all_reduce", name="qkv_projection_f") if qkv_proj_size else 0
+        qkv_proj_gemm_b,  qkv_proj_size_b = self._tensor_parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", tensor_type="column", comm_after=True)
+        qkv_proj_reduction_b = self.get_tensor_reduction_time(qkv_proj_size_b, kind=comm_kind_bwd, name="qkv_projection_b") if qkv_proj_size_b else 0
+        qkv_proj_f = qkv_proj_gemm_f 
         qkv_proj_b = qkv_proj_gemm_b + qkv_proj_reduction_b
         transformer_results['qkv_proj'] = {
             'forward': qkv_proj_f, 'backward': qkv_proj_b,
-            'forward_gemm': qkv_proj_gemm_f, 'forward_reduction': qkv_proj_reduction_f,
+            'forward_gemm': qkv_proj_gemm_f, 'forward_reduction': 0,
             'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b,
             'comm_size': qkv_proj_size_b
         }
 
         # Attention Score GEMM
-        attn_score_gemm_f, attn_score_reduction_f, attn_score_size = self._tensor_parallelism_gemm_forward(gemm_attention_score, "attention_score_f")
-        attn_score_gemm_b, attn_score_reduction_b, _ = self._tensor_parallelism_gemm_backward(gemm_attention_score, "attention_score_b")
-        attention_score_f = attn_score_gemm_f + attn_score_reduction_f
-        attention_score_b = attn_score_gemm_b + attn_score_reduction_b
+        attn_score_gemm_f,  _ = self._tensor_parallelism_gemm_forward(gemm_attention_score, "attention_score_f")
+        # attn_score_reduction_f = self.get_tensor_reduction_time(attn_score_size, kind="all_reduce", name="attention_score_f") if attn_score_size else 0
+        attn_score_gemm_b,  _ = self._tensor_parallelism_gemm_backward(gemm_attention_score, "attention_score_b")
+        # attn_score_reduction_b = self.get_tensor_reduction_time(attn_score_size, kind="all_reduce", name="attention_score_b") if attn_score_size else 0
+        attention_score_f = attn_score_gemm_f 
+        attention_score_b = attn_score_gemm_b 
         transformer_results['attention_score'] = {
             'forward': attention_score_f, 'backward': attention_score_b,
-            'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
-            'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b
+            'forward_gemm': attn_score_gemm_f, 
+            'backward_gemm': attn_score_gemm_b, 
             
         }
 
         # Attention Output GEMM
-        attn_out_gemm_f, attn_out_reduction_f, attn_out_size = self._tensor_parallelism_gemm_forward(gemm_attention_output, "attention_output_f")
-        attn_out_gemm_b, attn_out_reduction_b, _ = self._tensor_parallelism_gemm_backward(gemm_attention_output, "attention_output_b")
-        attention_output_f = attn_out_gemm_f + attn_out_reduction_f
-        attention_output_b = attn_out_gemm_b + attn_out_reduction_b
+        attn_out_gemm_f,  _ = self._tensor_parallelism_gemm_forward(gemm_attention_output, "attention_output_f")
+        # attn_out_reduction_f = self.get_tensor_reduction_time(attn_out_size, kind="all_reduce", name="attention_output_f") if attn_out_size else 0
+        attn_out_gemm_b,  _ = self._tensor_parallelism_gemm_backward(gemm_attention_output, "attention_output_b")
+        # attn_out_reduction_b = self.get_tensor_reduction_time(attn_out_size, kind="all_reduce", name="attention_output_b") if attn_out_size else 0
+        attention_output_f = attn_out_gemm_f 
+        attention_output_b = attn_out_gemm_b 
         transformer_results['attention_output'] = {
             'forward': attention_output_f, 'backward': attention_output_b,
-            'forward_gemm': attn_out_gemm_f, 'forward_reduction': attn_out_reduction_f,
-            'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b
+            'forward_gemm': attn_out_gemm_f, 
+            'backward_gemm': attn_out_gemm_b, 
         }
 
         # Output Projection GEMM
-        out_proj_gemm_f, out_proj_reduction_f, out_proj_size = self._tensor_parallelism_gemm_forward(gemm_output_proj, "output_projection_f", tensor_type="row", comm_after=True)
-        out_proj_gemm_b, out_proj_reduction_b, _ = self._tensor_parallelism_gemm_backward(gemm_output_proj, "output_projection_b", tensor_type="row", comm_after=False)
+        out_proj_gemm_f, out_proj_size = self._tensor_parallelism_gemm_forward(gemm_output_proj, "output_projection_f", tensor_type="row", comm_after=True)
+        out_proj_reduction_f = self.get_tensor_reduction_time(out_proj_size, kind=comm_kind_fwd, name="output_projection_f") if out_proj_size else 0
+        out_proj_gemm_b,  _ = self._tensor_parallelism_gemm_backward(gemm_output_proj, "output_projection_b", tensor_type="row", comm_after=False)
         output_proj_f = out_proj_gemm_f + out_proj_reduction_f
-        output_proj_b = out_proj_gemm_b + out_proj_reduction_b
+        output_proj_b = out_proj_gemm_b 
         transformer_results['output_proj'] = {
             'forward': output_proj_f, 'backward': output_proj_b,
             'forward_gemm': out_proj_gemm_f, 'forward_reduction': out_proj_reduction_f,
-            'backward_gemm': out_proj_gemm_b, 'backward_reduction': out_proj_reduction_b,
+            'backward_gemm': out_proj_gemm_b, 'backward_reduction': 0,
             'comm_size': out_proj_size
         }
 
         # FFN1 GEMM
-        ffn1_gemm_f, ffn1_reduction_f, ffn1_size = self._tensor_parallelism_gemm_forward(gemm_ffn1, "ffn_f", tensor_type="column")
-        ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self._tensor_parallelism_gemm_backward(gemm_ffn1, "ffn_b", tensor_type="column", comm_after=True)
-        ffn1_f = ffn1_gemm_f + ffn1_reduction_f
+        ffn1_gemm_f,  ffn1_size = self._tensor_parallelism_gemm_forward(gemm_ffn1, "ffn_f", tensor_type="column")
+        ffn1_gemm_b,  ffn1_size_b = self._tensor_parallelism_gemm_backward(gemm_ffn1, "ffn_b", tensor_type="column", comm_after=True)
+        # ffn1_reduction_f = self.get_tensor_reduction_time(ffn1_size, kind="all_reduce", name="ffn_f") if ffn1_size else 0
+        ffn1_reduction_b = self.get_tensor_reduction_time(ffn1_size_b, kind=comm_kind_bwd, name="ffn_b") if ffn1_size_b else 0
+        ffn1_f = ffn1_gemm_f 
         ffn1_b = ffn1_gemm_b + ffn1_reduction_b
         transformer_results['ffn1'] = {
             'forward': ffn1_f, 'backward': ffn1_b,
-            'forward_gemm': ffn1_gemm_f, 'forward_reduction': ffn1_reduction_f,
+            'forward_gemm': ffn1_gemm_f, 'forward_reduction': 0,
             'backward_gemm': ffn1_gemm_b, 'backward_reduction': ffn1_reduction_b,
             'comm_size': ffn1_size_b
         }
 
         # FFN2 GEMM
-        ffn2_gemm_f, ffn2_reduction_f, ffn2_size = self._tensor_parallelism_gemm_forward(gemm_ffn2, "ffn2_f", tensor_type="row", comm_after=True)
-        ffn2_gemm_b, ffn2_reduction_b, _ = self._tensor_parallelism_gemm_backward(gemm_ffn2, "ffn2_b", tensor_type="row", comm_after=False)
+        ffn2_gemm_f,  ffn2_size = self._tensor_parallelism_gemm_forward(gemm_ffn2, "ffn2_f", tensor_type="row", comm_after=True)
+        ffn2_reduction_f = self.get_tensor_reduction_time(ffn2_size, kind=comm_kind_fwd, name="ffn2_f") if ffn2_size else 0
+        ffn2_gemm_b,  _ = self._tensor_parallelism_gemm_backward(gemm_ffn2, "ffn2_b", tensor_type="row", comm_after=False)
         ffn2_f = ffn2_gemm_f + ffn2_reduction_f
-        ffn2_b = ffn2_gemm_b + ffn2_reduction_b
+        ffn2_b = ffn2_gemm_b 
         transformer_results['ffn2'] = {
             'forward': ffn2_f, 'backward': ffn2_b,
             'forward_gemm': ffn2_gemm_f, 'forward_reduction': ffn2_reduction_f,
-            'backward_gemm': ffn2_gemm_b, 'backward_reduction': ffn2_reduction_b,
+            'backward_gemm': ffn2_gemm_b, 'backward_reduction': 0,
             'comm_size': ffn2_size
         }
+        
+            
 
         # Calculate non-GEMM operations
         embedding_f = self.get_embedding_f()
@@ -1080,17 +1160,22 @@ class TimeCalculationLLM(TimeCalculation):
         residual1_b = self.get_residual_b(tensor_shape=gemm_output_proj)
         # transformer_results['residual1'] = {'forward': residual1_f, 'backward': residual1_b}
 
-        layernorm1_f = self.get_layernorm_f(tensor_shape=gemm_output_proj)
-        layernorm1_b = self.get_layernorm_b(tensor_shape=gemm_output_proj)
-        transformer_results['layernorm1'] = {'forward': layernorm1_f + residual1_f, 'backward': layernorm1_b + residual1_b}
+        layernorm1_f, layernorm_reduction_f, LN1_comm_bytes_f= self.get_layernorm_f(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
+        layernorm1_b, layernorm_reduction_b, LN1_comm_bytes_b= self.get_layernorm_b(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
+        transformer_results['layernorm1'] = {'forward': layernorm1_f + residual1_f, 'forward_reduction':layernorm_reduction_f, 'backward': layernorm1_b + residual1_b, 'backward_reduction': layernorm_reduction_b, 'comm_size_forward': LN1_comm_bytes_f, 'comm_size_backward': LN1_comm_bytes_b}
+        
 
         residual2_f = self.get_residual_f(tensor_shape=gemm_ffn2)
         residual2_b = self.get_residual_b(tensor_shape=gemm_ffn2)
         # transformer_results['residual2'] = {'forward': residual2_f, 'backward': residual2_b}
 
-        layernorm2_f = self.get_layernorm_f(tensor_shape=gemm_ffn2)
-        layernorm2_b = self.get_layernorm_b(tensor_shape=gemm_ffn2)
-        transformer_results['layernorm2'] = {'forward': layernorm2_f + residual2_f, 'backward': layernorm2_b + residual2_b}
+        layernorm2_f, layernorm_reduction_f, LN2_comm_bytes_f = self.get_layernorm_f(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
+        layernorm2_b, layernorm_reduction_b, LN2_comm_bytes_b = self.get_layernorm_b(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
+        transformer_results['layernorm2'] = {'forward': layernorm2_f + residual2_f, 'forward_reduction':layernorm_reduction_f,'backward': layernorm2_b + residual2_b, 'backward_reduction': layernorm_reduction_b, 'comm_size_forward': LN2_comm_bytes_f, 'comm_size_backward': LN2_comm_bytes_b}
+        
+        gelu_f = self.get_gelu_f(tensor_shape=gemm_ffn1)
+        gelu_b = self.get_gelu_b(tensor_shape=gemm_ffn1)
+        transformer_results['gelu'] = {'forward': gelu_f, 'backward': gelu_b}
 
         linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
@@ -1111,24 +1196,25 @@ class TimeCalculationLLM(TimeCalculation):
         )
         transformer_results['MHA'] = {'forward': mha_time_f, 'backward': mha_time_b, "forward_reduction": out_proj_reduction_f, "backward_reduction": qkv_proj_reduction_b, "comm_size_forward": out_proj_size, "comm_size_backward": qkv_proj_size_b }
 
-        ffn_time_f = transformer_results['ffn1']['forward_gemm'] + transformer_results['ffn2']['forward_gemm']
+        ffn_time_f = transformer_results['ffn1']['forward_gemm'] + transformer_results['ffn2']['forward_gemm'] + transformer_results['gelu']['forward']
         ffn_time_b = (
-            transformer_results['ffn1']['backward_gemm'] + transformer_results['ffn2']['backward_gemm']
+            transformer_results['ffn1']['backward_gemm'] + transformer_results['ffn2']['backward_gemm'] + transformer_results['gelu']['backward']
         )
         transformer_results['MLP'] = {'forward': ffn_time_f, 'backward': ffn_time_b, "forward_reduction": ffn2_reduction_f, "backward_reduction": ffn1_reduction_b, "comm_size_forward": ffn2_size, "comm_size_backward": ffn1_size_b }
         # Calculate transformer times directly
+        
         transformer_time_f = (
             transformer_results['MHA']['forward'] + transformer_results['MHA']['forward_reduction'] + transformer_results['MLP']['forward'] + transformer_results['MLP']['forward_reduction'] +
-            transformer_results['layernorm1']['forward'] + transformer_results['layernorm2']['forward']
+            transformer_results['layernorm1']['forward'] + transformer_results['layernorm1']['forward_reduction']+ transformer_results['layernorm2']['forward']+ transformer_results['layernorm2']['forward_reduction']
         )
         transformer_time_b = (
             transformer_results['MHA']['backward'] + transformer_results['MHA']['backward_reduction'] + transformer_results['MLP']['backward'] + transformer_results['MLP']['backward_reduction'] +
-            transformer_results['layernorm1']['backward'] + transformer_results['layernorm2']['backward']
+            transformer_results['layernorm1']['backward'] + transformer_results['layernorm1']['backward_reduction']+ transformer_results['layernorm2']['backward']+ transformer_results['layernorm2']['backward_reduction']
         )
         output_csv = os.path.join(self.output_dir, "Transformer_breakdown_times.csv")
         with open(output_csv, "w") as f:
             data = [qkv_proj_gemm_f, attn_score_gemm_f, attn_out_gemm_f, out_proj_gemm_f,ffn1_gemm_f, ffn2_gemm_f,
-                    attention_scale_softmax_f, layernorm1_f + residual1_f, layernorm2_f + residual2_f ,0,
+                    attention_scale_softmax_f, layernorm1_f + residual1_f, layernorm2_f + residual2_f ,gelu_f,
                     out_proj_reduction_f, ffn2_reduction_f]
             LLM_util.save_transformer_breakdown_csv(data)
             
@@ -1251,11 +1337,19 @@ class TimeCalculationLLM(TimeCalculation):
         # row_shard = math.ceil(effective_m / row_participants) if effective_m else 0
         # col_shard = math.ceil(effective_n / col_participants) if effective_n else 0
 
-        if self.tp>1:
+        if self.tp>1 and self.sp==1:
             # total_bytes = math.ceil(precision * effective_m * effective_n)
             # total_bytes=
-            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
-            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'tp')
+            #TODO: correct the communication type here
+            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'kp1')
+            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'kp1')
+        elif self.tp>1 and self.sp>1:
+            if entry['name'] in ['layernorm1', 'layernorm2']:
+                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.sp, 'kp1')
+                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.sp, 'kp1')
+            elif entry['name'] in ['MHA', 'MLP']:
+                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.sp, 'kp1')
+                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.sp, 'kp1')
         # if tp_mode == "CR":
         #     if kp1 <= 1:
         #         return
@@ -1517,34 +1611,28 @@ class TimeCalculationLLM(TimeCalculation):
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
+        
+        attention_type = self.attention_type
+        print(f"Attention type: {attention_type}")
+        kv_heads = self.kv_heads if self.kv_heads else num_heads
+        print(f"Number of key/value heads: {kv_heads}")
+        
+        print("self.tp:", self.tp)
+        print("self.sp:", self.sp)
 
         # Adjust types and calculate node latencies
         self.readjust_type()
 
         # Get structured transformer results and node breakdown in one efficient call
-        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, ffn_dim)
-
-        if self.debug:
-            print(
-                "dp: {}, lp: {}, kp_hidden_dim1: {}, kp_hidden_dim2: {}, kp_softmax_dim1: {}, kp_softmax_dim2: {}, kp_embedding_dim1: {}, kp_embedding_dim2: {},  kp_hidden_type: {}, kp_softmax_type: {}, kp_embedding_type: {}\n".format(
-                    self.dp, self.lp, self.kp_hidden_dim1, self.kp_hidden_dim2,
-                    self.kp_softmax_dim1, self.kp_softmax_dim2, self.kp_embedding_dim1,
-                    self.kp_embedding_dim2, self.kp_hidden_type, self.kp_softmax_type,
-                    self.kp_embedding_type,
-                )
-            )
+        # if attention_type =='mha':
+        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim )
+        # elif attention_type =='gqa':
+            
+            
 
 
-            # print(
-            #     "embedding_f: {}, embedding_b: {}, qkv_proj_f: {}, qkv_proj_b: {}, attention_score_f: {}, attention_score_b: {}, attention_scale_softmax_f: {}, attention_scale_softmax_b: {}, attention_output_f: {}, attention_output_b: {}, output_proj_f: {}, output_proj_b: {}, residual1_f: {}, residual1_b: {}, layernorm1_f: {}, layernorm1_b: {}, ffn1_f: {}, ffn1_b: {}, ffn2_f: {}, ffn2_b: {}".format(
-            #     embedding_f, embedding_b,
-                
-            #     qkv_proj_f, qkv_proj_b, attention_score_f, attention_score_b,
-            #     attention_scale_softmax_f, attention_scale_softmax_b,
-            #     attention_output_f, attention_output_b, output_proj_f, output_proj_b,
-            #     residual1_f, residual1_b, layernorm1_f, layernorm1_b,
-            #     ffn1_f, ffn1_b, ffn2_f, ffn2_b
-            # ))
+
+
         print("Calculating LLM time...")
 
         # Create graph and calculate times
@@ -1554,6 +1642,7 @@ class TimeCalculationLLM(TimeCalculation):
         print("total number of workers: {}".format(self.num_workers))
         print("number of workers for each data parallelism batch: {}".format(self.num_workers_dp))
         print("number of workers for each pipeline stage: {}".format(self.num_workers_lp))
+        
 
         (
             pipeline_graph_obj,
@@ -1771,7 +1860,11 @@ class LLMExecutionDispatcher:
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
         if declared_mode == ExecutionMode.HYBRID:
             filename = "/hybrid_graph"
-            timed_root = self.pipeline_root
+            timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
+                self.pipeline_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
         else: # must be "ANALYTICAL"
             filename = "/analytical_graph"
             timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
@@ -1803,10 +1896,21 @@ class LLMExecutionDispatcher:
             self.transformer_graph.save_graph(
                 self.transformer_forward_root,
                 self.time_calc.output_dir,
-                "/hybrid_graph_transformer",
+                "/hybrid_graph_transformer_forward",
             )
+            self.transformer_graph.save_graph(
+                self.transformer_backward_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer_backward",
+            )
+            
             timed_root = self.transformer_graph.convert_comm_sizes_to_times(
                 self.transformer_forward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            timed_root_b = self.transformer_graph.convert_comm_sizes_to_times(
+                self.transformer_backward_root,
                 self.time_calc.network_model,
                 self.interconnect_params,
             )
@@ -1814,6 +1918,21 @@ class LLMExecutionDispatcher:
                 timed_root,
                 self.time_calc.output_dir,
                 "/hybrid_graph_transformer_deepflow_annotated",
+            )
+            self.transformer_graph.save_graph(
+                timed_root_b,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer_backward_deepflow_annotated",
+            )
+            timed_root_pipeline = self.pipeline_graph.convert_comm_sizes_to_times(
+                self.pipeline_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            self.pipeline_graph.save_graph(
+                timed_root_pipeline,
+                self.time_calc.output_dir,
+                "/hybrid_graph_pipeline_deepflow_annotated",
             )
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
 

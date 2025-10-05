@@ -230,10 +230,10 @@ def run_LLM(
         _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
         return
 
-    _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode)
+    _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode)
 
 
-def _run_llm_llmtest(exp_hw_config, exp_model_config, exp_dir, mode):
+def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
     output_file = os.path.join(exp_dir, "summary_LLM.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
     total_time = tc_llm.calc_time_llm()

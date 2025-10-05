@@ -150,6 +150,7 @@ scheduling_param:
   lp: 2 # pipeline stages 
   mb: 2 # number of micro-batches
   tp: 4 # tensor parallelism
+  sp: 4 # sequence parallelism     should be equal to tp if sequence parallelism is enabled or 1 if not
   t: "CR"
   kp1: 4
   kp2: 1

@@ -3,14 +3,19 @@ model_param:
     run_type: "training"
     batch_size: 2048  # Batch size
     seq_len: 16384
+    decode_len: 1024           # Number of autoregressive decode steps.
     hidden_dim: 8192
     attention:
-        attention_type: "mha"  # one of "mha","gqa","mla"
+        attention_type: "gqa"  # one of "mha","gqa","mla"
         num_heads: 64
-        # kv_heads: 8  # set only when attention_type is "gqa"
+        num_key_value_heads: 8  # set only when attention_type is "gqa"
     ffn_dim: 32768 # First FFN layer output dimension, typically 4 * D used when ffn_mult is NULL.
     ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
     vocab_size: 800000  # Vocabulary size
     num_layers: 2  # only 1 layer for now
     n_tokens: 10000000000  # Number of tokens to train on. Set to 1T for now.
     all_reduce: "every layer"  # When data parallel pre-apply grad all-reduce happens: "the end" or "every layer"
+
+inference_param:
+    sample_every: -1  # Sample decode steps every N steps for efficiency. -1 means only sample at start and end.
+

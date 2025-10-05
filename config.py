@@ -444,6 +444,7 @@ SchedulingConfig = _namedtuple(
         "kp_projection_type",
         "t",
         "tp",
+        "sp",
         "kp1",
         "kp2",
     ],
@@ -602,6 +603,8 @@ def parse_config(filename, config_type):
         sch_params = dict(config_dict["scheduling_param"])
         if "tp" not in sch_params:
             sch_params["tp"] = None
+        if "sp" not in sch_params:
+            sch_params["sp"] = None
         sch_config = SchedulingConfig(**sch_params)
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
         power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
@@ -698,7 +701,7 @@ def parse_config(filename, config_type):
             attn_type = str(attention_dict.get("attention_type", "mha")).lower()
             if "num_heads" not in attention_dict:
                 raise ValueError("model_param.attention.num_heads must be specified")
-            kv_heads_raw = attention_dict.get("kv_heads") if attn_type == "gqa" else None
+            kv_heads_raw = attention_dict.get("num_key_value_heads") if attn_type == "gqa" else None
             attention_cfg = LLMAttentionConfig(
                 attention_type=attn_type,
                 num_heads=int(attention_dict["num_heads"]),

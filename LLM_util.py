@@ -51,7 +51,7 @@ def reshape_gemm_to_3d(arg,options=None):
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
 
 
-def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_size):
+def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size ):
     """
     Generate GEMM shapes [M, K, N] for a multi-head Transformer decoder block.
 
@@ -62,26 +62,51 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, voc
         num_heads (int): number of attention heads (H)
         ffn_dim (int): first FFN layer output dimension (typically 4 * D)
         vocab_size (int): vocabulary size (V)
+        
+        for a standard multi-head attention, kv_heads = num_heads
 
 
     """
     assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+    assert num_heads % kv_heads == 0, "num_heads must be divisible by kv_heads"
     head_dim = d_model // num_heads
+    shared_heads = num_heads // kv_heads # how many heads share the same K,V
     gemms = OrderedDict()
+    # if shared_heads > 1:
+        
 
-    gemms["qkv_proj"] = (batch_size, seq_len, d_model, 3 * d_model)
+    gemms["qkv_proj"] = (batch_size, seq_len, d_model, (2 * kv_heads + num_heads) * head_dim)
+    
     gemms["attention_score"] = (
-        batch_size * num_heads,
-        seq_len,
-        head_dim,
-        seq_len,
-    )
+    batch_size * kv_heads,
+    seq_len * shared_heads,
+    head_dim,
+    seq_len)
+    
     gemms["attention_output"] = (
-        batch_size * num_heads,
-        seq_len,
-        seq_len,
-        head_dim,
-    )
+    batch_size * kv_heads,
+    seq_len * shared_heads,
+    seq_len,
+    head_dim)
+        
+        
+    # else:
+    #     gemms["qkv_proj"] = (batch_size, seq_len, d_model, 3 * d_model)
+        
+    #     gemms["attention_score"] = (
+    #     batch_size * num_heads,
+    #     seq_len,
+    #     head_dim,
+    #     seq_len)
+        
+    #     gemms["attention_output"] = (
+    #     batch_size * num_heads,
+    #     seq_len,
+    #     seq_len,
+    #     head_dim)
+        
+
+
     gemms["output_proj"] = (batch_size, seq_len, d_model, d_model)
     gemms["ffn1"] = (batch_size, seq_len, d_model, ffn_dim)
     gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model)
@@ -90,7 +115,7 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, voc
     return gemms
 
 
-def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
+def process_gemm_shapes(batch_size, seq_len, d_model, num_heads,  kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
     """
     Process GEMM shapes, reshape them into 3d.
 
@@ -103,17 +128,17 @@ def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_
         vocab_size (int): Vocabulary size.
     """
     # Generate GEMM shapes in 4D
-    gemm_shapes_4d = multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, ffn_dim, vocab_size)
+    gemm_shapes_4d = multihead_decoder_gemm(batch_size = batch_size, seq_len = seq_len, d_model= d_model, num_heads = num_heads, kv_heads=kv_heads, ffn_dim = ffn_dim, vocab_size= vocab_size)
 
     processed = OrderedDict()
     for key, shape in gemm_shapes_4d.items():
-        print(f"Original shape for {key}: {shape}")
+        # print(f"Original shape for {key}: {shape}")
         
         if key in ATTENTION_GEMM_KEYS:
             processed[key] = tuple(shape)
         else:
             processed[key] = reshape_gemm_to_3d(shape, option)
-        print(f"Processed shape for {key}: {processed[key]}")
+        # print(f"Processed shape for {key}: {processed[key]}")
 
     return processed
 

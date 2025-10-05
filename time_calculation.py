@@ -296,6 +296,7 @@ class TimeCalculation:
         self.kp_projection_type = par.kp_projection_type  # 1: CR, 2: RC
         self.t = par.t  # type of parallelism, e.g., "CR", "RC", "none"
         self.tp = par.tp 
+        self.sp = par.sp
         self.kp1= par.kp1  # first parallelism parameter
         self.kp2 = par.kp2  # second parallelism parameter
         
@@ -398,6 +399,8 @@ class TimeCalculation:
                 print(f"miniB: {self.miniB}, mb: {self.mb}")
                 raise ValueError("Batch size must be divisible by micro-batch size")
             self.microB = math.ceil(self.miniB / self.mb) if self.lp > 1 else self.miniB # micro-batch size for each pipeline stage
+            self.attention_type = self.model.attention_type
+            self.kv_heads = self.model.kv_heads if hasattr(self.model, 'kv_heads') else self.num_heads
 
     def get_model_class(self, model_type):
         """Return the appropriate model class based on the model type."""

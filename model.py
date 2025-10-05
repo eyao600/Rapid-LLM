@@ -27,11 +27,15 @@ class Model_LLM:
       self.seq_len          = exp_config.model_config.seq_len
       self.decode_len       = exp_config.model_config.decode_len
       self.num_heads        = exp_config.model_config.num_heads
+      # self.kv_heads       = exp_config.model_config.kv_heads  
       self.ffn_dim          = exp_config.model_config.ffn_dim
       self.ffn_mult        = exp_config.model_config.ffn_mult
       self.n_tokens         = exp_config.model_config.n_tokens
       self.all_reduce       = exp_config.model_config.all_reduce
       self.run_type         = exp_config.model_config.run_type
+      self.attention_type  = exp_config.model_config.attention.attention_type
+      self.kv_heads        = exp_config.model_config.attention.kv_heads if hasattr(exp_config.model_config.attention, 'kv_heads') else None
+      
       inference_cfg = getattr(exp_config, 'inference_config', None)
       if inference_cfg is not None:
           self.inference_sample_every = inference_cfg.sample_every
