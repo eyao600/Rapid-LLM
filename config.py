@@ -689,27 +689,34 @@ def parse_config(filename, config_type):
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
         attention_dict = mp.pop("attention", None)
+        
+        attn_type = str(attention_dict.get("attention_type", "mha")).lower()
+        if "num_heads" not in attention_dict:
+            raise ValueError("model_param.attention.num_heads must be specified")
+        num_heads = int(attention_dict["num_heads"])
+        kv_heads_field = attention_dict.get("kv_heads")
 
-        if attention_dict is None:
-            legacy_heads = mp.pop("num_heads", None)
-            if legacy_heads is None:
+        if attn_type == "gqa":
+            if kv_heads_field is None:
                 raise ValueError(
-                    "model_param.attention section missing and no legacy num_heads provided"
+                    "model_param.attention.kv_heads must be specified when attention_type='gqa'"
                 )
-            attention_cfg = LLMAttentionConfig(
-                attention_type="mha",
-                num_heads=int(legacy_heads),
-            )
+            kv_heads = int(kv_heads_field)
         else:
-            attn_type = str(attention_dict.get("attention_type", "mha")).lower()
-            if "num_heads" not in attention_dict:
-                raise ValueError("model_param.attention.num_heads must be specified")
-            kv_heads_raw = attention_dict.get("num_key_value_heads") if attn_type == "gqa" else None
-            attention_cfg = LLMAttentionConfig(
-                attention_type=attn_type,
-                num_heads=int(attention_dict["num_heads"]),
-                kv_heads=int(kv_heads_raw) if kv_heads_raw is not None else None,
+            kv_heads = num_heads
+
+        if kv_heads <= 0:
+            raise ValueError("model_param.attention.kv_heads must be a positive integer")
+        if num_heads % kv_heads != 0:
+            raise ValueError(
+                f"model_param.attention.kv_heads={kv_heads} must divide num_heads={num_heads}"
             )
+
+        attention_cfg = LLMAttentionConfig(
+            attention_type=attn_type,
+            num_heads=num_heads,
+            kv_heads=kv_heads,
+        )
 
         run_type = mp.pop("run_type", "training")
         decode_len = mp.pop("decode_len", None)

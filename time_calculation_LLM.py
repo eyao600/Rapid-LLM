@@ -1559,7 +1559,7 @@ class TimeCalculationLLM(TimeCalculation):
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
         
         attention_type = self.attention_type
-        kv_heads = self.kv_heads if self.kv_heads else num_heads
+        kv_heads = self.kv_heads
         
         print("self.tp:", self.tp)
 

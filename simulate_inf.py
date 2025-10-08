@@ -28,9 +28,8 @@ class InferenceConfig:
     num_layers: int
     dp: int = 1  # data parallel (acts as replica count during inference)
     lp: int = 1  # layer parallel
-    kp1: int = 1  # tensor parallel dim 1
-    kp2: int = 1  # tensor parallel dim 2
-    tp_mode: str = "row_col"
+    tp: int = 1  # tensor parallel degree
+    tp_sp: bool = False  # sequence-parallel toggle
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
     kv_cache_fetch_overlap: bool = False
@@ -156,41 +155,6 @@ class DecodeGraph(Graph):
             output_dir="./output_graph/",
         )
 
-        def measure_gemm(name: str, shape: Tuple[int, ...]) -> Dict[str, float]:
-            if len(shape) == 3:
-                gemm_args = shape
-            elif len(shape) == 4:
-                batch, seq_len, k_dim, n_dim = shape
-                gemm_args = (batch * seq_len, k_dim, n_dim)
-            else:
-                raise ValueError(f"Invalid GEMM shape for {name}: {shape}")
-
-            gemm_time, reduction_time = temp_time_calc._distributed_gemm_forward(
-                gemm_args,
-                f"decode_{name}_f",
-            )
-
-            return {
-                "forward": gemm_time + reduction_time,
-                "backward": 0.0,
-                "forward_gemm": gemm_time,
-                "forward_reduction": reduction_time,
-                "backward_gemm": 0.0,
-                "backward_reduction": 0.0,
-            }
-
-        gemm_results = {
-            name: measure_gemm(name, gemm_shapes[name])
-            for name in (
-                "qkv_proj",
-                "attention_score",
-                "attention_output",
-                "output_proj",
-                "ffn1",
-                "ffn2",
-            )
-        }
-
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
         sample_dir = os.path.join(base_dir, "decode_samples", f"step_{step_id:04d}")
         root_dir = os.path.dirname(sample_dir)
@@ -210,7 +174,6 @@ class DecodeGraph(Graph):
             transformer_backward_root,
             interconnect_params,
         ) = temp_time_calc.prepare_decode_graphs(
-            gemm_results=gemm_results,
             batch_size=self.config.batch_size,
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
@@ -332,12 +295,13 @@ class InferenceEngine:
             mode="inference",
             dp=self.config.dp,
             lp=self.config.lp,
-            kp1=self.config.kp1,
-            kp2=self.config.kp2,
-            tp_mode=self.config.tp_mode,
+            tp=self.config.tp,
             comp_times={},
             comm_metadata={},
-            misc_metadata={"kv_cache_fetch_overlap": self.config.kv_cache_fetch_overlap},
+            misc_metadata={
+                "kv_cache_fetch_overlap": self.config.kv_cache_fetch_overlap,
+                "sequence_parallel": self.config.tp_sp,
+            },
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,

@@ -336,23 +336,20 @@ class TimeCalculation:
             self.num_workers_dp // self.lp if self.lp > 1 else self.num_workers_dp
         )
 
-        def _product(values):
-            result = 1
-            for value in values:
-                if value in (None, 0):
-                    continue
-                result *= int(value)
-            return result
+        if self.mode == "LLM":
+            expected_workers = self.tp * self.dp * self.lp
+            label = f"tp({self.tp}) * dp({self.dp}) * lp({self.lp})"
+        else:
+            kp1 = int(self.kp1) if self.kp1 else 1
+            kp2 = int(self.kp2) if self.kp2 else 1
+            expected_workers = self.dp * self.lp * kp1 * kp2
+            label = f"dp({self.dp}) * lp({self.lp}) * kp1({kp1}) * kp2({kp2})"
 
-        kp_factor = _product([self.kp1, self.kp2])
-        expected_workers = self.dp * self.lp * kp_factor * self.tp
         if expected_workers != self.num_workers:
             raise ValueError(
-                "Product of tp, dp, lp, and kernel-parallel dims must equal number of workers"
+                f"Parallelism mismatch: {label} = {expected_workers}, "
+                f"but system_hierarchy reports num_workers={self.num_workers}."
             )
-            
-        # Allow data parallelism to stay intra-node when dp_inter is False
-        # (previously this raised an error). We now support dp using intra links.
         
         
         # Statistics Param

@@ -14,13 +14,14 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         super().__init__(hw_config, model_config, mode, output_dir)
         self._raw_model_config = model_config
 
-    def _decode_node_breakdown(
+    def _build_decode_transformer_results(
         self,
         *,
-        gemm_results: Dict[str, Dict[str, float]],
         batch_size: int,
         total_seq_len: int,
-    ) -> Dict[str, float]:
+        gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+    ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float]]:
+        """Construct transformer spec + node breakdown for a single decode step."""
         head_dim = self.hidden_dim // self.num_heads
         attention_score_shape = (
             batch_size * self.num_heads,
@@ -47,6 +48,57 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             name="kv_cache_store",
         ) + self.O
 
+        seq_degree = self._sequence_parallel_degree()
+        comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
+
+        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        gemm_shapes = gemm_shapes or LLM_util.process_decode_gemm_shapes(
+            batch_size=batch_size,
+            current_seq_len=total_seq_len,
+            d_model=self.hidden_dim,
+            num_heads=self.num_heads,
+            ffn_dim=ffn_dim,
+            vocab_size=self.vocab_size,
+            option="multiply_batch_into_m",
+        )
+
+        gemm_qkv_proj = gemm_shapes["qkv_proj"]
+        gemm_attention_score = gemm_shapes["attention_score"]
+        gemm_attention_output = gemm_shapes["attention_output"]
+        gemm_output_proj = gemm_shapes["output_proj"]
+        gemm_ffn1 = gemm_shapes["ffn1"]
+        gemm_ffn2 = gemm_shapes["ffn2"]
+
+        qkv_proj_time, _ = self._tensor_parallelism_gemm_forward(
+            gemm_qkv_proj, "decode_qkv_proj_f", tensor_type="column"
+        )
+        attention_score_time, _ = self._tensor_parallelism_gemm_forward(
+            gemm_attention_score, "decode_attention_score_f"
+        )
+        attention_output_time, _ = self._tensor_parallelism_gemm_forward(
+            gemm_attention_output, "decode_attention_output_f"
+        )
+        out_proj_time, out_proj_size = self._tensor_parallelism_gemm_forward(
+            gemm_output_proj, "decode_output_projection_f", tensor_type="row", comm_after=True
+        )
+        out_proj_reduction = (
+            self.get_tensor_reduction_time(out_proj_size, comm_kind, "decode_output_projection")
+            if out_proj_size
+            else 0.0
+        )
+
+        ffn1_time, _ = self._tensor_parallelism_gemm_forward(
+            gemm_ffn1, "decode_ffn1_f", tensor_type="column"
+        )
+        ffn2_time, ffn2_size = self._tensor_parallelism_gemm_forward(
+            gemm_ffn2, "decode_ffn2_f", tensor_type="row", comm_after=True
+        )
+        ffn2_reduction = (
+            self.get_tensor_reduction_time(ffn2_size, comm_kind, "decode_ffn2")
+            if ffn2_size
+            else 0.0
+        )
+
         output_seq_len = 1
 
         output_proj_shape = (
@@ -56,7 +108,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.hidden_dim,
         )
         residual1_f = self.get_residual_f(output_proj_shape)
-        layernorm1_f = self.get_layernorm_f(output_proj_shape)
+        layernorm1_f, layernorm1_reduction, layernorm1_bytes = self.get_layernorm_f(
+            batch=batch_size, seq_len=output_seq_len, d_model=self.hidden_dim
+        )
 
         ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
         ffn2_shape = (
@@ -66,7 +120,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.hidden_dim,
         )
         residual2_f = self.get_residual_f(ffn2_shape)
-        layernorm2_f = self.get_layernorm_f(ffn2_shape)
+        layernorm2_f, layernorm2_reduction, layernorm2_bytes = self.get_layernorm_f(
+            batch=batch_size, seq_len=output_seq_len, d_model=self.hidden_dim
+        )
 
         linear_shape = (
             batch_size,
@@ -76,71 +132,95 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         )
         linear_softmax_f = self.get_linear_softmax_f(linear_shape)
 
-        def _inject(name: str, forward: float, backward: float = 0.0) -> None:
-            gemm_results.setdefault(
-                name,
-                {
-                    "forward": forward,
-                    "backward": backward,
-                    "forward_gemm": forward,
-                    "forward_reduction": 0.0,
-                    "backward_gemm": backward,
-                    "backward_reduction": 0.0,
-                },
-            )
+        gelu_f = self.get_gelu_f(gemm_ffn1)
 
-        _inject("attention_scale_softmax", attention_scale_softmax_f)
-        _inject("residual1", residual1_f)
-        _inject("layernorm1", layernorm1_f)
-        _inject("residual2", residual2_f)
-        _inject("layernorm2", layernorm2_f)
-        _inject("kv_cache_fetch", kv_cache_fetch_time)
-        _inject("kv_cache_store", kv_cache_store_time)
-
-        core_time = (
-            gemm_results["qkv_proj"]["forward"]
-            + gemm_results["attention_score"]["forward"]
+        mha_forward = (
+            qkv_proj_time
+            + attention_score_time
             + attention_scale_softmax_f
-            + gemm_results["attention_output"]["forward"]
-            + gemm_results["output_proj"]["forward"]
-            + residual1_f
-            + layernorm1_f
-            + gemm_results["ffn1"]["forward"]
-            + gemm_results["ffn2"]["forward"]
-            + residual2_f
-            + layernorm2_f
+            + attention_output_time
+            + out_proj_time
+        )
+        mlp_forward = ffn1_time + gelu_f + ffn2_time
+
+        layernorm1_forward = residual1_f + layernorm1_f
+        layernorm2_forward = residual2_f + layernorm2_f
+
+        transformer_forward = (
+            mha_forward
+            + out_proj_reduction
+            + mlp_forward
+            + ffn2_reduction
+            + layernorm1_forward
+            + layernorm1_reduction
+            + layernorm2_forward
+            + layernorm2_reduction
         )
 
-        layer_time = core_time
-        kv_fetch_node_time = kv_cache_fetch_time
+        transformer_results = {
+            "MHA": {
+                "forward": mha_forward,
+                "backward": 0.0,
+                "forward_reduction": out_proj_reduction,
+                "backward_reduction": 0.0,
+                "comm_size_forward": out_proj_size,
+                "comm_size_backward": 0,
+            },
+            "MLP": {
+                "forward": mlp_forward,
+                "backward": 0.0,
+                "forward_reduction": ffn2_reduction,
+                "backward_reduction": 0.0,
+                "comm_size_forward": ffn2_size,
+                "comm_size_backward": 0,
+            },
+            "layernorm1": {
+                "forward": layernorm1_forward,
+                "backward": 0.0,
+                "forward_reduction": layernorm1_reduction,
+                "backward_reduction": 0.0,
+                "comm_size_forward": layernorm1_bytes,
+                "comm_size_backward": 0,
+            },
+            "layernorm2": {
+                "forward": layernorm2_forward,
+                "backward": 0.0,
+                "forward_reduction": layernorm2_reduction,
+                "backward_reduction": 0.0,
+                "comm_size_forward": layernorm2_bytes,
+                "comm_size_backward": 0,
+            },
+        }
 
-        return {
-            "transformer_time_f": layer_time,
+        node_breakdown = {
+            "transformer_time_f": transformer_forward,
             "transformer_time_b": 0.0,
             "linear_softmax_f": linear_softmax_f,
             "linear_softmax_b": 0.0,
             "embedding_f": 0.0,
             "embedding_b": 0.0,
-            "kv_cache_fetch": kv_fetch_node_time,
+            "kv_cache_fetch": kv_cache_fetch_time,
             "kv_cache_store": kv_cache_store_time,
         }
+
+        return transformer_results, node_breakdown
 
     def prepare_decode_graphs(
         self,
         *,
-        gemm_results: Dict[str, Dict[str, float]],
         batch_size: int,
         total_seq_len: int,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
     ):
         ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        transformer_results, node_breakdown = self._build_decode_transformer_results(
+            batch_size=batch_size,
+            total_seq_len=total_seq_len,
+            gemm_shapes=gemm_shapes,
+        )
         return self._prepare_execution_graphs(
-            node_breakdown=self._decode_node_breakdown(
-                gemm_results=gemm_results,
-                batch_size=batch_size,
-                total_seq_len=total_seq_len,
-            ),
-            gemm_results=gemm_results,
+            node_breakdown=node_breakdown,
+            transformer_results=transformer_results,
             batch_size=batch_size,
             seq_len=total_seq_len,
             hidden_dim=self.hidden_dim,
@@ -170,12 +250,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         self.readjust_type()
 
-        gemm_results, node_breakdown = self.compute_all_gemm_and_node_times(
+        transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(
             batch_size,
             vocab_size,
             hidden_dim,
             prefill_len,
             num_heads,
+            self.kv_heads,
             ffn_dim,
         )
 
@@ -195,23 +276,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         node_breakdown["kv_cache_store"] = prefill_store_time
         node_breakdown["kv_cache_fetch"] = 0.0
 
-        gemm_results["kv_cache_store"] = {
-            "forward": prefill_store_time,
-            "backward": 0.0,
-            "forward_gemm": prefill_store_time,
-            "forward_reduction": 0.0,
-            "backward_gemm": 0.0,
-            "backward_reduction": 0.0,
-        }
-        gemm_results["kv_cache_fetch"] = {
-            "forward": 0.0,
-            "backward": 0.0,
-            "forward_gemm": 0.0,
-            "forward_reduction": 0.0,
-            "backward_gemm": 0.0,
-            "backward_reduction": 0.0,
-        }
-
         (
             pipeline_graph,
             pipeline_root,
@@ -221,7 +285,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             interconnect_params,
         ) = self._prepare_execution_graphs(
             node_breakdown=node_breakdown,
-            gemm_results=gemm_results,
+            transformer_results=transformer_results,
             batch_size=batch_size,
             seq_len=prefill_len,
             hidden_dim=hidden_dim,
@@ -297,9 +361,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             num_layers=self.num_layers,
             dp=self.dp,
             lp=self.lp,
-            kp1=self.kp1,   
-            kp2=self.kp2,
-            tp_mode=self.t,
+            tp=self.tp,
+            tp_sp=self.tp_sp,
             sample_every=sample_every,
             kv_cache_fetch_overlap=self.kv_cache_fetch_overlap,
         )
