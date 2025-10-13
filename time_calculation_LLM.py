@@ -495,7 +495,7 @@ class TimeCalculationLLM(TimeCalculation):
         elif self.cp > 1 and self.tp > 1:
             return "tp-cp"
         else:
-            return "none"
+            return "single"
 
     def get_kv_size_bytes(self) -> int:
         """Return the total size in bytes of the KV cache."""
@@ -576,7 +576,7 @@ class TimeCalculationLLM(TimeCalculation):
         elif parallelism_mode == "tp-cp":
             return self._tensor_context_hybrid_gemm_forward(gemm, name, tensor_type)
         else:
-            return self.getGEMMTime(*self._expand_gemm_descriptor(gemm), name)[0], 0 #TODO no parallelism
+            return self.single_gpu_gemm_forward(gemm, name, tensor_type)
         
     def parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
@@ -588,7 +588,25 @@ class TimeCalculationLLM(TimeCalculation):
             return self._tensor_context_hybrid_gemm_backward(gemm, name, tensor_type)
 
         else:
-            return self.getGEMMTime(*self._expand_gemm_descriptor(gemm), name)[0], 0 #TODO no parallelism
+            return self.single_gpu_gemm_backward(gemm, name, tensor_type)
+    def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Tuple[float, float]:
+        batch, m, k, n = self._expand_gemm_descriptor(gemm)
+        if tensor_type == "attention_score" or tensor_type == "attention_output" :#attention gemm
+            gemm_time = self.getGEMMTime( m, k, n, name)[0] * batch
+        else :
+            gemm_time = self.getGEMMTime( m, k, n, name)[0]
+        return gemm_time, 0, 0
+    def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Tuple[float, float]:
+        batch, m, k, n = self._expand_gemm_descriptor(gemm)
+        if tensor_type == "attention_score" or tensor_type == "attention_output" :#attention gemm
+            grad_time_act = self.getGEMMTime(m, k, n, name)[0] * batch
+            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch
+            gemm_time = grad_time_act + grad_time_wt
+        else :
+            grad_time_act = self.getGEMMTime(m, n, k, name)[0]
+            grad_time_wt = self.getGEMMTime(k, m, n, name)[0]
+            gemm_time = grad_time_act + grad_time_wt
+        return gemm_time, 0, 0
         
     def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
@@ -1697,7 +1715,7 @@ class TimeCalculationLLM(TimeCalculation):
             
             
             
-        elif parallelism_mode in ["tp", "tp-sp"]:
+        elif parallelism_mode in ["tp", "tp-sp" ,"single"]:
             for key in ("layernorm1", "MHA", "layernorm2", "MLP"):
                 spec = transformer_results[key]
                 fwd_time = spec['forward']
