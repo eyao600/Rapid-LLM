@@ -447,6 +447,7 @@ SchedulingConfig = _namedtuple(
         "kp_projection_type",
         "t",
         "tp",
+        "cp",
         "tp_sp",
         "kp1",
         "kp2",
@@ -606,6 +607,8 @@ def parse_config(filename, config_type):
         sch_params = dict(config_dict["scheduling_param"])
         if "tp" not in sch_params:
             sch_params["tp"] = None
+        if "cp" not in sch_params:
+            sch_params["cp"] = None
         if "tp_sp" in sch_params:
             tp_sp_value = sch_params["tp_sp"]
         sch_config = SchedulingConfig(**sch_params)

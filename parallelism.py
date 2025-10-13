@@ -23,6 +23,7 @@ class Parallelism():
         self.exp_config = exp_config
         self.t = exp_config.sch_config.t  # type of parallelism, e.g., "CR", "RC", "none"
         self.tp = exp_config.sch_config.tp
+        self.cp = exp_config.sch_config.cp
         self.tp_sp = exp_config.sch_config.tp_sp
         self.kp1 = exp_config.sch_config.kp1  # first parallelism parameter
         self.kp2 = exp_config.sch_config.kp2  # second parallelism parameter

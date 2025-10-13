@@ -30,6 +30,7 @@ class InferenceConfig:
     dp: int = 1  # data parallel (acts as replica count during inference)
     lp: int = 1  # layer parallel
     tp: int = 1  # tensor parallel degree
+    cp: int = 1  # context parallel degree
     tp_sp: bool = False  # sequence-parallel toggle
     # Decode sampling configuration
     sample_every: int = 32  # Sample every N decode steps
@@ -298,6 +299,7 @@ class InferenceEngine:
             dp=self.config.dp,
             lp=self.config.lp,
             tp=self.config.tp,
+            cp=self.config.cp,
             comp_times={},
             comm_metadata={},
             misc_metadata={

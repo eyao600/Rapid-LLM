@@ -312,6 +312,14 @@ class TimeCalculation:
         if self.tp < 1:
             raise ValueError("scheduling_param.tp must be >= 1")
 
+        cp_value = par.cp if par.cp not in (None, 0) else 1
+        try:
+            self.cp = int(cp_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("scheduling_param.cp must be an integer") from exc
+        if self.cp < 1:
+            raise ValueError("scheduling_param.cp must be >= 1")
+
         self.tp_sp = par.tp_sp
 
         if self.mode != "LLM":
@@ -323,8 +331,8 @@ class TimeCalculation:
             self.kp2 = None
 
         if self.mode == "LLM":
-            expected_workers = self.tp * self.dp * self.lp
-            label = f"tp({self.tp}) * dp({self.dp}) * lp({self.lp})"
+            expected_workers = self.tp * self.cp * self.dp * self.lp
+            label = f"tp({self.tp}) * cp({self.cp}) * dp({self.dp}) * lp({self.lp})"
         else:
             kp1 = int(self.kp1) if self.kp1 else 1
             kp2 = int(self.kp2) if self.kp2 else 1

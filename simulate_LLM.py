@@ -100,6 +100,7 @@ class Graph:
         dp: int,
         lp: int,
         tp: int,
+        cp: int,
         comp_times: Dict[str, Any],
         comm_metadata: Dict[str, Any],
         misc_metadata: Dict[str, Any],
@@ -108,6 +109,7 @@ class Graph:
         self.dp = int(dp)
         self.lp = int(lp)
         self.tp = int(tp)
+        self.cp = int(cp)
         self.comp_times = comp_times or {}
         self.comm_metadata = comm_metadata or {}
         self.misc_metadata = misc_metadata or {}

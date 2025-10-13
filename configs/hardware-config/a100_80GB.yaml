@@ -151,8 +151,9 @@ scheduling_param:
   dp: 1 # acts as replica count during inference
   lp: 2 # pipeline stages 
   mb: 2 # number of micro-batches
-  tp: 2 # tensor parallelism
-  tp_sp: true # sequence parallelism
+  tp: 1 # tensor parallelism
+  tp_sp: true # tensor-sequence parallelism
+  cp : 2 # context parallelism
   ### LSTM/GEMM LEGACY PARAMS ###
   t: "CR"
   kp1: 1
