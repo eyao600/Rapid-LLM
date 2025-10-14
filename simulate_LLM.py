@@ -929,7 +929,31 @@ class Graph:
         #  ready_list.append(r)
         ready_list.append(root)
         root.scheduled = True
-        # print("Simulation started...")
+        ###find number of devices needed
+        base_devices = max(1, int(self.lp) if self.lp else 1)
+        max_hw_id = -1
+        visited_nodes: Set[int] = set()
+        stack = list(root if isinstance(root, (list, tuple)) else [root])
+        while stack:
+            node = stack.pop()
+            node_id = id(node)
+            if node_id in visited_nodes:
+                continue
+            visited_nodes.add(node_id)
+
+            hw_id = getattr(node, "hw_id", None)
+            if hw_id is not None:
+                try:
+                    hw_val = int(hw_id)
+                except (TypeError, ValueError):
+                    hw_val = None
+                if hw_val is not None and hw_val >= 0:
+                    max_hw_id = max(max_hw_id, hw_val)
+
+            stack.extend(getattr(node, "children", []))
+
+        if max_hw_id >= 0:
+            base_devices = max(base_devices, max_hw_id + 1)
 
         GPU_list = [True for i in range(0, self.lp)]
         data_list = [False for i in range(0, self.num_batch)]
@@ -939,17 +963,7 @@ class Graph:
             print("{} enqueued at time {} batch id {}".format(root.name, 0, root.batch_id))
         ready_list.remove(root)
         counter = counter + 1
-        # GPU_list[gid] = False
 
-        # print("Start simulation...")
-        # print("root: {}.{}".format(root.name, root.op_id))
-        # for i in GPU_list:
-        #    if i:
-        #        print "_",
-        #    else:
-        #        print "A",
-        #    print " ",
-        # print " | ",
         while len(event_queue) > 0:
             time, _, event = heappop(event_queue)
             event.done = True
@@ -959,8 +973,7 @@ class Graph:
                 print("Event {} finished at time {}".format(event.name, time))
 
             for child in event.children:
-                # if debug:
-                #     print("child {}  ready at time {} ".format(child.name, time))
+
                 is_ready = True
                 max_time = -1
                 for parent in child.parents:
@@ -977,8 +990,7 @@ class Graph:
             if isinstance(event, Node):
                 if not getattr(event, "is_kv_cache", False):
                     GPU_list[event.hw_id] = True
-            
-            # if isinstance(event, Data_batch):
+
                 
 
 
@@ -1040,28 +1052,238 @@ class Graph:
                     ready_list.remove(event)
 
         return time
-    # def save_graph(self, output_folder = "output_graph/"):
-    #     fw_roots = self.construct_fwd_graph()
-    #     time_fw = self.simulate(fw_roots[0], 0)
-    #     if not os.path.exists(output_folder):
-    #         os.makedirs(output_folder)
+    
+    def simulate_memory(self, root, memory_data,output_folder = "output_graph/", filename="memory_graph"):
+        time = 0
+        counter = 0
+        event_queue = []
+        done_list = []
+        ready_list = []
+        act_memory = memory_data.get("activation_mem_per_layer", 0)
+        static_memory = memory_data.get("static_mem_per_layer", 0)
+        
 
-    #     filename = "fwd_graph_s%s_l%s_lp%s" % (self.num_seq, self.num_layer, self.lp)
-    #     filename_bwd = "bwd_graph_s%s_l%s_lp%s" % (self.num_seq, self.num_layer, self.lp)
-    #     dot_fw = visualize_graph(fw_roots[0], filename=filename)
-    #     dot_fw.render(output_folder + filename, format="png", cleanup=True)
-    #     print("Forward graph saved to %s%s.png" % (output_folder , filename))
-    #     print("Forward simulation time: {}".format(time_fw))
 
-    #     bw_roots = self.construct_bwd_graph()
+        ready_list.append(root)
+        root.scheduled = True
+        ###find number of devices needed
+        base_devices = max(1, int(self.lp) if self.lp else 1)
+        max_hw_id = -1
+        visited_nodes: Set[int] = set()
+        stack = list(root if isinstance(root, (list, tuple)) else [root])
+        while stack:
+            node = stack.pop()
+            node_id = id(node)
+            if node_id in visited_nodes:
+                continue
+            visited_nodes.add(node_id)
 
-    #     time_bw = self.simulate(bw_roots[0], self.lp - 1)   
-    #     dot_bw = visualize_graph(bw_roots[0], filename=filename + "_bwd")
-    #     dot_bw.render(output_folder + filename_bwd , format="png", cleanup=True)
-    #     print("Backward graph saved to %s%s.png" % (output_folder , filename_bwd))
+            hw_id = getattr(node, "hw_id", None)
+            if hw_id is not None:
+                try:
+                    hw_val = int(hw_id)
+                except (TypeError, ValueError):
+                    hw_val = None
+                if hw_val is not None and hw_val >= 0:
+                    max_hw_id = max(max_hw_id, hw_val)
 
-    #     print("Backward simulation time: {}".format(time_bw))
-    #     return time_fw , time_bw
+            stack.extend(getattr(node, "children", []))
+
+        if max_hw_id >= 0:
+            base_devices = max(base_devices, max_hw_id + 1)
+
+        class _MemorySnapshot:
+            def __init__(self, num_devices: int) -> None:
+                self.static: List[float] = [0.0 for _ in range(num_devices)]
+                self.current: List[float] = [0.0 for _ in range(num_devices)]
+                self.peak: List[float] = [0.0 for _ in range(num_devices)]
+                self.activation_allocations: memory_data["activation_allocations"]
+
+            def add_static(self, gpu_id: int, size_bytes: float) -> None:
+                if size_bytes <= 0:
+                    return
+                self.static[gpu_id] += size_bytes
+                self.current[gpu_id] += size_bytes
+                self._update_peak(gpu_id)
+
+            def allocate_activation(self, gpu_id: int, node_id: int) -> None:
+                size_bytes = memory_data.get("activation_mem_per_layer", 0) 
+                print("Allocating activation memory for node id {} of size {} bytes on GPU {}".format(node_id, size_bytes, gpu_id))
+
+                if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
+                    return
+                self.current[gpu_id] += size_bytes
+                # self.activation_allocations[node_id] = size_bytes
+                self._update_peak(gpu_id)
+
+            def release_activation(self, gpu_id: int, node_id: int) -> None:
+                size_bytes = memory_data.get("activation_mem_per_layer", 0)
+                print("Releasing activation memory for node id {} of size {} bytes on GPU {}".format(node_id, size_bytes, gpu_id))
+                # size_bytes = self.activation_allocations.pop(node_id, 0.0)
+                
+                if size_bytes <= 0 or gpu_id < 0 or gpu_id >= len(self.current):
+                    return
+                self.current[gpu_id] = max(0.0, self.current[gpu_id] - size_bytes)
+
+            def summary(self) -> List[Dict[str, float]]:
+                summary: List[Dict[str, float]] = []
+                for idx in range(len(self.current)):
+                    static_gb = self.static[idx] / 1e9
+                    current_gb = self.current[idx] / 1e9
+                    peak_gb = self.peak[idx] / 1e9
+                    summary.append(
+                        {
+                            "gpu_id": idx,
+                            "static_gb": static_gb,
+                            "current_gb": current_gb,
+                            "peak_gb": peak_gb,
+                        }
+                    )
+                return summary
+
+            def _update_peak(self, gpu_id: int) -> None:
+                if self.current[gpu_id] > self.peak[gpu_id]:
+                    self.peak[gpu_id] = self.current[gpu_id]
+
+        GPU_list = [True for _ in range(base_devices)]
+        data_list = [False for i in range(0, self.num_batch)]
+        memory_snapshot = _MemorySnapshot(base_devices)
+        static_memory_per_hw: List[float] = [0.0 for _ in range(base_devices)]
+        if hasattr(self, "static_memory_for_hw"):
+            for idx in range(base_devices):
+                static_memory_per_hw[idx] = float(self.static_memory_for_hw(idx))
+                memory_snapshot.add_static(idx, static_memory_per_hw[idx])
+        self.memory_monitor_snapshot = memory_snapshot
+
+        heappush(event_queue, (root.duration, counter, root))
+        if debug:
+            print("{} enqueued at time {} batch id {}".format(root.name, 0, root.batch_id))
+        ready_list.remove(root)
+        counter = counter + 1
+
+        while len(event_queue) > 0:
+            time, _, event = heappop(event_queue)
+            event.done = True
+            event.scheduled = False
+            event.finish_time = time
+            if debug:
+                print("Event {} finished at time {}".format(event.name, time))
+
+            for child in event.children:
+
+                is_ready = True
+                max_time = -1
+                for parent in child.parents:
+                    if parent.done == False:
+                        is_ready = False
+                    else:
+                        max_time = max(max_time, parent.finish_time)
+                # if is_ready == True:
+                if is_ready and (child not in ready_list) and (not child.done) and (not child.scheduled):
+                    ready_list.append(child)
+                    if debug:
+                        print("child {}  ready at time {} ".format(child.name, time))
+
+            if isinstance(event, Node):
+                act_memory = memory_data.get("activation_mem_per_layer", 0)
+                print("Event: {}, is_kv_cache: {}, fwd: {}, hw_id: {}".format(event.name, getattr(event, "is_kv_cache", False), event.fwd, event.hw_id))
+                if not getattr(event, "is_kv_cache", False):
+                    GPU_list[event.hw_id] = True
+                if not event.fwd:
+                    memory_snapshot.release_activation(event.hw_id, id(event))
+                    print(self.memory_monitor_snapshot.summary())
+                elif event.fwd:
+                    
+                    if act_memory > 0:
+                        memory_snapshot.allocate_activation(event.hw_id, id(event))
+                        print(self.memory_monitor_snapshot.summary())
+
+                
+
+
+
+            for event in ready_list[:]:
+                enqueued = False
+                if isinstance(event, Data_batch):
+                    # if GPU_list[event.hw_id] == True:
+                    new_time = time + event.duration
+                    heappush(event_queue, (new_time, counter, event))
+                    event.scheduled = True
+                    enqueued = True
+                    if debug:
+                        print("{} enqueued at time".format(event.name,  time))
+                    counter = counter + 1
+                    data_list[event.batch_id] = True #data batch sent to gpu
+                    # GPU_list[event.hw_id] = False
+                    ready_list.remove(event)
+
+                elif isinstance(event, Node): 
+                    if getattr(event, "is_kv_cache", False):
+                        new_time = time + event.duration
+                        heappush(event_queue, (new_time, counter, event))
+                        event.scheduled = True
+                        enqueued = True
+                        if debug:
+                            print("{}.{} (kv_cache) enqueued at time {}".format(event.name, event.op_id, time))
+                        counter = counter + 1
+                        ready_list.remove(event)
+                    else:
+                        if GPU_list[event.hw_id] == True:
+                            # if event.fwd:
+                            #     activation_bytes = memory_data.get("activation_mem_per_layer", 0)
+                            #     print("Activation memory for node {}: {}".format(event.name, activation_bytes))
+                            #     if activation_bytes > 0:
+                            #         memory_snapshot.allocate_activation(event.hw_id, id(event), activation_bytes)
+                            #         print(self.memory_monitor_snapshot.summary())
+                            new_time = time + event.duration
+                            heappush(event_queue, (new_time, counter, event))
+                            event.scheduled = True
+                            enqueued = True
+                            if debug:
+                                print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                            counter = counter + 1
+                            GPU_list[event.hw_id] = False
+                            ready_list.remove(event)
+                elif isinstance(event, Edge): 
+                    new_time = time + event.duration
+                    heappush(event_queue, (new_time, counter, event))
+                    event.scheduled = True
+                    if debug:
+                        print("{}.{} enqueued at time {}".format(event.name, event.op_id, time))
+                    enqueued = True
+                    counter = counter + 1
+                    ready_list.remove(event)
+                elif isinstance(event, Gradient):
+                    # print("Gradient event")
+                    new_time = time + event.duration
+                    heappush(event_queue, (new_time, counter, event))
+                    event.scheduled = True
+                    enqueued = True
+                    if debug:
+                        print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
+                    counter = counter + 1
+                    ready_list.remove(event)
+
+        summary = memory_snapshot.summary()
+        if output_folder:
+            try:
+                os.makedirs(output_folder, exist_ok=True)
+                for entry in summary:
+                    gpu_file = os.path.join(output_folder, f"gpu_{entry['gpu_id']}_memory_summary.txt")
+                    with open(gpu_file, "w", encoding="utf-8") as log_file:
+                        log_file.write(
+                            "GPU {gpu_id}\nStatic: {static_gb:.6f} GB\nCurrent: {current_gb:.6f} GB\nPeak: {peak_gb:.6f} GB\n".format(
+                                gpu_id=entry["gpu_id"],
+                                static_gb=entry["static_gb"],
+                                current_gb=entry["current_gb"],
+                                peak_gb=entry["peak_gb"],
+                            )
+                        )
+            except OSError as exc:
+                if debug:
+                    print(f"[WARN] Failed to write memory summaries: {exc}")
+        self.memory_monitor_summary = summary
+        return time
 
     def save_graph(self, roots, output_folder = "output_graph/", filename="graph"):
         os.makedirs(output_folder, exist_ok=True)
