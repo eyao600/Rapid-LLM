@@ -456,6 +456,7 @@ class TimeCalculationLLM(TimeCalculation):
             self.kv_cache_precision = self.precision
         self.kv_cache_type = getattr(inference_cfg, "kvcache_type", "hbm_only") if inference_cfg else "hbm_only"
         self.kv_cache_fetch_overlap = bool(getattr(inference_cfg, "kvcache_fetch_overlap", False)) if inference_cfg else False
+        
         self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
@@ -702,8 +703,9 @@ class TimeCalculationLLM(TimeCalculation):
             kind = "reduce_scatter"
             participants = self.tp
         elif tensor_type == "linear_softmax": 
-            gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * n)  
+            grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
+            grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
+            total_bytes = math.ceil(self.precision * shard_m * shard_k) * self.cp * self.tp # in tp-cp hybrid parallelism, the linear softmax weight is sharded by both tp and cp
             kind = "all_gather"
             participants = self.cp * self.tp
         else:
@@ -1253,7 +1255,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         # Process GEMM shapes
         gemm_shapes = LLM_util.process_gemm_shapes(
-            batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
+            self, batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
         )
         if self.debug:
             print(
@@ -1657,25 +1659,6 @@ class TimeCalculationLLM(TimeCalculation):
             cross_layer_bytes=cross_layer_bytes,
         )
 
-        # shapes = LLM_util.process_gemm_shapes(
-        #     batch_size,
-        #     seq_len,
-        #     hidden_dim,
-        #     num_heads,
-        #     ffn_dim,
-        #     vocab_size,
-        #     option="multiply_batch_into_m",
-        # )
-        
-        # gemm_qkv_proj = shapes["qkv_proj"]
-        # gemm_attention_score = shapes["attention_score"]
-        # gemm_attention_output = shapes["attention_output"]
-        # gemm_output_proj = shapes["output_proj"]
-        # gemm_ffn1 = shapes["ffn1"]
-        # gemm_ffn2 = shapes["ffn2"]
-        # transformer_results = compute_all_gemm_and_node_times(
-        #     self,
-        #     batch_size,
         transformer_operation_entries: List[Dict[str, Any]] = []
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         parallelism_mode = self.get_parallelism_mode()
@@ -1840,14 +1823,31 @@ class TimeCalculationLLM(TimeCalculation):
         self.readjust_type()
 
         # Get structured transformer results and node breakdown in one efficient call
-        # if attention_type =='mha':
+
         transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim )
-        # elif attention_type =='gqa':
-            
-            
+        #get the memory for one transformer layer per gpu in tp-sp node, actvation memory is for per micro-batch, weight, gradient and optimizer memory is consatnt 
+        transformer_mem_layer, transformer_act_layer, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
+            LLM_util.getTransformerMem_layer( 
+                d = self.dp,
+                t = self.tp,
+                batch_size=batch_size,
+                hidden_dim=hidden_dim,
+                seq_len=seq_len/self.cp, #in cp, seq_len is divided by cp
+                ffn_dim=ffn_dim,
+                n_heads=num_heads,
+                precision=self.precision,
+        )
+    )
+        memory_data = {
+            'activation_mem_per_layer': transformer_act_layer,
+            'weight_mem_per_layer': weight_memory_layer,
+            'gradient_mem_per_layer': gradient_mem_layer,
+            'optimizer_mem_per_layer': optimizer_mem_layer,
+            'static_mem_per_layer': transformer_static_layer,
+            'total_mem_per_layer': transformer_mem_layer,
+        }
 
-
-
+    
 
         if self.debug:
             print("self.tp:", self.tp)
@@ -1893,6 +1893,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
         
+        _, _, peak_mem = self._simulate_with_memory(graph_root, memory_data)
         mode = self.execution_mode
         
         dispatcher = LLMExecutionDispatcher(
@@ -1918,7 +1919,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_interconnect = dispatcher.interconnect_params
         
 
-        # self.pipeline_graph.save_graph(pipeline_root, "output_graph/", f"pipeline_graph_{mode.value.lower()}")
+
         # debug helper. If set, print analytical transformer time and actual transformer time
         if self._generate_graphs:
             print(f"Analytical transformer forward time: {self.transformer_analytical_time_forward:.4f}s")
@@ -1942,7 +1943,53 @@ class TimeCalculationLLM(TimeCalculation):
             # f.write("Total Time: {0:.8f}\n".format(TC.getTime()))
 
         return time_fw_bw
+    def _simulate_with_memory(
+        self,
+        graph_root: Any,
+        memory_data: Dict[str, Any],
+    ) -> Tuple[float, float, float]:
+        """Run both unconstrained and memory-aware simulations, reporting peak usage."""
+        time_no_memory = self.pipeline_graph.simulate(graph_root)
 
+        time_with_memory, peak_mem = self.pipeline_graph.simulate_memory(
+            graph_root,
+            memory_data,
+            self.output_dir,
+        )
+        self.memory_peak_gb = peak_mem
+
+        hardware_mem_bytes = getattr(self.DRAM, "size", None)
+        if hardware_mem_bytes is None:
+            hardware_mem_bytes = getattr(
+                getattr(self.hw_config, "tech_config", object()),
+                "DRAM",
+                object(),
+            )
+            hardware_mem_bytes = getattr(hardware_mem_bytes, "size", None)
+
+        if hardware_mem_bytes is not None:
+            hardware_mem_gb = float(hardware_mem_bytes) / (1024 ** 3)
+            self.memory_capacity_per_device_gb = hardware_mem_gb
+            mem_delta = hardware_mem_gb - peak_mem
+            self.memory_headroom_gb = mem_delta
+            memory_dir = os.path.join(self.output_dir, "memory-summary")
+            os.makedirs(memory_dir, exist_ok=True)
+            info_lines = [
+                f"Hardware memory capacity (per device): {hardware_mem_gb:.6f} GB",
+                f"Simulated peak memory usage: {peak_mem:.6f} GB",
+            ]
+            if mem_delta < 0:
+                info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GB")
+            else:
+                info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GB")
+            info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
+            with open(info_path, "w", encoding="utf-8") as info_file:
+                info_file.write("\n".join(info_lines) + "\n")
+        else:
+            self.memory_capacity_per_device_gb = None
+            self.memory_headroom_gb = None
+
+        return time_no_memory, time_with_memory, peak_mem
     def get_time(self):
         return self.tot_time
 

@@ -95,7 +95,7 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ff
     return gemms
 
 
-def process_gemm_shapes(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
+def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
     """
     Process GEMM shapes, reshape them into 3d.
 
@@ -137,13 +137,12 @@ def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_h
     # d = 1# data parallelism degree
     # t = 1 #tensor parallelism degree
     attention_score_act = batch_size * n_heads * seq_len * seq_len
-    act_memory_layer = (alpha * batch_size * hidden_dim * seq_len + beta * attention_score_act) * precision / 2  # assuming stored in a 16-bit floating point according to paper
-
+    act_memory_layer = seq_len * batch_size * hidden_dim * (34 / t + 5 * n_heads * seq_len/(hidden_dim * t) ) * precision / 2 #from https://arxiv.org/pdf/2205.05198
     transformer_param_layer = (4 ) * hidden_dim * hidden_dim + ffn_dim * 2 * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn1,ffn2
     optimizer_mem = 10 * transformer_param_layer * precision/ 2 / (t * d) 
     weight_memory_layer = 2 * transformer_param_layer * precision / t / 2  # assuming stored in a 16-bit floating point according to paper
     gradient_mem = 4 * transformer_param_layer * precision / t / 2  # assuming stored in a 16-bit floating point according to paper
-    static_memory_layer = (6 + 10 / d) * transformer_param_layer / t * precision / 2  
+    static_memory_layer = (6 + 10 / d) * transformer_param_layer / t * precision / 2  #optimizer states + gradients + weights
 
 
     layer_mem = (act_memory_layer + weight_memory_layer)
