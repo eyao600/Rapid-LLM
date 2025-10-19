@@ -60,7 +60,7 @@ class ParallelismMode(Enum):
     TENSOR_CONTEXT_HYBRID = "tensor_context_hybrid"
     SINGLE = "single"
 
-class TensorType(Enum):
+class GemmType(Enum):
     ATTENTION_SCORE = "attention_score"
     ATTENTION_OUTPUT = "attention_output"
     QKV = "qkv"
@@ -665,51 +665,51 @@ class TimeCalculationLLM(TimeCalculation):
         
     
     @staticmethod
-    def _normalize_tensor_type(tensor_type: Optional[TensorType]) -> Optional[TensorType]:
-        if tensor_type is None or isinstance(tensor_type, TensorType):
-            return tensor_type
-        raise TypeError(f"Unsupported tensor type specifier: {tensor_type!r}")
+    def _normalize_gemm_type(gemm_type: Optional[GemmType]) -> Optional[GemmType]:
+        if gemm_type is None or isinstance(gemm_type, GemmType):
+            return gemm_type
+        raise TypeError(f"Unsupported gemm type specifier: {gemm_type!r}")
     
-    def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Any:
+    def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
-            return self._tensor_parallelism_gemm_forward(gemm, name, tensor_type)
+            return self._tensor_parallelism_gemm_forward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.CONTEXT:
-            return self._context_parallelism_gemm_forward(gemm, name, tensor_type)
+            return self._context_parallelism_gemm_forward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            return self._tensor_context_hybrid_gemm_forward(gemm, name, tensor_type)
+            return self._tensor_context_hybrid_gemm_forward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.SINGLE:
-            return self.single_gpu_gemm_forward(gemm, name, tensor_type)
+            return self.single_gpu_gemm_forward(gemm, name, gemm_type)
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         
-    def parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Any:
+    def parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
-            return self._tensor_parallelism_gemm_backward(gemm, name, tensor_type)
+            return self._tensor_parallelism_gemm_backward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.CONTEXT:
-            return self._context_parallelism_gemm_backward(gemm, name, tensor_type)
+            return self._context_parallelism_gemm_backward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            return self._tensor_context_hybrid_gemm_backward(gemm, name, tensor_type)
+            return self._tensor_context_hybrid_gemm_backward(gemm, name, gemm_type)
 
         elif parallelism_mode == ParallelismMode.SINGLE:
-            return self.single_gpu_gemm_backward(gemm, name, tensor_type)
+            return self.single_gpu_gemm_backward(gemm, name, gemm_type)
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
-    def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Tuple[float, float]:
+    def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type in (TensorType.ATTENTION_SCORE, TensorType.ATTENTION_OUTPUT):  # attention gemm
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch
             number_flops = m * n * k * batch
             print(f"Single GPU Attention GEMM: {name} flops={number_flops/1e9} GFLOPS")
         else :
             gemm_time = self.getGEMMTime(m, k, n, name)[0]
         return gemm_time, 0, 0
-    def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Tuple[float, float]:
+    def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type in (TensorType.ATTENTION_SCORE, TensorType.ATTENTION_OUTPUT):  # attention gemm
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             grad_time_act = self.getGEMMTime(m, k, n, name)[0] * batch
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch
             gemm_time = grad_time_act + grad_time_wt
@@ -719,7 +719,7 @@ class TimeCalculationLLM(TimeCalculation):
             gemm_time = grad_time_act + grad_time_wt
         return gemm_time, 0, 0
         
-    def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Tuple[float, float]:
+    def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         # size_bytes = 0
         #attention gemm qkv (outputproj ffn2) (ffn1) (linear_softmax)
@@ -730,38 +730,38 @@ class TimeCalculationLLM(TimeCalculation):
         shard_m = math.ceil(m / max(1, self.cp))
         shard_k = math.ceil(k / max(1, self.tp))
         shard_n = math.ceil(n / max(1, self.tp))
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type is None:
-            raise ValueError("tensor_type is required for tensor-context hybrid forward GEMM")
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type is None:
+            raise ValueError("gemm_type is required for tensor-context hybrid forward GEMM")
         
-        if tensor_type == TensorType.ATTENTION_SCORE:  # attention gemm
+        if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             gemm_time = self.getGEMMTime(shard_m, k, n, name)[0] * batch / max(1, self.tp)
-        elif tensor_type == TensorType.ATTENTION_OUTPUT:  # attention gemm
+        elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             gemm_time = self.getGEMMTime(shard_m, k, n, name)[0] * batch / max(1, self.tp)
-        elif tensor_type == TensorType.QKV:  # column wise
+        elif gemm_type == GemmType.QKV:  # column wise
 
             gemm_time = self.getGEMMTime(shard_m, k, shard_n, name)[0]
             total_bytes = self.get_kv_size_bytes() / self.tp
             kind = "all_gather"
             participants = self.cp
-        elif tensor_type == TensorType.OUT_PROJ:
+        elif gemm_type == GemmType.OUT_PROJ:
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * n)
             kind = "reduce_scatter"
             participants = self.tp
-        elif tensor_type == TensorType.FFN2:  # row wise
+        elif gemm_type == GemmType.FFN2:  # row wise
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * n)
             kind = "reduce_scatter"
             participants = self.tp
-        elif tensor_type == TensorType.FFN1:  # column wise
+        elif gemm_type == GemmType.FFN1:  # column wise
             gemm_time = self.getGEMMTime(shard_m, k, shard_n, name)[0]
-        elif tensor_type == TensorType.LINEAR_SOFTMAX:
+        elif gemm_type == GemmType.LINEAR_SOFTMAX:
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * n)
             kind = "all_gather"
         else:
-            raise ValueError(f"Unsupported tensor type: {tensor_type}")
+            raise ValueError(f"Unsupported gemm type: {gemm_type}")
         
         if total_bytes > 0:
             reduction_time = self.network_model.collective(
@@ -774,7 +774,7 @@ class TimeCalculationLLM(TimeCalculation):
             debug_label=name or "comm",
         )
         return gemm_time, reduction_time, total_bytes
-    def _tensor_context_hybrid_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Tuple[float, float]:
+    def _tensor_context_hybrid_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         # size_bytes = 0
         participants = 0
@@ -784,49 +784,49 @@ class TimeCalculationLLM(TimeCalculation):
         shard_m = math.ceil(m / max(1, self.cp))
         shard_k = math.ceil(k / max(1, self.tp))
         shard_n = math.ceil(n / max(1, self.tp))
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type is None:
-            raise ValueError("tensor_type is required for tensor-context hybrid backward GEMM")
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type is None:
+            raise ValueError("gemm_type is required for tensor-context hybrid backward GEMM")
         
-        if tensor_type == TensorType.ATTENTION_SCORE:  # attention gemm
+        if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch / max(1, self.tp)
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch / max(1, self.tp)
             total_bytes = self.precision * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
             kind = "reduce_scatter"
             participants = self.cp
-        elif tensor_type == TensorType.ATTENTION_OUTPUT:  # attention gemm
+        elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch / max(1, self.tp)
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch / max(1, self.tp)
-        elif tensor_type == TensorType.QKV:  # column wise
+        elif gemm_type == GemmType.QKV:  # column wise
             grad_time_act = self.getGEMMTime(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, shard_n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * k)
             kind = "reduce_scatter"
             participants = self.tp
-        elif tensor_type == TensorType.OUT_PROJ:
+        elif gemm_type == GemmType.OUT_PROJ:
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
             total_bytes = self.get_kv_size_bytes() / self.tp
             kind = "all_gather"
             participants = self.cp
-        elif tensor_type == TensorType.FFN2:  # row wise
+        elif gemm_type == GemmType.FFN2:  # row wise
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
-        elif tensor_type == TensorType.FFN1:  # column wise
+        elif gemm_type == GemmType.FFN1:  # column wise
             
             grad_time_act = self.getGEMMTime(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, shard_n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * k)
             kind = "reduce_scatter"
             participants = self.tp
-        elif tensor_type == TensorType.LINEAR_SOFTMAX:
+        elif gemm_type == GemmType.LINEAR_SOFTMAX:
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * shard_k) * self.cp * self.tp # in tp-cp hybrid parallelism, the linear softmax weight is sharded by both tp and cp
             kind = "all_gather"
             participants = self.cp * self.tp
         else:
-            raise ValueError(f"Unsupported tensor type: {tensor_type}")
+            raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
         if total_bytes > 0:
             reduction_time = self.network_model.collective(
@@ -839,7 +839,7 @@ class TimeCalculationLLM(TimeCalculation):
             debug_label=name or "comm",
         )
         return gemm_time, reduction_time, total_bytes
-    def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Tuple[float, float]:
+    def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         """
         communication happens after out projection and ffn2 gemm
         """
@@ -849,25 +849,25 @@ class TimeCalculationLLM(TimeCalculation):
         size_bytes = 0
         total_bytes = 0
         reduction_time = 0
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type is None:
-            raise ValueError("tensor_type is required for tensor-parallel forward GEMM")
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type is None:
+            raise ValueError("gemm_type is required for tensor-parallel forward GEMM")
         
-        if tensor_type in (TensorType.ATTENTION_SCORE, TensorType.ATTENTION_OUTPUT):  # attention gemm
+        if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch / max(1, self.tp)
-        elif tensor_type in (TensorType.QKV, TensorType.FFN1):  # column wise
+        elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             shard_n = math.ceil(n / max(1, self.tp))
             gemm_time = self.getGEMMTime(m, k, shard_n, name)[0]
-        elif tensor_type in (TensorType.OUT_PROJ, TensorType.FFN2):  # row wise
+        elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             shard_k = math.ceil(k / max(1, self.tp))
             gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
             size_bytes = math.ceil(self.precision * m * n)
-        elif tensor_type == TensorType.LINEAR_SOFTMAX:
+        elif gemm_type == GemmType.LINEAR_SOFTMAX:
             shard_k = math.ceil(k / max(1, self.tp * self.cp))
             gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
             size_bytes = math.ceil(self.precision * m * n)
         else:
-            raise ValueError(f"Unsupported tensor type: {tensor_type}")
+            raise ValueError(f"Unsupported gemm type: {gemm_type}")
             
         if size_bytes > 0:
             total_bytes = size_bytes #FIXME: we already has the totol bytes for all reduce not bytes per rank
@@ -876,8 +876,8 @@ class TimeCalculationLLM(TimeCalculation):
 
         return gemm_time, reduction_time, total_bytes
     
-    def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None, comm_after: bool = False) -> Tuple[float, float]:
-        # tensor_type:"row", "column" determines the way gemm is distributed
+    def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
+        # gemm_type:"row", "column" determines the way gemm is distributed
         # comm_after: whether there is communication after gemm, for example, in attention output projection and ffn2
         """
         in backward pass, for each gemm, we need to calculate the time for gradient w.r.t activation and weight
@@ -890,28 +890,28 @@ class TimeCalculationLLM(TimeCalculation):
         act_bytes = 0
         total_bytes = 0
         comm_kind_bwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type is None:
-            raise ValueError("tensor_type is required for tensor-parallel backward GEMM")
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type is None:
+            raise ValueError("gemm_type is required for tensor-parallel backward GEMM")
 
-        if tensor_type in (TensorType.ATTENTION_SCORE, TensorType.ATTENTION_OUTPUT):
+        if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):
             grad_time_act = self.getGEMMTime(m, n, k, name)[0] * batch / max(1, self.tp)
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch / max(1, self.tp)
-        elif tensor_type in (TensorType.QKV, TensorType.FFN1):  # column wise
+        elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             shard_n = math.ceil(n / max(1, self.tp))
             grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, m, shard_n, name)[0]
             act_bytes = math.ceil(self.precision * m * k)
-        elif tensor_type in (TensorType.OUT_PROJ, TensorType.FFN2):  # row wise
+        elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             shard_k = math.ceil(k / max(1, self.tp))
             grad_time_act = self.getGEMMTime(m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, m, n, name)[0]
-        elif tensor_type == TensorType.LINEAR_SOFTMAX:
+        elif gemm_type == GemmType.LINEAR_SOFTMAX:
             shard_k = math.ceil(k / max(1, self.tp * self.cp))
             grad_time_act = self.getGEMMTime(m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, m, n, name)[0]
         else:
-            raise ValueError(f"Unsupported tensor type: {tensor_type}")
+            raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
         reduction_time = 0
         if act_bytes > 0:
@@ -920,25 +920,25 @@ class TimeCalculationLLM(TimeCalculation):
 
 
         return gemm_time, reduction_time, total_bytes
-    def _context_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None) -> Tuple[float, float]:
+    def _context_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
 
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         total_bytes = 0
         reduction_time = 0
         shard_m = math.ceil(m / max(1, self.cp))
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type is None:
-            raise ValueError("tensor_type is required for context-parallel forward GEMM")
-        if tensor_type in (TensorType.ATTENTION_SCORE, TensorType.ATTENTION_OUTPUT):  # attention gemm
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type is None:
+            raise ValueError("gemm_type is required for context-parallel forward GEMM")
+        if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(shard_m, k, n, name)[0] * batch 
-        elif tensor_type == TensorType.QKV:  # qkv gemm
+        elif gemm_type == GemmType.QKV:  # qkv gemm
             gemm_time = self.getGEMMTime(shard_m, k, n, name)[0]
             total_bytes = self.get_kv_size_bytes()
-        elif tensor_type in (TensorType.OUT_PROJ, TensorType.FFN1, TensorType.FFN2):
+        elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN1, GemmType.FFN2):
             gemm_time = self.getGEMMTime(shard_m, k, n, name)[0]
         else:
-            raise ValueError(f"Unsupported tensor type: {tensor_type}")
-        if tensor_type == TensorType.QKV:
+            raise ValueError(f"Unsupported gemm type: {gemm_type}")
+        if gemm_type == GemmType.QKV:
             kind = "all_gather" #FIXME gathering Values can be overlapped with attention gemm
             reduction_time = self.network_model.collective(
                 kind=kind,
@@ -952,7 +952,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         return gemm_time, reduction_time, total_bytes
 
-    def _context_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, tensor_type: Optional[TensorType] = None, comm_after: bool = False) -> Tuple[float, float]:
+    def _context_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
         """
         assuming that in backward pass, the K V need to be gathered again for reducing activation memory
         to apply weight gradient, the gradient for K and V need to be reduce-scattered
@@ -961,27 +961,27 @@ class TimeCalculationLLM(TimeCalculation):
         total_bytes = 0
         reduction_time = 0
         shard_m = math.ceil(m / max(1, self.cp))
-        tensor_type = self._normalize_tensor_type(tensor_type)
-        if tensor_type is None:
-            raise ValueError("tensor_type is required for context-parallel backward GEMM")
-        if tensor_type == TensorType.ATTENTION_SCORE:
+        gemm_type = self._normalize_gemm_type(gemm_type)
+        if gemm_type is None:
+            raise ValueError("gemm_type is required for context-parallel backward GEMM")
+        if gemm_type == GemmType.ATTENTION_SCORE:
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch 
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch 
             total_bytes = self.precision * k * n * batch * 2 # account for both Q and K
             kind = "reduce_scatter"
-        elif tensor_type == TensorType.ATTENTION_OUTPUT:  # attention gemm
+        elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch 
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch
-        elif tensor_type in (TensorType.QKV, TensorType.FFN1, TensorType.FFN2):
+        elif gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.FFN2):
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0]
-        elif tensor_type == TensorType.OUT_PROJ:
+        elif gemm_type == GemmType.OUT_PROJ:
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0]
             total_bytes = self.get_kv_size_bytes()
             kind = "all_gather"
         else:
-            raise ValueError(f"Unsupported tensor type: {tensor_type}")
+            raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
         if total_bytes > 0:
             reduction_time = self.network_model.collective(
@@ -1020,7 +1020,7 @@ class TimeCalculationLLM(TimeCalculation):
         """Estimate time for final projection + softmax forward."""
         _, effective_m, k, n = self._effective_dims(gemm)
 
-        gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", tensor_type=TensorType.LINEAR_SOFTMAX)
+        gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
 
             
 
@@ -1046,7 +1046,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         _, effective_m, k, n = self._effective_dims(gemm)
 
-        gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", tensor_type=TensorType.LINEAR_SOFTMAX)
+        gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", gemm_type=GemmType.LINEAR_SOFTMAX)
 
         point_flop = effective_m * n * 6
         point_mem = self.precision * effective_m * n * 10
@@ -1403,8 +1403,8 @@ class TimeCalculationLLM(TimeCalculation):
 
 
         # QKV Projection GEMM
-        qkv_proj_gemm_f,  qkv_proj_reduction_f, qkv_proj_size_f = self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", tensor_type=TensorType.QKV)
-        qkv_proj_gemm_b,  qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", tensor_type=TensorType.QKV)
+        qkv_proj_gemm_f,  qkv_proj_reduction_f, qkv_proj_size_f = self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", gemm_type=GemmType.QKV)
+        qkv_proj_gemm_b,  qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", gemm_type=GemmType.QKV)
         qkv_proj_f = qkv_proj_gemm_f + qkv_proj_reduction_f
         qkv_proj_b = qkv_proj_gemm_b + qkv_proj_reduction_b
         transformer_results['qkv_proj'] = {
@@ -1415,8 +1415,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
         if self.flash_attention is False:
             # Attention Score GEMM
-            attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f = self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", tensor_type=TensorType.ATTENTION_SCORE)
-            attn_score_gemm_b,  attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(gemm_attention_score, "attention_score_b", tensor_type=TensorType.ATTENTION_SCORE)
+            attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f = self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", gemm_type=GemmType.ATTENTION_SCORE)
+            attn_score_gemm_b,  attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(gemm_attention_score, "attention_score_b", gemm_type=GemmType.ATTENTION_SCORE)
             attention_score_f = attn_score_gemm_f + attn_score_reduction_f
             attention_score_b = attn_score_gemm_b + attn_score_reduction_b
             transformer_results['attention_score'] = {
@@ -1431,8 +1431,8 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
             # Attention Output GEMM
-            attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f = self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", tensor_type=TensorType.ATTENTION_OUTPUT)
-            attn_out_gemm_b,  attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(gemm_attention_output, "attention_output_b", tensor_type=TensorType.ATTENTION_OUTPUT)
+            attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f = self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT)
+            attn_out_gemm_b,  attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(gemm_attention_output, "attention_output_b", gemm_type=GemmType.ATTENTION_OUTPUT)
             attention_output_f = attn_out_gemm_f + attn_out_reduction_f
             attention_output_b = attn_out_gemm_b + attn_out_reduction_b
             transformer_results['attention_output'] = {
@@ -1474,8 +1474,8 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("flash_attention should be either True or False")
 
         # Output Projection GEMM
-        out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f = self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", tensor_type=TensorType.OUT_PROJ)
-        out_proj_gemm_b,  out_proj_reduction_b, out_proj_size_b = self.parallelism_gemm_backward(gemm_output_proj, "output_projection_b", tensor_type=TensorType.OUT_PROJ)
+        out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f = self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", gemm_type=GemmType.OUT_PROJ)
+        out_proj_gemm_b,  out_proj_reduction_b, out_proj_size_b = self.parallelism_gemm_backward(gemm_output_proj, "output_projection_b", gemm_type=GemmType.OUT_PROJ)
         output_proj_f = out_proj_gemm_f + out_proj_reduction_f
         output_proj_b = out_proj_gemm_b + out_proj_reduction_b
         transformer_results['output_proj'] = {
@@ -1488,8 +1488,8 @@ class TimeCalculationLLM(TimeCalculation):
 
 
         # FFN1 GEMM
-        ffn1_gemm_f,  ffn1_reduction_f, ffn1_size_f = self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", tensor_type=TensorType.FFN1)
-        ffn1_gemm_b,  ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(gemm_ffn1, "ffn_b", tensor_type=TensorType.FFN1)
+        ffn1_gemm_f,  ffn1_reduction_f, ffn1_size_f = self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
+        ffn1_gemm_b,  ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1)
         ffn1_f = ffn1_gemm_f + ffn1_reduction_f
         ffn1_b = ffn1_gemm_b + ffn1_reduction_b
         transformer_results['ffn1'] = {
@@ -1500,8 +1500,8 @@ class TimeCalculationLLM(TimeCalculation):
         }
 
         # FFN2 GEMM
-        ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f = self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", tensor_type=TensorType.FFN2)
-        ffn2_gemm_b,  ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(gemm_ffn2, "ffn2_b", tensor_type=TensorType.FFN2)
+        ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f = self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
+        ffn2_gemm_b,  ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2)
         ffn2_f = ffn2_gemm_f + ffn2_reduction_f
         ffn2_b = ffn2_gemm_b + ffn2_reduction_b
         transformer_results['ffn2'] = {
@@ -1887,9 +1887,6 @@ class TimeCalculationLLM(TimeCalculation):
             lp=self.lp,
             tp=self.tp,
             cp=self.cp,
-            # kp1=self.kp1,
-            # kp2=self.kp2,
-            # tp_mode=self.t,
             comp_times=transformer_comp_times,
             comm_metadata=transformer_comm_metadata,
             misc_metadata={},
@@ -1924,9 +1921,6 @@ class TimeCalculationLLM(TimeCalculation):
             lp=self.lp,
             tp=self.tp,
             cp=self.cp,
-            # kp1=self.kp1,
-            # kp2=self.kp2,
-            # tp_mode=self.t,
             comp_times=comp_times,
             comm_metadata=comm_metadata,
             misc_metadata=misc_metadata,

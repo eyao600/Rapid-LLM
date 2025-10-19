@@ -3,7 +3,7 @@
 import math
 import os
 from typing import Dict, List, Optional, Tuple
-from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM, TensorType
+from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM, GemmType
 from simulate_inf import DecodeSample, InferenceConfig, InferenceEngine
 import LLM_util
 
@@ -66,16 +66,16 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         gemm_ffn2 = gemm_shapes["ffn2"]
 
         qkv_proj_time, _, _ = self._tensor_parallelism_gemm_forward(
-            gemm_qkv_proj, "decode_qkv_proj_f", tensor_type=TensorType.QKV
+            gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV
         )
         attention_score_time, _, _ = self._tensor_parallelism_gemm_forward(
-            gemm_attention_score, "decode_attention_score_f", tensor_type=TensorType.ATTENTION_SCORE
+            gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE
         )
         attention_output_time, _, _ = self._tensor_parallelism_gemm_forward(
-            gemm_attention_output, "decode_attention_output_f", tensor_type=TensorType.ATTENTION_OUTPUT
+            gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT
         )
         out_proj_time, _, out_proj_size = self._tensor_parallelism_gemm_forward(
-            gemm_output_proj, "decode_output_projection_f", tensor_type=TensorType.OUT_PROJ
+            gemm_output_proj, "decode_output_projection_f", gemm_type=GemmType.OUT_PROJ
         )
         out_proj_reduction = (
             self.get_tensor_reduction_time(out_proj_size, comm_kind, "decode_output_projection")
@@ -84,10 +84,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         )
 
         ffn1_time, _, _ = self._tensor_parallelism_gemm_forward(
-            gemm_ffn1, "decode_ffn1_f", tensor_type=TensorType.FFN1
+            gemm_ffn1, "decode_ffn1_f", gemm_type=GemmType.FFN1
         )
         ffn2_time, _, ffn2_size = self._tensor_parallelism_gemm_forward(
-            gemm_ffn2, "decode_ffn2_f", tensor_type=TensorType.FFN2
+            gemm_ffn2, "decode_ffn2_f", gemm_type=GemmType.FFN2
         )
         ffn2_reduction = (
             self.get_tensor_reduction_time(ffn2_size, comm_kind, "decode_ffn2")
