@@ -38,6 +38,76 @@ class ParallelismMode(Enum):
     TENSOR_CONTEXT_HYBRID = "tensor_context_hybrid"
     SINGLE = "single"
 
+
+# Map each parallelism mode to operation-level collective specs used across the
+# metadata pipeline. Each spec records the collective kind, the participant
+# scope (tp/cp/seq/etc.), the interconnect label, and an identifying suffix.
+COMM_RULE_DEFAULT_KEY = "__default__"
+COMMUNICATION_RULES: Dict[
+    ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, str]]]]
+] = {
+    ParallelismMode.TENSOR: {
+        COMM_RULE_DEFAULT_KEY: {
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_reduce'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_reduce'},
+        },
+    },
+    ParallelismMode.TENSOR_SEQUENCE: {
+        COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
+        'layernorm1': {
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+        },
+        'layernorm2': {
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+        },
+        'MHA': {
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+        },
+        'MLP': {
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+        },
+    },
+    ParallelismMode.CONTEXT: {
+        COMM_RULE_DEFAULT_KEY: {
+            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'},
+        },
+        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'}},
+        'output_proj': {'forward': None, 'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'}},
+        'qkv_proj': {'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'}, 'backward': None},
+    },
+    ParallelismMode.TENSOR_CONTEXT_HYBRID: {
+        COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
+        'layernorm1': {
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+        },
+        'layernorm2': {
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+        },
+        'MLP': {
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+        },
+        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'}},
+        'output_proj': {
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'},
+            'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'},
+        },
+        'qkv_proj': {
+            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+        },
+    },
+    ParallelismMode.SINGLE: {
+        COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
+    },
+}
 class GemmType(Enum):
     ATTENTION_SCORE = "attention_score"
     ATTENTION_OUTPUT = "attention_output"
@@ -1300,41 +1370,37 @@ class TimeCalculationLLM(TimeCalculation):
             entry[direction]['comm_keys'].append(unique_key)
 
         parallelism_mode = self.get_parallelism_mode()
-        if parallelism_mode == ParallelismMode.TENSOR:
-            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
-            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'tp')
-        elif parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
-                #TODO: correct the communication type here
-            if entry['name'] in ['layernorm1', 'layernorm2']:
-                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.tp, 'tp')
-                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.tp, 'tp')
-            elif entry['name'] in ['MHA', 'MLP']:
-                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.tp, 'tp')
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.tp, 'tp')
-        elif parallelism_mode == ParallelismMode.CONTEXT:
-            
-            if entry['name'] in ['attention']:
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'tp')
-            elif entry['name'] in ['output_proj']:
-                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.cp, 'tp')
-            elif entry['name'] in ['qkv_proj']:
-                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.cp, 'tp') #FIXME: interconnect type should be 'cp'
-        elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            if entry['name'] in ['layernorm1', 'layernorm2']:
-                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.tp, 'tp')
-                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.tp, 'tp')
-            elif entry['name'] in [ 'MLP']:
-                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.tp, 'tp')
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.tp, 'tp')
-            elif entry['name'] in ['attention']:
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'cp')
-            
-            elif entry['name'] in ['output_proj']:
-                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.tp, 'cp')
-                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.cp, 'cp')
-            elif entry['name'] in ['qkv_proj']:
-                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.cp, 'tp')
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.tp, 'tp')
+        rules_by_mode = COMMUNICATION_RULES.get(parallelism_mode)
+        if not rules_by_mode:
+            return
+
+        spec = rules_by_mode.get(entry['name'])
+        if spec is None:
+            spec = rules_by_mode.get(COMM_RULE_DEFAULT_KEY)
+        if not spec:
+            return
+
+
+        participants_lookup = {
+            'tp': getattr(self, 'tp', 0),
+            'cp': getattr(self, 'cp', 0),
+            'dp': getattr(self, 'dp', 0),
+            'lp': getattr(self, 'lp', 0),
+        }
+
+        for direction in ('forward', 'backward'):
+            rule = spec.get(direction)
+            if not rule:
+                continue
+            size_bytes = comm_bytes_fwd if direction == 'forward' else comm_bytes_bwd
+            scope = rule.get('participants')
+            participants = participants_lookup.get(scope or '', 0)
+            if participants <= 1:
+                continue
+            kind = rule['kind']
+            suffix = rule.get('suffix', kind)
+            interconnect = rule.get('interconnect', scope or 'tp')
+            add_comm(direction, suffix, kind, size_bytes, participants, interconnect)
 
     def _build_interconnect_params(self) -> Dict[str, Tuple[float, float]]:
         return {
@@ -1733,5 +1799,3 @@ class TimeCalculationLLM(TimeCalculation):
 
     def getReductionTotal(self): #not considering congestion
         return getattr(self, "_reduction_total_llm", 0.0)
-
-
