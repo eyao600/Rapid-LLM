@@ -30,8 +30,6 @@ def _env_flag(name: str) -> bool:
     normalized = value.strip().lower()
     return normalized not in {"", "0", "false", "no"}
 
-
-
     
 class ParallelismMode(Enum):
     TENSOR = "tensor"
@@ -48,8 +46,6 @@ class GemmType(Enum):
     FFN1 = "ffn1"
     FFN2 = "ffn2"
     LINEAR_SOFTMAX = "linear_softmax"
-
-
 
 
 class TimeCalculationLLM(TimeCalculation):
@@ -923,11 +919,8 @@ class TimeCalculationLLM(TimeCalculation):
                 print(f"(dp=1) apply_grad_time: {apply_grad_time}")
             return apply_grad_time
 
-        # k = 2 * self.D
-        # n = 4 * self.D
-        # dim1 = self.kp_hidden_dim1
-        # dim2 = self.kp_hidden_dim2
-        w_data = 4*d*d + 2*ffn_dim*d # total parameters need to be reduced
+
+
         reduction_time = 0.0
         apply_grad_time = 0.0
 
@@ -1306,29 +1299,26 @@ class TimeCalculationLLM(TimeCalculation):
             }
             entry[direction]['comm_keys'].append(unique_key)
 
-        seq_degree = self._sequence_parallel_degree()
         parallelism_mode = self.get_parallelism_mode()
-        if parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE):
-            if self.tp > 1 and seq_degree == 1:
+        if parallelism_mode == ParallelismMode.TENSOR:
+            add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
+            add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'tp')
+        elif parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
                 #TODO: correct the communication type here
-                add_comm('forward', 'all_reduce', 'all_reduce', comm_bytes_fwd, self.tp, 'tp')
-                add_comm('backward', 'all_reduce', 'all_reduce', comm_bytes_bwd, self.tp, 'tp')
-            elif self.tp > 1 and seq_degree > 1:
-                if entry['name'] in ['layernorm1', 'layernorm2']:
-                    add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, seq_degree, 'tp')
-                    add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, seq_degree, 'tp')
-                elif entry['name'] in ['MHA', 'MLP']:
-                    add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, seq_degree, 'tp')
-                    add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, seq_degree, 'tp')
+            if entry['name'] in ['layernorm1', 'layernorm2']:
+                add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.tp, 'tp')
+                add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.tp, 'tp')
+            elif entry['name'] in ['MHA', 'MLP']:
+                add_comm('forward', 'reduce_scatter', 'reduce_scatter', comm_bytes_fwd, self.tp, 'tp')
+                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.tp, 'tp')
         elif parallelism_mode == ParallelismMode.CONTEXT:
             
             if entry['name'] in ['attention']:
                 add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'tp')
             elif entry['name'] in ['output_proj']:
                 add_comm('backward', 'all_gather', 'all_gather', comm_bytes_bwd, self.cp, 'tp')
-            else:
+            elif entry['name'] in ['qkv_proj']:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.cp, 'tp') #FIXME: interconnect type should be 'cp'
-                add_comm('backward', 'reduce_scatter', 'reduce_scatter', comm_bytes_bwd, self.cp, 'tp')
         elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             if entry['name'] in ['layernorm1', 'layernorm2']:
                 add_comm('forward', 'all_gather', 'all_gather', comm_bytes_fwd, self.tp, 'tp')
@@ -1362,7 +1352,6 @@ class TimeCalculationLLM(TimeCalculation):
         batch_size: int,
         seq_len: int,
         hidden_dim: int,
-        num_heads: int,
         ffn_dim: int,
         vocab_size: int,
         include_pipeline_backward: bool,
@@ -1617,7 +1606,7 @@ class TimeCalculationLLM(TimeCalculation):
             batch_size=batch_size,
             seq_len=seq_len,
             hidden_dim=hidden_dim,
-            num_heads=num_heads,
+            # num_heads=num_heads,
             ffn_dim=ffn_dim,
             vocab_size=vocab_size,
             include_pipeline_backward=True,
