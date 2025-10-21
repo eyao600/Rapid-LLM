@@ -21,6 +21,7 @@ algByte = False  # algorithmic ops false
 proj = False  # consider projection layer, turn off for end-2-end validation, as baeline model does not have projection layer
 validating_v100 = True
 
+
 # Cache handling policy for AstraSim integration.
 # Options: "NO CACHE", "CACHE READONLY", "CACHE READWRITE"
 cache_handling = "CACHE READWRITE"
@@ -245,6 +246,9 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
         f.write("Total Time: {0:.8f}\n".format(total_time))
 
     print("Total training time: {}".format(tc_llm.get_time()))
+    warning_message = tc_llm.memory_capacity_warning()
+    if warning_message:
+        print(warning_message)
 
 
 def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
@@ -307,6 +311,9 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
                     end_rate * dp_replicas,
                 )
             )
+    warning_message = tc_inf.memory_capacity_warning()
+    if warning_message:
+        print(warning_message)
 
 if __name__ == "__main__":
     args = parse_arguments()

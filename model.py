@@ -27,6 +27,7 @@ class Model_LLM:
       self.seq_len          = exp_config.model_config.seq_len
       self.decode_len       = exp_config.model_config.decode_len
       self.num_heads        = exp_config.model_config.num_heads
+      self.tied_embeddings  = exp_config.model_config.tied_embeddings
       self.model_type       = exp_config.model_config.model_type
       # self.kv_heads       = exp_config.model_config.kv_heads  
       self.ffn_dim          = exp_config.model_config.ffn_dim

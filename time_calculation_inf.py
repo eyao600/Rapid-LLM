@@ -55,7 +55,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             kv_heads=self.kv_heads,
             ffn_dim=ffn_dim,
             vocab_size=self.vocab_size,
-            option="multiply_batch_into_m",
             model_type=self.model_type,
         )
 

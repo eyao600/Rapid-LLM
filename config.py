@@ -406,6 +406,7 @@ class LLMConfig:
     mode: str
     run_type: str
     model_type: str
+    tied_embeddings: bool
     num_layers: int
     hidden_dim: int
     batch_size: int
@@ -740,6 +741,11 @@ def parse_config(filename, config_type):
         )
 
         run_type = mp.pop("run_type", "training")
+        tied_embeddings_raw = mp.pop("tied_embeddings", True)
+        if isinstance(tied_embeddings_raw, str):
+            tied_embeddings = tied_embeddings_raw.strip().lower() in {"1", "true", "yes", "y"}
+        else:
+            tied_embeddings = bool(tied_embeddings_raw)
         model_type_raw = mp.pop("model_type", "gpt")
         model_type = str(model_type_raw).strip().lower()
         if model_type not in {"gpt", "llama"}:
@@ -755,6 +761,7 @@ def parse_config(filename, config_type):
             mode=mp.pop("mode"),
             run_type=run_type,
             model_type=model_type,
+            tied_embeddings=tied_embeddings,
             num_layers=mp.pop("num_layers"),
             hidden_dim=mp.pop("hidden_dim"),
             batch_size=mp.pop("batch_size"),

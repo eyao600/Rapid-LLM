@@ -39,10 +39,16 @@ class ParallelismMode(Enum):
     SINGLE = "single"
 
 # TODO: verify all 4 of these
-SWIGLU_SILU_FORWARD_FLOPS_PER_ELEMENT = 10 
+SWIGLU_SILU_FORWARD_FLOPS_PER_ELEMENT = 10
 SWIGLU_SILU_BACKWARD_FLOPS_PER_ELEMENT = 20
-GELU_FORWARD_FLOPS_PER_ELEMENT = 10
-GELU_BACKWARD_FLOPS_PER_ELEMENT = 20
+GELU_FORWARD_FLOPS_PER_ELEMENT = 40
+GELU_BACKWARD_FLOPS_PER_ELEMENT = 80
+LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT = 7
+LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT = 14
+LAYER_NORM_FORWARD_MEM_ACCESSES = 2
+LAYER_NORM_BACKWARD_MEM_ACCESSES = 4
+SOFTMAX_FORWARD_FLOPS_PER_ELEMENT = 7 # exponentiation 4FLOPS, subtract max 1FLOPS, dropout 2FLOPS
+SOFTMAX_FORWARD_MEM_ACCESSES = 7
 
 # Map each parallelism mode to operation-level collective specs used across the
 # metadata pipeline. Each spec records the collective kind, the participant
@@ -150,6 +156,9 @@ class TimeCalculationLLM(TimeCalculation):
         
         self.all_reduce = self.model.all_reduce # when the reduce happens in data parallelism options: "the end"  "every layer"
         self.model_type = self.model.model_type
+        self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
+        self.memory_capacity_exceeded = False
+        self.memory_capacity_violation_gb = 0.0
         self.pipeline_graph: Optional[Graph] = None
         self.pipeline_root: Optional[Any] = None
         self.pipeline_interconnect: Optional[Dict[str, Tuple[float, float]]] = None
@@ -287,7 +296,7 @@ class TimeCalculationLLM(TimeCalculation):
          
         # Softmax time
         elements = Br * Bc
-        flops = 7 * elements  #exponentiation 4FLOPS, subtract max 1FLOPS, dropout 2FLOPS
+        flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  # exponentiation + subtract max + dropout
         attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax") * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
         attn_score_time *= batch_size * num_heads / max(1, self.tp)
@@ -329,7 +338,7 @@ class TimeCalculationLLM(TimeCalculation):
          
         # Softmax time
         elements = Br * Bc
-        flops = 7 * elements  #exponentiation 4FLOPS, subtract max 1FLOPS, dropout 2FLOPS
+        flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  # exponentiation + subtract max + dropout
         attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax") * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
         attn_score_time *= batch_size * num_heads / max(1, self.tp)
@@ -707,7 +716,7 @@ class TimeCalculationLLM(TimeCalculation):
             
 
         point_flop = effective_m * (3 * n - 1)
-        point_mem = self.precision * effective_m * (7 * n)
+        point_mem = self.precision * effective_m * (SOFTMAX_FORWARD_MEM_ACCESSES * n)
         point_time = (
             self.roofline(point_flop, point_mem, name="pointwise-linear-softmax-f")
             + 4 * self.O
@@ -917,8 +926,8 @@ class TimeCalculationLLM(TimeCalculation):
             elements = batch * math.ceil(seq_len / seq_degree) * d_model
         else:
             elements = batch * seq_len * d_model
-        compute_flops = elements * 7
-        mem_bytes = self.precision * elements * 2
+        compute_flops = elements * LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT
+        mem_bytes = self.precision * elements * LAYER_NORM_FORWARD_MEM_ACCESSES
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-f") + 3 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # all-gather after layernorm
             per_rank_bytes = self.precision * elements
@@ -947,8 +956,8 @@ class TimeCalculationLLM(TimeCalculation):
             elements = batch * math.ceil(seq_len / seq_degree) * d_model / self.tp
         else:
             elements = batch * math.ceil(seq_len / seq_degree) * d_model
-        compute_flops = elements * 14
-        mem_bytes = self.precision * elements * 4
+        compute_flops = elements * LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT
+        mem_bytes = self.precision * elements * LAYER_NORM_BACKWARD_MEM_ACCESSES
 
         compute_time = self.roofline(compute_flops, mem_bytes, name="pointwise-layernorm-b") + 4 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # communication after layernorm
@@ -1116,7 +1125,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         # Process GEMM shapes
         gemm_shapes = LLM_util.process_gemm_shapes(
-            self, batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"
+            self, batch_size, seq_len, hidden_dim, num_heads, kv_heads, ffn_dim, vocab_size
         )
         if self.debug:
             print(
@@ -1703,7 +1712,7 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_results, node_breakdown = self.compute_all_gemm_and_node_times(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim )
         #get the memory for one transformer layer per gpu in tp-sp node, actvation memory is for per micro-batch, weight, gradient and optimizer memory is consatnt 
         transformer_mem_layer, transformer_act_layer,transformer_act_layer_inf, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
-            LLM_util.getTransformerMem_layer( #return memory per layer per gpu in one lp group
+            LLM_util.get_transformer_mem_layer( #return memory per layer per gpu in one lp group
                 d = self.dp,
                 t = self.tp,
                 batch_size=batch_size,
@@ -1826,6 +1835,7 @@ class TimeCalculationLLM(TimeCalculation):
             # f.write("Total Time: {0:.8f}\n".format(TC.getTime()))
 
         return time_fw_bw
+        
     def _simulate_with_memory( 
         self,
         graph_root: Any,
@@ -1866,6 +1876,8 @@ class TimeCalculationLLM(TimeCalculation):
             ]
             if mem_delta < 0:
                 info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB")
+                self.memory_capacity_exceeded = True
+                self.memory_capacity_violation_gb = max(self.memory_capacity_violation_gb, abs(mem_delta))
             else:
                 info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GiB")
             info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
@@ -1876,8 +1888,15 @@ class TimeCalculationLLM(TimeCalculation):
             self.memory_headroom_gb = None
 
         return time_with_memory, peak_mem
+
     def get_time(self):
         return self.tot_time
 
-    def getReductionTotal(self): #not considering congestion
-        return getattr(self, "_reduction_total_llm", 0.0)
+    def memory_capacity_warning(self) -> Optional[str]:
+        violation = max(0.0, getattr(self, "memory_capacity_violation_gb", 0.0))
+        if violation > 0.0:
+            return (
+                f"[WARN] Peak memory exceeds capacity by {violation:.2f} GiB. "
+                "Please change parallelism settings for realistic results."
+            )
+        return None

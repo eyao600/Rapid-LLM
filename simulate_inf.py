@@ -96,7 +96,6 @@ class DecodeGraph(Graph):
                 kv_heads=self.config.kv_heads,
                 ffn_dim=self.config.ffn_dim,
                 vocab_size=self.config.vocab_size,
-                option="multiply_batch_into_m",
                 model_type=self.model_config.model_config.model_type,
             )
 

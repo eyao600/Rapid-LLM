@@ -5,14 +5,12 @@ from collections import OrderedDict
 
 import config
 
-def reshape_gemm_to_3d(arg,options=None):
+def reshape_gemm_to_3d(arg):
     """
     Reshape a 4-dimensional GEMM [batch_size, M, K, N] into 3 dimensions [M, K, N].
 
     Parameters:
         arg (list or tuple): A list or tuple containing 4 dimensions [batch_size, M, K, N].
-        options (str): If set to "multiply_batch_into_m", multiplies batch_size into M.
-        "distribute_batch_cube_root": Takes the cube root of batch_size and distributes it across M, K, and N.
 
     Returns:
         tuple: A tuple (M, K, N) representing the reshaped GEMM dimensions.
@@ -25,24 +23,7 @@ def reshape_gemm_to_3d(arg,options=None):
     batch_size, M, K, N = arg
     if batch_size <= 0:
         raise ValueError("Batch size must be greater than 0.")
-    if options == "multiply_batch_into_m":
-        M *= batch_size  # Multiply batch_size into M
-    elif options == "distribute_batch_cube_root":
-        c = int(round(batch_size ** (1/3)))  # Start with the cube root of batch_size
-        while batch_size % c != 0:  # Adjust c until batch_size is divisible by c
-            c -= 1
-        remaining = batch_size // c  # Remaining product after dividing by c
-        
-        b = int(round(remaining ** 0.5))  # Start with the square root of the remaining product
-        while remaining % b != 0:  # Adjust b until remaining is divisible by b
-            b -= 1
-        a = remaining // b  # Calculate a
-        # print(f"Distributing batch_size {batch_size} into M, K, N with factors: a={a}, b={b}, c={c}")
-        # Distribute the factors across M, K, and N
-        M *= a
-        K *= b
-        N *= c
-    
+    M *= batch_size  # Multiply batch_size into M
         
     return M, K, N
 
@@ -99,7 +80,7 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ff
     return gemms
 
 
-def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, option="multiply_batch_into_m"):
+def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size):
     """
     Process GEMM shapes, reshape them into 3d.
 
@@ -129,11 +110,11 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
         if key in ATTENTION_GEMM_KEYS:
             processed[key] = tuple(shape)
         else:
-            processed[key] = reshape_gemm_to_3d(shape, option)
+            processed[key] = reshape_gemm_to_3d(shape)
 
     return processed
 
-def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision, model_type="gpt"):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/?utm_source=chatgpt.com
+def get_transformer_mem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_heads, precision, model_type="gpt"):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/?utm_source=chatgpt.com
     #Activations refer to output activations that need to be stored
     alpha = 16 + ffn_dim/hidden_dim #parameter need to be changed accordingly
     beta = 3
@@ -155,7 +136,7 @@ def getTransformerMem_layer( d, t, batch_size, hidden_dim, seq_len, ffn_dim, n_h
 
     return layer_mem, act_memory_layer, act_memory_layer_inf, static_memory_layer, gradient_mem, optimizer_mem, weight_memory_layer
 
-def getlinearSoftmaxMem(batch_size, seq_len, hidden_dim, vocab_size, precision, t):
+def get_linear_softmax_mem(batch_size, seq_len, hidden_dim, vocab_size, precision, t):
     # t = 1
     # weights = hidden_dim * vocab_size
     # softmax_act = batch_size * seq_len * vocab_size * precision
@@ -170,13 +151,30 @@ def getlinearSoftmaxMem(batch_size, seq_len, hidden_dim, vocab_size, precision, 
     return mem
 
 
-def getEmbeddingMem(batch_size, seq_len, hidden_dim, p, t, precision):
+def get_embedding_act_mem(batch_size, seq_len, hidden_dim, p, t, precision):
     mem = 4 * seq_len * batch_size * hidden_dim * p / t * precision / 2  # from https://arxiv.org/pdf/2205.05198
 
     return mem
     
+def get_embedding_weight_mem(
+    vocab_size: int,
+    hidden_dim: int,
+    precision: int,
+    tied_embeddings: bool = True,
+    param_replica_factor: int = 1,  # Should be equal to dp. For ZeRO-3 (future work) set to 1.
+) -> int:
+    """
+    Embedding WEIGHT memory per rank:
+      - Input embeddings: (V*H*bytes)/vocab_shards * replica_factor
+      - Output head: same as input if untied, else 0.
+    Paper assumes tying; we expose the switch.
+    """
+    per_matrix = (vocab_size * hidden_dim * precision)
+    input_embed = per_matrix * param_replica_factor
+    output_head = 0 if tied_embeddings else per_matrix * param_replica_factor
+    return input_embed + output_head
     
-def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
+def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
     # Model Params
     batch_size                   = int(kwargs.get('batch_size', exp_model_config.model_config.batch_size))
     hidden_dim                   = int(kwargs.get('hidden_dim', exp_model_config.model_config.hidden_dim))
@@ -195,8 +193,10 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
     dp = 8 #for testing
     miniB               = math.ceil(batch_size / dp)
 
-    transformer_mem_layer, transformer_act_layer, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
-        getTransformerMem_layer(
+    tied_embeddings = exp_model_config.model_config.tied_embeddings
+
+    transformer_mem_layer, transformer_act_layer, transformer_act_layer_inf, transformer_static_layer, gradient_mem_layer, optimizer_mem_layer, weight_memory_layer = (
+        get_transformer_mem_layer(
             d = dp,
             t = 1,
             batch_size=batch_size,
@@ -208,7 +208,7 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
             model_type=exp_model_config.model_config.model_type,
         )
     )
-    softmax_mem = getlinearSoftmaxMem(
+    softmax_mem = get_linear_softmax_mem(
         batch_size=batch_size,
         seq_len=seq_len,
         hidden_dim=hidden_dim,
@@ -219,7 +219,7 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
 
 
 
-    embedding_mem = getEmbeddingMem(
+    embedding_mem = get_embedding_act_mem(
         batch_size=batch_size,
         seq_len=seq_len,
         hidden_dim=hidden_dim,
@@ -228,7 +228,15 @@ def getTotMemReq(exp_hw_config, exp_model_config, **kwargs):
         precision=precision
     )
 
-    tot_mem = transformer_mem_layer*n_layers + softmax_mem + embedding_mem
+    embedding_weight_mem = get_embedding_weight_mem(
+        vocab_size=vocab_size,
+        hidden_dim=hidden_dim,
+        precision=precision,
+        tied_embeddings=tied_embeddings,
+        param_replica_factor=dp
+    )
+
+    tot_mem = transformer_mem_layer*n_layers + softmax_mem + embedding_mem + embedding_weight_mem
 
     
 
@@ -311,7 +319,6 @@ def process_decode_gemm_shapes(
     kv_heads,
     ffn_dim,
     vocab_size,
-    option="multiply_batch_into_m",
     model_type="gpt",
 ):
     """
@@ -341,7 +348,7 @@ def process_decode_gemm_shapes(
             processed[key] = tuple(shape)
         else:
             # Reshape other GEMMs to 3D using existing infrastructure
-            processed[key] = reshape_gemm_to_3d(shape, option)
+            processed[key] = reshape_gemm_to_3d(shape)
 
     return processed
 
@@ -359,7 +366,7 @@ if __name__ == "__main__":
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     exp_model_config = config.parse_config(exp_model_path, config_type="LLM")
-    mem, embedding_mem, transformer_mem, transformer_act_mem, transformer_static_mem, gradient_mem, optimizer_mem, weight_memory, softmax_mem = getTotMemReq(
+    mem, embedding_mem, transformer_mem, transformer_act_mem, transformer_static_mem, gradient_mem, optimizer_mem, weight_memory, softmax_mem = get_tot_mem_req(
                 exp_hw_config,
                 exp_model_config,
 
