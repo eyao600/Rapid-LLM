@@ -250,9 +250,7 @@ class TimeCalculationLLM(TimeCalculation):
     # def sequence
     def get_tensor_reduction_time(self, total_bytes: int, kind: str, name: str, participants: Optional[int] = None) -> float:
         """Return collective time for tensor-parallel reductions.
-
-        `size_bytes` is expected to be the per-rank payload. Convert to total bytes so the
-        network model sees the same aggregate volume it assumes internally.
+           receives total_bytes, which is the total size of the data to be reduced across all participants.
         """
         if not total_bytes:
             return 0.0
@@ -271,6 +269,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         return reduction_time
     def flash_attention_kernel_forward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+        #TODO: should be repleced with a modified version of getgemmtime that considers flash attention tiling
         """Return time for flash attention kernel."""
         #TODO gqa support
         batch_size = self.microB
@@ -312,6 +311,7 @@ class TimeCalculationLLM(TimeCalculation):
     
     
     def flash_attention_kernel_backward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+        #TODO: should be repleced with a modified version of getgemmtime that considers flash attention tiling
         """Return time for flash attention kernel."""
         #FIXME not finished
         #TODO gqa support
@@ -411,9 +411,32 @@ class TimeCalculationLLM(TimeCalculation):
         return gemm_time, 0, 0
         
     def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+        """
+        Megatron-LM style TP×CP hybrid forward GEMM behavior.
+
+        Sharding:
+        • CP shards the token (sequence) dimension M: shard_m = ceil(M / cp).
+        • TP shards either K (row-wise) or N (column-wise), depending on gemm_type:
+            - Column-wise (split N): QKV, FFN1, LINEAR_SOFTMAX 
+            - Row-wise   (split K): OUT_PROJ, FFN2
+
+        Per-op compute & communication:
+        • ATTENTION_SCORE / ATTENTION_OUTPUT:
+            -attention gemm shape is (shard_m, k) x (k, n) for each head, should scale with batch * num_heads / tp, number of heads is already multiplied in batch dimension
+            - No extra collective here (K/V movement is modeled in QKV).
+
+        • QKV (column-wise over N):
+            -  CP all_gather(K,V) so each CP rank holds full-context K/V for attention.
+
+        • OUT_PROJ, FFN2 (row-wise over K):
+            - same as tensor parallelism forward gemm with row-wise sharding.:
+
+        • FFN1 (column-wise over N):
+            - No TP/CP collective in forward same as in tensor parallelism.
+
+        """
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
-        # size_bytes = 0
-        #attention gemm qkv (outputproj ffn2) (ffn1) (linear_softmax)
+
         participants = 0
         total_bytes = 0
         reduction_time = 0
@@ -432,25 +455,21 @@ class TimeCalculationLLM(TimeCalculation):
         elif gemm_type == GemmType.QKV:  # column wise
 
             gemm_time = self.getGEMMTime(shard_m, k, shard_n, name)[0]
-            total_bytes = self.get_kv_size_bytes() / self.tp
+            total_bytes = self.get_kv_size_bytes()  / self.tp # each tp group holds a tp shard of kv for each cp group
             kind = "all_gather"
-            participants = self.cp
+            participants = self.cp # all gather K V for each cp group
         elif gemm_type == GemmType.OUT_PROJ:
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * n)
             kind = "reduce_scatter"
-            participants = self.tp
+            participants = self.tp # reduce scatter output activation for each tp group
         elif gemm_type == GemmType.FFN2:  # row wise
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision * shard_m * n)
             kind = "reduce_scatter"
-            participants = self.tp
+            participants = self.tp  # reduce scatter output activation for each tp group
         elif gemm_type == GemmType.FFN1:  # column wise
             gemm_time = self.getGEMMTime(shard_m, k, shard_n, name)[0]
-        elif gemm_type == GemmType.LINEAR_SOFTMAX:
-            gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
-            total_bytes = math.ceil(self.precision * shard_m * n)
-            kind = "all_gather"
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         
@@ -466,6 +485,28 @@ class TimeCalculationLLM(TimeCalculation):
         )
         return gemm_time, reduction_time, total_bytes
     def _tensor_context_hybrid_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+        """
+        Megatron-LM style TP×CP hybrid backward GEMM behavior.
+
+        Sharding:
+        • CP shards tokens (M): shard_m = ceil(M / cp).
+        • TP shards either N (column-wise) or K (row-wise) per gemm_type:
+            - Column-wise (split N): QKV, FFN1, LINEAR_SOFTMAX (vocab proj)
+            - Row-wise   (split K): OUT_PROJ, FFN2
+            - Attention inner GEMMs: per-head work scaled by 1/tp.
+
+        Backward rules (compute + comm):
+        • Column-wise (QKV / FFN1 / LINEAR_SOFTMAX):
+            - dX = dY_i @ W_i^T  → shape [shard_m, K]  → TP reduction on dX (sum):
+                use reduce-scatter on TP (keeps token sharding), 
+            - dW_i = X^T @ dY_i  → local, no TP comm
+            - (QKV only) in CP: dK, dV must be reduce-scattered on CP back to token owners.
+                Bytes ≈ get_kv_size_bytes() / tp (TP shard per CP group).
+
+        • ATTENTION_SCORE / ATTENTION_OUTPUT:
+            - Backward GEMMs are local on token shard with 1/tp scaling across heads.
+            - CP/TP collectives handled in QKV branch (for K/V only), thus no comm here.
+        """
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         # size_bytes = 0
         participants = 0
@@ -532,10 +573,34 @@ class TimeCalculationLLM(TimeCalculation):
         return gemm_time, reduction_time, total_bytes
     def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         """
-        communication happens after out projection and ffn2 gemm
+        Tensor-parallel forward GEMM behavior.
+
+        • Multi-Head Attention (MHA):
+          - With tensor parallelism, the attention computation is sharded along the head dimension,
+            so each TP rank handles a subset of heads. No communication is needed for
+            ATTENTION_SCORE / ATTENTION_OUTPUT GEMMs in the forward pass.
+            attention gemm time is scaled by batch / tp
+
+        • After attention, before feeding MLP:
+          - If TP-only, we all-reduce to gather the full attention output.
+          - If TP+SP (sequence parallel enabled), each TP rank keeps only a shard of the sequence
+            after layernorm, so we use reduce-scatter instead of all-reduce.
+            
+        • Sharding rules by gemm_type:
+          - QKV, FFN1: **column-wise sharding** (split along output dimension N).
+            Each TP rank produces its local output columns independently — no communication needed.
+          - OUT_PROJ, FFN2: **row-wise sharding** (split along input dimension K).
+            Each TP rank computes partial sums that must be combined across ranks via
+            all-reduce or reduce-scatter.
+          - LINEAR_SOFTMAX (final logits projection): **column-wise sharding**.
+            The output projection weight [hidden_dim, vocab_size] is split by vocab dimension.
+            Each TP rank computes logits for its vocab slice, and results are all-gathered
         """
         tp_mode = self.get_parallelism_mode()
-        comm_kind_fwd = "all_reduce" if tp_mode == ParallelismMode.TENSOR else "reduce_scatter"
+        if gemm_type == GemmType.LINEAR_SOFTMAX:
+            comm_kind_fwd = "all_gather"
+        else:
+            comm_kind_fwd = "all_reduce" if tp_mode == ParallelismMode.TENSOR else "reduce_scatter"
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         size_bytes = 0
         total_bytes = 0
@@ -553,34 +618,57 @@ class TimeCalculationLLM(TimeCalculation):
             shard_k = math.ceil(k / max(1, self.tp))
             gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
             size_bytes = math.ceil(self.precision * m * n)
-        elif gemm_type == GemmType.LINEAR_SOFTMAX:
-            shard_k = math.ceil(k / max(1, self.tp * self.cp))
-            gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
+            participants = self.tp
+        elif gemm_type == GemmType.LINEAR_SOFTMAX: #assuming linear softmax is always column wise sharded
+            shard_n = math.ceil(n / max(1, self.tp * self.cp ))
+            gemm_time = self.getGEMMTime(m, k, shard_n, name)[0]
             size_bytes = math.ceil(self.precision * m * n)
+            participants = self.tp * self.cp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
             
         if size_bytes > 0:
-            total_bytes = size_bytes #FIXME: we already has the totol bytes for all reduce not bytes per rank
-            reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_fwd, name=name)
+            total_bytes = size_bytes #we already has the totol bytes for all reduce not bytes per rank
+            reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_fwd, participants=participants, name=name)
 
 
         return gemm_time, reduction_time, total_bytes
     
     def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
-        # gemm_type:"row", "column" determines the way gemm is distributed
-        # comm_after: whether there is communication after gemm, for example, in attention output projection and ffn2
         """
-        in backward pass, for each gemm, we need to calculate the time for gradient w.r.t activation and weight
-        for attention gemm, we can simply multiply the time of one gemm by batch size and divide by tp
-        the all reduce happens after the qkv projection and ffn1 gemm 
-        reduction size is the size of activation
+        Tensor-parallel backward GEMM behavior.
+
+        We model the time for two backward GEMMs per op:
+          • grad wrt activation (dX)
+          • grad wrt weight (dW)
+
+        • ATTENTION_SCORE / ATTENTION_OUTPUT
+          - Per-rank work scales with batch/tp (each rank handles a subset of heads).
+
+        • Column-wise sharded ops :
+          - QKV, FFN1, and LINEAR_SOFTMAX:
+            - Local backward GEMMs:
+                dX:  [m, k]  via (dY_i @ W_i^T)
+                dW:  [k, n/tp] via (X^T @ dY_i)
+            - dX is a partial across ranks** → requires tensor reduction
+              (all-reduce if TP-only; reduce-scatter if TP+SP).
+
+        • Row-wise sharded ops :
+          - OUT_PROJ, FFN2:
+            - Local backward GEMMs:
+                dX_i: [m, k/tp] via (dY @ W_i^T) — disjoint along K, no cross-rank sum
+                dW_i: [k/tp, n] via (X_i^T @ dY)
+            -  no tensor reduction on dX for row-wise in backward.
+
         """
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         seq_degree = self._sequence_parallel_degree()
         act_bytes = 0
         total_bytes = 0
-        comm_kind_bwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
+        if gemm_type == GemmType.LINEAR_SOFTMAX:
+            comm_kind_bwd = "all_reduce"
+        else:
+            comm_kind_bwd = "all_reduce" if seq_degree == 1 else "reduce_scatter"
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type is None:
             raise ValueError("gemm_type is required for tensor-parallel backward GEMM")
@@ -593,25 +681,39 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, m, shard_n, name)[0]
             act_bytes = math.ceil(self.precision * m * k)
+            participants = self.tp
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             shard_k = math.ceil(k / max(1, self.tp))
             grad_time_act = self.getGEMMTime(m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, m, n, name)[0]
         elif gemm_type == GemmType.LINEAR_SOFTMAX:
-            shard_k = math.ceil(k / max(1, self.tp * self.cp))
-            grad_time_act = self.getGEMMTime(m, n, shard_k, name)[0]
-            grad_time_wt = self.getGEMMTime(shard_k, m, n, name)[0]
+            shard_n = math.ceil(n / max(1, self.tp * self.cp))
+            grad_time_act = self.getGEMMTime(m, shard_n, k, name)[0]
+            grad_time_wt = self.getGEMMTime(k, m, shard_n, name)[0]
+            act_bytes = math.ceil(self.precision * m * k)
+            participants = self.tp * self.cp
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
         reduction_time = 0
         if act_bytes > 0:
             total_bytes = act_bytes #total bytes for all reduce
-            reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_bwd, name=name)
+            reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_bwd, participants=participants, name=name)
 
 
         return gemm_time, reduction_time, total_bytes
     def _context_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
+        """
+        Megatron-LM style context-parallel (CP) forward GEMM behavior.
+
+        • CP shards the token (sequence) dimension M across cp ranks:
+            shard_m = ceil(M / cp). Each rank processes a disjoint subset of tokens.
+        • Each GEMM is performed locally on the rank’s token slice.
+        • Communication is required only when gathering K and V for attention,
+          since every rank must hold the full set of keys and values to compute
+          attention scores.
+
+        """
 
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         total_bytes = 0
@@ -630,7 +732,7 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         if gemm_type == GemmType.QKV:
-            kind = "all_gather" #FIXME gathering Values can be overlapped with attention gemm
+            kind = "all_gather" 
             reduction_time = self.network_model.collective(
                 kind=kind,
                 size_bytes=total_bytes,
@@ -644,9 +746,17 @@ class TimeCalculationLLM(TimeCalculation):
         return gemm_time, reduction_time, total_bytes
 
     def _context_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
+
         """
-        assuming that in backward pass, the K V need to be gathered again for reducing activation memory
-        to apply weight gradient, the gradient for K and V need to be reduce-scattered
+        Megatron-LM style context-parallel (CP) backward GEMM behavior.
+
+        Communication rules in CP (sequence-parallel) backward:
+        • QKV projection:
+            - Forward did an all-gather(K, V) across cp ranks.
+            - Backward must return gradients to token owners:
+                    dK, dV → reduce-scatter over cp ranks.
+        • Output projection:
+            - K V need to be gathered again to compute activation gradients.
         """
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         total_bytes = 0
@@ -713,7 +823,9 @@ class TimeCalculationLLM(TimeCalculation):
         return embedding_time + embedding_transfer_time
 
     def get_linear_softmax_f(self, gemm):
-        """Estimate time for final projection + softmax forward."""
+        """Estimate time for final projection + softmax forward.
+            assuming linear softmax gemm always use tensor parallelism sharded by vocab dimension
+        """
         _, effective_m, k, n = self._effective_dims(gemm)
 
         gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
