@@ -1643,7 +1643,10 @@ def visualize_graph(root, filename="graph", visited=None, dot=None):
                 f"dur={_format_duration(root.duration)})"
             )
     elif isinstance(root, Edge):
-            label = f"{root.name}\n(op_id={root.op_id}, dur={_format_duration(root.duration)})"
+            if getattr(root, "local_hw_id", None) is not None:
+                label = f"{root.name}\n(op_id={root.op_id}, local_hw_id={root.local_hw_id}, dur={_format_duration(root.duration)})"
+            else:
+                label = f"{root.name}\n(op_id={root.op_id}, dur={_format_duration(root.duration)})"
     elif isinstance(root, Gradient):
             label = (
                 f"{root.name}\n(op_id={root.op_id}, hw_id={root.hw_id}, "
