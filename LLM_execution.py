@@ -507,7 +507,7 @@ class PipelineGraphFlattener:
 class LLMExecutionDispatcher:
     def __init__(
         self,
-        time_calc: TimeCalculationLLM,
+        time_calc: TimeCalculationLLM, # somehow this works? TODO: fix this at some point so its not annotated by IDE.
         pipeline_graph: Graph,
         pipeline_root: Any,
         interconnect_params: Dict[str, Tuple[float, float]],

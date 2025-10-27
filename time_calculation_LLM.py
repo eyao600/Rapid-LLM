@@ -8,20 +8,6 @@ from LLM_execution import ExecutionMode, LLMExecutionDispatcher
 from simulate_LLM import Graph
 import LLM_util
 from time_calculation import TimeCalculation
-# algByte = False  # algorithmic ops false
-# proj = False  # consider projection layer, turn off for end-2-end validation, as baeline model does not have projection layer
-validating_v100 = True
-
-debug = True
-
-showing_ms = False # Show time in ms if True    show time in us if False
-if showing_ms:
-    m=1e3
-    second = "ms"
-else:
-    m=1e6
-    second = "us"
-
 
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name)
