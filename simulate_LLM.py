@@ -531,6 +531,22 @@ class Graph:
         embedding_b_time = self._time("embedding_b")
         cross_layer_time = self._time("cross_layer_f")
 
+        def attach_parallel_edge(target, gather_edge, skip_non_comm_children=None, skip_comm_children=None):
+            parents = list(getattr(target, "parents", []))
+            for parent in parents:
+                if hasattr(parent, "children") and gather_edge not in parent.children:
+                    parent.add_child(gather_edge)
+            children = list(getattr(target, "children", []))
+            for child in children:
+                if skip_non_comm_children:
+                    if getattr(child, "comm_type", None) != "pipeline":
+                        continue
+                if skip_comm_children:
+                    if getattr(child, "comm_type", None) == "pipeline":
+                        continue
+                if gather_edge not in getattr(child, "parents", []):
+                    gather_edge.add_child(child)
+
         if include_backward:
             embedding_node_b = [[] for _ in range(self.num_batch)]
             softmax_node_b = [[] for _ in range(self.num_batch)]
@@ -579,12 +595,10 @@ class Graph:
                 layer_exit_nodes[b].append(transformer_node)
 
             for l in range(1, self.num_layer):
-
                 prev_node = transformer_nodes[b][l-1]        # previous layer compute node
                 curr_node  = transformer_nodes[b][l]            # current layer compute node
                 prev_exit = layer_exit_nodes[b][l-1]
                 curr_entries = layer_entry_nodes[b][l]
-
 
                 if prev_node.hw_id == curr_node.hw_id:
                     edge = Edge("cross_layer", op_id, 0, comm_type="pipeline")  # on same GPU
@@ -618,14 +632,13 @@ class Graph:
             last_exit.add_child(node_Softmax) #connect last layer and softmax layer
             node_Softmax.add_child(softmax_node[b])
 
-            #add dependency edges
+        #add dependency edges
         for b in range(self.num_batch - 1):
             gpu_index = 0
             last_transformer_layer = []
             first_transformer_layer = []
             first_transformer_layer.append(0)
             for l in range(self.num_layer-1):
-
                 if transformer_nodes[b][l].hw_id != transformer_nodes[b][l+1].hw_id: # check if on different GPUs
                     last_transformer_layer.append(l) # record last layer on each GPU
                     first_transformer_layer.append(l+1) # record first layer on each GPU
@@ -658,7 +671,6 @@ class Graph:
 
 
             for l in reversed(range(self.num_layer)):
-
                 hw_id = min(l // self.layer_per_device , self.lp - 1)
                 transformer_node_b = Node(f"transformer_layer{l}_b", op_id, hw_id, transformer_b_time, fwd=False)
                 transformer_node_b.micro_batch_index = b
@@ -697,21 +709,21 @@ class Graph:
             op_id += 1
             softmax_node_b[b].add_child(layernorm_Softmax)
             layernorm_Softmax.add_child(prev_layer_norm2)
-                
 
-        def attach_parallel_edge(target, gather_edge, exclude_children=None):
-            parents = list(getattr(target, "parents", []))
-            for parent in parents:
-                if hasattr(parent, "children") and gather_edge not in parent.children:
-                    parent.add_child(gather_edge)
-            children = list(getattr(target, "children", []))
-            for child in children:
-                if exclude_children and child in exclude_children:
-                    continue
-                if gather_edge not in getattr(child, "parents", []):
-                    gather_edge.add_child(child)
-
-        root_forward_entry = embedding_node[0]
+        zero3_embedding_key = "zero3_embedding_gather"
+        if zero3_embedding_key in self.comm_metadata:
+            zero3_entry_embedding_edge = self.create_comm_edge(
+                f"{zero3_embedding_key}_b0_fwd_entry",
+                op_id,
+                zero3_embedding_key,
+                is_dp=True,
+                local_hw_id=embedding_node[0].hw_id,
+            )
+            op_id += 1
+            root_forward_entry = zero3_entry_embedding_edge
+            zero3_entry_embedding_edge.add_child(embedding_node[0])
+        else:
+            root_forward_entry = embedding_node[0]
 
         for b in range(self.num_batch):
             # Data parallel collectives (all reduce for DDP/ZeRO-1, reduce-scatter + all-gather for ZeRO-2/3)
@@ -739,30 +751,14 @@ class Graph:
                     )
                     op_id += 1
                     embedding_edge.add_child(gather_edge)
-                else: # No ZeRO-2/3, use all-reduce.
+                elif zero3_embedding_key in self.comm_metadata: # No ZeRO-2/3, use all-reduce.
+                    postfix = "_reduce_scatter"
+                else:
                     postfix = "_all_reduce"
 
                 zero3_embedding_key = "zero3_embedding_gather"
                 zero3_transformer_key = "zero3_transformer_gather"
                 zero3_softmax_key = "zero3_softmax_gather"
-                if zero3_embedding_key in self.comm_metadata:
-                    gather_edge = self.create_comm_edge(
-                        f"{zero3_embedding_key}_b{b}_fwd",
-                        op_id,
-                        zero3_embedding_key,
-                        is_dp=True,
-                        local_hw_id=embedding_node[b].hw_id,
-                    )
-                    op_id += 1
-                    if embedding_node[b] in data_batch_node[b].children:
-                        data_batch_node[b].children.remove(embedding_node[b])
-                    if data_batch_node[b] in getattr(embedding_node[b], "parents", []):
-                        embedding_node[b].parents.remove(data_batch_node[b])
-                    data_batch_node[b].add_child(gather_edge)
-                    gather_edge.add_child(embedding_node[b])
-                    if b == 0:
-                        root_forward_entry = gather_edge
-
                 for layer_idx in range(self.num_layer):
                     reducer = self.create_comm_edge(
                         f"transformer_b{b}_layer{layer_idx}"+postfix,
@@ -786,6 +782,18 @@ class Graph:
                         reducer.add_child(gather_edge)
 
                 if zero3_transformer_key in self.comm_metadata:
+                    # create the edge for the embedding gather of the next batch (except for the last batch)
+                    zero3_embedding_gather_edge = None
+                    if b < self.num_batch - 1:
+                        zero3_embedding_gather_edge = self.create_comm_edge(
+                            f"{zero3_embedding_key}_b{b+1}_fwd",
+                            op_id,
+                            zero3_embedding_key,
+                            is_dp=True,
+                            local_hw_id=embedding_node[b].hw_id,
+                        )
+                        op_id += 1
+
                     gather_edge = self.create_comm_edge(
                         f"{zero3_transformer_key}_b{b}_layer0_fwd",
                         op_id,
@@ -797,15 +805,25 @@ class Graph:
                     attach_parallel_edge(embedding_node[b], gather_edge)
                     for layer_idx in range(1, self.num_layer):
                         host = transformer_nodes[b][layer_idx - 1]
+                        target = transformer_nodes[b][layer_idx]
                         gather_edge = self.create_comm_edge(
                             f"{zero3_transformer_key}_b{b}_layer{layer_idx}_fwd",
                             op_id,
                             zero3_transformer_key,
                             is_dp=True,
-                            local_hw_id=host.hw_id,
+                            local_hw_id=target.hw_id,
                         )
                         op_id += 1
-                        attach_parallel_edge(host, gather_edge)
+                        if host.hw_id == target.hw_id:
+                            attach_parallel_edge(host, gather_edge)
+                        else:
+                            # Cross-device. Have to do this very carefully.
+                            # We will need to attach the edge but make sure the dependencies only apply to the "cross_layer" comm.
+                            attach_parallel_edge(host, gather_edge, skip_non_comm_children=True)
+                            # Then, we will need to attach the zero3 embedding gather edge to the target device.
+                            if zero3_embedding_gather_edge:
+                                attach_parallel_edge(host, zero3_embedding_gather_edge, skip_comm_children=True)
+                             
 
                 softmax_edge = self.create_comm_edge(
                     "softmax",
@@ -850,7 +868,6 @@ class Graph:
         # first_transformer_layer.append(0)
         gpu_index = self.lp - 1
         for l in range(self.num_layer - 1, 0, -1):
-            
             if transformer_nodes_b[0][l].hw_id != transformer_nodes_b[0][l-1].hw_id:  # Check if on different GPU
                 # print("Layer ", l, " is on GPU ", transformer_nodes_b[0][l].hw_id)
                 first_transformer_layer[gpu_index-1] = l-1  # Record first layer on each GPU
@@ -863,10 +880,7 @@ class Graph:
 
         for b in range(self.num_batch-1, 0, -1):
             gpu_index = self.lp - 1
-            
-
             for l in range(self.num_layer - 1, 0, -1):
-
                 if transformer_nodes_b[b][l].hw_id != transformer_nodes_b[b][l-1].hw_id:  # Check if on different GPUs
                     # last_transformer_layer.append(l)  # Record last layer on each GPU
                     # first_transformer_layer.append(l-1)  # Record first layer on each GPU
@@ -883,31 +897,54 @@ class Graph:
         zero3_embedding_key = "zero3_embedding_gather"
         zero3_transformer_key = "zero3_transformer_gather"
         zero3_softmax_key = "zero3_softmax_gather"
+
+        zero3_softmax_bwd_entry = None
+        if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
+            zero3_softmax_bwd_entry = self.create_comm_edge(
+                f"{zero3_softmax_key}_b0_bwd_entry",
+                op_id,
+                zero3_softmax_key,
+                is_dp=True,
+                local_hw_id=softmax_node_b[0].hw_id,
+            )
+            op_id += 1
+            attach_parallel_edge(softmax_node[-1], zero3_softmax_bwd_entry)
         for b in range(self.num_batch):
+            zero3_softmax_bwd_edge = None
+            if b > 0:
+                if zero3_softmax_key in self.comm_metadata:
+                    host = softmax_node[b]
+                    gather_edge = self.create_comm_edge(
+                        f"{zero3_softmax_key}_b{b}_bwd",
+                        op_id,
+                        zero3_softmax_key,
+                        is_dp=True,
+                        local_hw_id=host.hw_id,
+                    )
+                    op_id += 1
+                    zero3_softmax_bwd_edge = gather_edge
+
             if zero3_transformer_key in self.comm_metadata and self.num_layer > 0:
                 for layer_idx in reversed(range(self.num_layer)):
                     host = softmax_node_b[b] if layer_idx == self.num_layer - 1 else transformer_nodes_b[b][layer_idx + 1]
+                    target = transformer_nodes_b[b][layer_idx]
                     gather_edge = self.create_comm_edge(
                         f"{zero3_transformer_key}_b{b}_layer{layer_idx}_bwd",
                         op_id,
                         zero3_transformer_key,
                         is_dp=True,
-                        local_hw_id=host.hw_id,
+                        local_hw_id=target.hw_id,
                     )
                     op_id += 1
-                    attach_parallel_edge(host, gather_edge)
+                    if host.hw_id == target.hw_id:
+                        attach_parallel_edge(host, gather_edge)
+                    else:
+                        # Cross-device. Have to do this very carefully.
+                        # We will need to attach the edge but make sure the dependencies only apply to the "cross_layer" comm.
+                        attach_parallel_edge(host, gather_edge, skip_non_comm_children=True)
+                        if zero3_softmax_bwd_edge:
+                            attach_parallel_edge(host, zero3_softmax_bwd_edge, skip_comm_children=True)
 
-            if zero3_softmax_key in self.comm_metadata and self.num_layer > 0:
-                host = softmax_node[b]
-                gather_edge = self.create_comm_edge(
-                    f"{zero3_softmax_key}_b{b}_bwd",
-                    op_id,
-                    zero3_softmax_key,
-                    is_dp=True,
-                    local_hw_id=host.hw_id,
-                )
-                op_id += 1
-                attach_parallel_edge(host, gather_edge)
 
             if zero3_embedding_key in self.comm_metadata and self.num_layer > 0:
                 host = transformer_nodes_b[b][0]

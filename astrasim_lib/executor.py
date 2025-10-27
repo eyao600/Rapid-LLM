@@ -481,13 +481,6 @@ def convert_deepflow_graph_to_chakra_et(
     def rank_for(stage: int, dp_idx: int) -> int:
         return stage_to_ranks[stage][dp_idx]
 
-    # in all objects, if they have no hw_id, convert local_hw_id to hw_id
-    # for obj in all_objects:
-    #     if getattr(obj, "hw_id", None) is None:
-    #         local_hw = getattr(obj, "local_hw_id", None)
-    #         if local_hw is not None:
-    #             obj.hw_id = local_hw
-
     collectives_by_parent: Dict[Any, List[Any]] = defaultdict(list)
     edge_stage: Dict[Any, int] = {}
     for obj in all_objects:
@@ -532,7 +525,7 @@ def convert_deepflow_graph_to_chakra_et(
         collective_deps: Set[Any] = set()
         visited: Set[Tuple[int, bool]] = set()
         stack: List[Tuple[Any, bool]] = [(parent, False) for parent in getattr(node, "parents", [])]
-        debug_en = node.name == "transformer_layer0"
+        debug_en = False
         
         if debug_en:
             print(f"\n=== DEBUG: analyze_for_compute for node '{node.name}' ===")
@@ -990,12 +983,15 @@ def convert_deepflow_graph_to_chakra_et(
                 return collective_et_ids[(parent, rank_for(parent_stage, dp_idx))]
             return compute_et_ids[(parent, rank_for(parent_stage, dp_idx))]
 
-        key = (parent, target, dp_idx)
+        edge_obj = pipeline_edge_map.get((parent, target))
+
+        key = (parent, target_stage, dp_idx, edge_obj)
+        # if the key has been seen before, then this is a duplicate pipeline dependency
+        # just return old recv_id
         cached = pipeline_recv_cache.get(key)
         if cached is not None:
             return cached
 
-        edge_obj = pipeline_edge_map.get((parent, target))
         # if not edge_obj:
         #     print("Pipeline edge map:")
         #     import pprint
@@ -1036,32 +1032,22 @@ def convert_deepflow_graph_to_chakra_et(
         pipeline_recv_cache[key] = recv_id
         return recv_id
 
-    from pprint import pprint
-    print("Stage order:")
-    pprint(stage_order)
+
     for stage in stage_order:
         order = stage_order[stage]
-        pprint(f"Stage {stage}: {order}")
         for task in order:
-            print(f"Task: {task}")
             if task in collective_info:
                 info = collective_info[task]
-                print(f"Collective info")
-                pprint(info)
                 # Skip stage collectives entirely when dp_count <= 1
                 if dp_count <= 1 and task not in tp_collective_labels:
                     continue
                 for dp_idx, rank in enumerate(stage_to_ranks[stage]):
                     trace = rank_traces[rank]
                     deps: List[int] = []
-                    print(f"Stage deps: {[getattr(dep, 'name', str(id(dep))) for dep in info['stage_deps']]}")
-                    print(f"Collective deps: {[getattr(dep, 'name', str(id(dep))) for dep in info.get('collective_deps', set())]}")
                     for dep in info["stage_deps"]:
                         if dep in collective_info:
                             deps.append(collective_et_ids[(dep, rank_for(collective_info[dep]["stage"], dp_idx))])
                         else:
-                            print(f"Dep: {dep.name} is not in collective_info")
-
                             deps.append(compute_et_ids[(dep, rank_for(dep.hw_id, dp_idx))])
                     for dep in info.get("collective_deps", set()):
                         if dep in collective_info:
@@ -1135,7 +1121,6 @@ def convert_deepflow_graph_to_chakra_et(
                     # via dependencies when needed.
 
 
-    # this time with pipeline deps ONLY
     # Attach cross-stage (pipeline) dependencies after all nodes are created.
     for stage, order in stage_order.items():
         for task in order:
