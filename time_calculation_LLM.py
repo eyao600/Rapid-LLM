@@ -418,6 +418,8 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch
+        elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
+            gemm_time = self.getGEMMTime(m, k, n, name)[0] * self.moe_num_experts
         else :
             gemm_time = self.getGEMMTime(m, k, n, name)[0]
         return gemm_time, 0, 0
@@ -427,11 +429,13 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             grad_time_act = self.getGEMMTime(m, k, n, name)[0] * batch
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * batch
-            gemm_time = grad_time_act + grad_time_wt
+        elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
+            grad_time_act = self.getGEMMTime(m, n, k, name)[0] * self.moe_num_experts
+            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * self.moe_num_experts
         else :
             grad_time_act = self.getGEMMTime(m, n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0]
-            gemm_time = grad_time_act + grad_time_wt
+        gemm_time = grad_time_act + grad_time_wt
         return gemm_time, 0, 0
         
     def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:

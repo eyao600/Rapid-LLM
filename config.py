@@ -514,6 +514,13 @@ class LLMAttentionConfig:
 
 
 @dataclass
+class LLMMoEConfig:
+    use_moe: bool
+    num_experts: Optional[int] = None
+    top_k: Optional[int] = None
+
+
+@dataclass
 class LLMConfig:
     mode: str
     run_type: str
@@ -530,6 +537,7 @@ class LLMConfig:
     n_tokens: int
     all_reduce: str
     attention: LLMAttentionConfig
+    moe: Optional[LLMMoEConfig] = None
 
     @property
     def num_heads(self) -> int:
@@ -819,7 +827,7 @@ def parse_config(filename, config_type):
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
         attention_dict = mp.pop("attention", None)
-        
+
         attn_type = str(attention_dict.get("attention_type", "mha")).lower()
         if "num_heads" not in attention_dict:
             raise ValueError("model_param.attention.num_heads must be specified")
@@ -859,6 +867,25 @@ def parse_config(filename, config_type):
             attention_tile_size=attention_tile_size,
         )
 
+        moe_dict = mp.pop("MOE", mp.pop("moe", None))
+        if moe_dict is not None:
+            raw_use_moe = moe_dict.get("use_moe", False)
+            if isinstance(raw_use_moe, str):
+                use_moe = raw_use_moe.strip().lower() in {"1", "true", "yes", "y"}
+            else:
+                use_moe = bool(raw_use_moe)
+            num_experts_field = moe_dict.get("num_experts")
+            top_k_field = moe_dict.get("top_k")
+            num_experts = int(num_experts_field) if num_experts_field is not None else None
+            top_k = int(top_k_field) if top_k_field is not None else None
+            moe_cfg = LLMMoEConfig(
+                use_moe=use_moe,
+                num_experts=num_experts,
+                top_k=top_k,
+            )
+        else:
+            moe_cfg = None
+
         run_type = mp.pop("run_type", "training")
         tied_embeddings_raw = mp.pop("tied_embeddings", True)
         if isinstance(tied_embeddings_raw, str):
@@ -892,6 +919,7 @@ def parse_config(filename, config_type):
             n_tokens=0, # not used for now.
             all_reduce="every layer", # hard set for now.
             attention=attention_cfg,
+            moe=moe_cfg,
         )
         config = MODELConfig(model_config=model_config, inference_config=inference_config)
     else:

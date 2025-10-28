@@ -429,6 +429,13 @@ class TimeCalculation:
             self.flash_attention = getattr(self.model, 'use_flashattention', False)
             self.kv_heads = self.model.kv_heads if hasattr(self.model, 'kv_heads') else self.num_heads
             self.attention_tile_size = getattr(self.model, 'attention_tile_size', None)
+            self.moe_config = getattr(self.model, "moe", None)
+            self.use_moe = bool(getattr(self.model, "use_moe", False))
+            raw_num_experts = getattr(self.model, "moe_num_experts", None)
+            raw_top_k = getattr(self.model, "moe_top_k", None)
+            self.moe_num_experts = int(raw_num_experts) if raw_num_experts is not None else None
+            self.moe_top_k = int(raw_top_k) if raw_top_k is not None else None
+
 
     def get_model_class(self, model_type):
         """Return the appropriate model class based on the model type."""

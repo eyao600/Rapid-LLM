@@ -39,6 +39,20 @@ class Model_LLM:
       self.kv_heads        = exp_config.model_config.attention.kv_heads if hasattr(exp_config.model_config.attention, 'kv_heads') else None
       self.use_flashattention = getattr(exp_config.model_config.attention, 'use_flashattention', False)
       self.attention_tile_size = getattr(exp_config.model_config.attention, 'attention_tile_size', None)
+
+      moe_cfg = getattr(exp_config.model_config, "moe", None)
+      if moe_cfg is not None:
+          self.moe = moe_cfg
+          self.use_moe = bool(getattr(moe_cfg, "use_moe", False))
+          self.moe_num_experts = (
+              int(moe_cfg.num_experts) if moe_cfg.num_experts is not None else None
+          )
+          self.moe_top_k = int(moe_cfg.top_k) if moe_cfg.top_k is not None else None
+      else:
+          self.moe = None
+          self.use_moe = False
+          self.moe_num_experts = None
+          self.moe_top_k = None
       
       inference_cfg = getattr(exp_config, 'inference_config', None)
       if inference_cfg is not None:

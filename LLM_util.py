@@ -31,7 +31,7 @@ def reshape_gemm_to_3d(arg):
 ATTENTION_GEMM_KEYS = {"attention_score", "attention_output"}
 
 
-def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
+def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
     """
     Generate GEMM shapes [M, K, N] for a multi-head Transformer decoder block.
 
@@ -73,8 +73,15 @@ def multihead_decoder_gemm(batch_size, seq_len, d_model, num_heads, kv_heads, ff
         projected_dim = 2 * ffn_dim
     else:
         projected_dim = ffn_dim
-    gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
-    gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model)
+    if self.use_moe:
+        #assuming equal load balancing here
+        num_experts = self.moe_config.num_experts
+        top_k = self.moe_config.top_k
+        gemms["ffn1"] = (batch_size, seq_len * top_k / num_experts, d_model, projected_dim ) #gemm shape per expert
+        gemms["ffn2"] = (batch_size, seq_len * top_k / num_experts, ffn_dim, d_model)
+    else:
+        gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
+        gemms["ffn2"] = (batch_size, seq_len, ffn_dim, d_model) 
     gemms["linear"] = (batch_size, seq_len, d_model, vocab_size)
 
     return gemms
@@ -94,6 +101,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
     """
     # Generate GEMM shapes in 4D
     gemm_shapes_4d = multihead_decoder_gemm(
+        self,
         batch_size=batch_size,
         seq_len=seq_len,
         d_model=d_model,
