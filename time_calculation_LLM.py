@@ -34,7 +34,9 @@ LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT = 14
 LAYER_NORM_FORWARD_MEM_ACCESSES = 2
 LAYER_NORM_BACKWARD_MEM_ACCESSES = 4
 SOFTMAX_FORWARD_FLOPS_PER_ELEMENT = 7 # exponentiation 4FLOPS, subtract max 1FLOPS, dropout 2FLOPS
-SOFTMAX_FORWARD_MEM_ACCESSES = 7
+SOFTMAX_FORWARD_MEM_ACCESSES = 4
+SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT = 4 
+SOFTMAX_BACKWARD_MEM_ACCESSES = 3
 
 # Map each parallelism mode to operation-level collective specs used across the
 # metadata pipeline. Each spec records the collective kind, the participant
@@ -855,11 +857,11 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
 
             
-
-        point_flop = effective_m * (3 * n - 1)
+        elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension
+        point_flop = elements * SOFTMAX_FORWARD_FLOPS_PER_ELEMENT
         # TODO:
         # unsure if should be precision.activations or precision.stats
-        point_mem = self.precision.activations * effective_m * (SOFTMAX_FORWARD_MEM_ACCESSES * n)
+        point_mem = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES 
         point_time = self.roofline(
             point_flop,
             point_mem,
@@ -883,11 +885,11 @@ class TimeCalculationLLM(TimeCalculation):
         _, effective_m, k, n = self._effective_dims(gemm)
 
         gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_backward(gemm, "linear_softmax_b", gemm_type=GemmType.LINEAR_SOFTMAX)
-
-        point_flop = effective_m * n * 6
+        elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension
+        point_flop = elements * SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT
         # TODO:
         # same here, unsure if should be precision.activations or precision.stats
-        point_mem = self.precision.activations * effective_m * n * 10
+        point_mem = self.precision.activations * elements * SOFTMAX_BACKWARD_MEM_ACCESSES
 
         point_time = self.roofline(
             point_flop,
@@ -907,60 +909,47 @@ class TimeCalculationLLM(TimeCalculation):
         return gemm_time + reduction_time + point_time
     def get_scale_softmax_f(self, gemm):
         """
-        Process blocks of keys/values at a time (tiling).
-        For each block, apply the online softmax trick to update running max & denominator
-        each block after QK^T results in a s*s 2D matrix
-        model each block with a gemm of shape (s,1,s)
-        multiple by n_heads and batch size
-        the total time should be divided by tensor parallelism degree
+        Estimate time for scale + softmax forward.
+        total elements is divided by tp and cp since in tp-cp hybrid parallelism,
         """
-        batch, effective_m, k, n = self._expand_gemm_descriptor(gemm)
-        shard_m = math.ceil(effective_m / max(1, self.cp))
+        batch, m, _, n = self._expand_gemm_descriptor(gemm)
+        elements = math.ceil(batch * m * n / (self.tp * self.cp))
+        flops = elements * (SOFTMAX_FORWARD_FLOPS_PER_ELEMENT + 1)  # +1 for scaling
+        mem = self.precision.activations * elements * (SOFTMAX_FORWARD_MEM_ACCESSES )  
 
-        time = batch * self.getGEMMTime(shard_m, 1, n, "scale_softmax_f")[0] / self.tp
+        time = self.roofline(
+            flops,
+            mem,
+            name="pointwise-scale-softmax-f",
+            mem_level=self.num_levels - 1,
+        ) + self.O
 
         return time
     
     def get_scale_softmax_b(self, gemm):
-        batch, effective_m, _, n = self._effective_dims(gemm)
+        batch, m, _, n = self._expand_gemm_descriptor(gemm)
+        elements = math.ceil(batch * m * n / (self.tp * self.cp))
+        flops = elements * (SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT + 1)  # +1 for scaling
+        mem = self.precision.activations * elements * (SOFTMAX_BACKWARD_MEM_ACCESSES)  
 
-        shard_m = math.ceil(effective_m / max(1, self.cp))
-        elements = shard_m * n / self.tp
-        scale_flop = elements * 3
-        scale_mem = self.precision.activations * elements * 3
-
-        # Backward softmax uses forward probabilities and gradient accumulation (≈6 ops/elt)
-        softmax_flop = effective_m * n * 6
-        softmax_mem = self.precision.activations * effective_m * n * 10
-
-        scale_time = self.roofline(
-            scale_flop,
-            scale_mem,
-            name="pointwise-scale-b",
+        time = self.roofline(
+            flops,
+            mem,
+            name="pointwise-scale_softmax-b",
             mem_level=self.num_levels - 1,
-        ) + self.O
-        softmax_time = self.roofline(
-            softmax_flop,
-            softmax_mem,
-            name="pointwise-softmax-b",
-            mem_level=self.num_levels - 1,
-        ) + 4 * self.O
+        ) +  self.O
+
 
         if self.debug:
             print(
-                "Scale (b) flop: {:,}, mem: {:,}".format(
-                    int(scale_flop / 1e9), int(scale_mem / 1e9)
+                "Scale Softmax (b) flop: {:,}, mem: {:,}".format(
+                    int(flops / 1e9), int(mem / 1e9)
                 )
             )
-            print("Scale (b) time: {:,}".format(scale_time))
-            print(
-                "Softmax (b) flop: {:,}, mem: {:,}".format(
-                    int(softmax_flop / 1e9), int(softmax_mem / 1e9)
-                )
-            )
-            print("Softmax (b) time: {:,}\n".format(softmax_time))
+            print("Scale Softmax(b) time: {:,}".format(time))
 
-        return scale_time + softmax_time
+
+        return time 
         
     def get_residual_f(self, tensor_shape):
         # Residual operates on full tensor, not just GEMM output dimension
@@ -1095,7 +1084,7 @@ class TimeCalculationLLM(TimeCalculation):
             mem_level=self.num_levels - 1,
         ) + 3 * self.O
         if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # all-gather after layernorm
-            per_rank_bytes = self.precision.activations * elements
+            per_rank_bytes = self.precision.stats * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
                 kind="all_gather",
