@@ -119,13 +119,18 @@ def get_transformer_mem_layer( dp, tp, batch_size, hidden_dim, seq_len, ffn_dim,
     act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) #from https://arxiv.org/pdf/2205.05198
     act_memory_layer_inf = seq_len * batch_size * ffn_dim / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
     ffn_proj_factor = 3 if str(model_type).lower() == "llama" else 2
+    
+    
     transformer_param_layer = 4* hidden_dim * hidden_dim + ffn_dim * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
+    optimizer_mem = 10 * transformer_param_layer / dp # zero1 style optimizer memory
+    #TODO: which optimizer mem to use?
     optimizer_mem = 10 * transformer_param_layer * (precision.optimizer_states / 2) / tp # don't divide by dp for DDP
-    tensor_weight_memory_layer = transformer_param_layer * precision.parameters / tp
+    tensor_weight_memory_layer = transformer_param_layer * precision.parameters / tp #weight memory
     # master_parameters is set to 0 by default, so this works.
     master_weight_memory_layer = transformer_param_layer * precision.master_parameters / tp
     weight_memory_layer = tensor_weight_memory_layer + master_weight_memory_layer
-    gradient_mem = 2 * transformer_param_layer * precision.gradients / tp  # gradient buffers scaled by precision
+    
+    gradient_mem = transformer_param_layer * precision.gradients / tp  # gradient buffers scaled by precision
     # precision has been replaced with a class that has many different precision types.
     # furthemore, we have added this "master weight" copy for weights that are stored in FP32 optionally.
     # for weight_memory_layer it makes sense to just add them together. But I can see it's only really used in infernece?
@@ -139,7 +144,7 @@ def get_transformer_mem_layer( dp, tp, batch_size, hidden_dim, seq_len, ffn_dim,
     if zero_stage >= 1:
         optimizer_mem /= dp
 
-    static_memory_layer = (6 + 10 / dp) * transformer_param_layer / tp * (precision.optimizer_states / 2) # optimizer states + gradients + weights
+    static_memory_layer = optimizer_mem + gradient_mem + weight_memory_layer # optimizer states + gradients + weights
     layer_mem = (act_memory_layer + weight_memory_layer)
     #cross entropy not included
 
@@ -201,6 +206,8 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
     # print("Data Parallelism Degree:", dp)
     dp = 8 #for testing
     miniB               = math.ceil(batch_size / dp)
+    mb             = int(kwargs.get('microbatches', exp_hw_config.sch_config.mb))
+    microB              = math.ceil(miniB / mb)
 
     tied_embeddings = exp_model_config.model_config.tied_embeddings
 
@@ -209,7 +216,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
             dp = dp,
             tp = 1,
             zero_stage=1,
-            batch_size=batch_size,
+            batch_size=microB,
             hidden_dim=hidden_dim,
             seq_len=seq_len,
             ffn_dim=ffn_dim,
@@ -219,7 +226,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
         )
     )
     softmax_mem = get_linear_softmax_mem(
-        batch_size=batch_size,
+        batch_size=microB,
         seq_len=seq_len,
         hidden_dim=hidden_dim,
         vocab_size=vocab_size,
@@ -230,7 +237,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
 
 
     embedding_mem = get_embedding_act_mem(
-        batch_size=batch_size,
+        batch_size=microB,
         seq_len=seq_len,
         hidden_dim=hidden_dim,
         p=1,

@@ -418,8 +418,6 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(m, k, n, name)[0] * batch
-            number_flops = m * n * k * batch
-            print(f"Single GPU Attention GEMM: {name} flops={number_flops/1e9} GFLOPS")
         else :
             gemm_time = self.getGEMMTime(m, k, n, name)[0]
         return gemm_time, 0, 0
@@ -2121,8 +2119,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
         forward_root, backward_root = self.pipeline_graph.extract_forward_graph(graph_root)
-        _, peak_mem_inf = self._simulate_with_memory(forward_root, memory_data, mode="inference")
-        # _, peak_mem = self._simulate_with_memory(graph_root, memory_data, mode="training")
+        _, peak_mem = self._simulate_with_memory(forward_root, memory_data, mode="training")
         mode = self.execution_mode
         
         dispatcher = LLMExecutionDispatcher(
