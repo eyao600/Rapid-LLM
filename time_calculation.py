@@ -435,7 +435,10 @@ class TimeCalculation:
             raw_top_k = getattr(self.model, "moe_top_k", None)
             self.moe_num_experts = int(raw_num_experts) if raw_num_experts is not None else None
             self.moe_top_k = int(raw_top_k) if raw_top_k is not None else None
-
+            if self.num_workers > 1:
+                if self.use_moe:
+                    raise ValueError("MoE is only supported for single-worker runs (system_hierarchy.num_workers must be 1).")
+             
 
     def get_model_class(self, model_type):
         """Return the appropriate model class based on the model type."""
@@ -773,8 +776,7 @@ class TimeCalculation:
                 self.memLayer[i].printStats(f)
 
             self.network.printStats(f)
-
-    def roofline(self, flop, mem_access_, name="", info=False, mem_level=None):
+    def roofline(self, flop, mem_access_, name="", info=False, mem_level=None, flashattn_enable=False):
         # print("Roofline: entered {}".format(name))
 
         # Parse mem_access_ into consistent format
@@ -797,7 +799,8 @@ class TimeCalculation:
             # Multi-level mode (original behavior)
             num_level = len(mem_access)
             try:
-                assert mem_access[num_level - 1] > 0, "last_level_mem = 0"
+                if not flashattn_enable:
+                    assert mem_access[num_level - 1] > 0, "last_level_mem = 0"
             except Exception as e:
                 print(
                     "{}: Number of accesses to the last level of memory hierarchy cannot be zero:\n {}".format(
@@ -814,7 +817,8 @@ class TimeCalculation:
             mem_bw = self.memLayer[level_idx].getThroughput()
             mem_latency = self.memLayer[level_idx].getLatency()
             inflection_point = float("inf") if mem_bw == 0 else self.th / mem_bw
-            comp_int = 0 if num_mem == 0 else flop / num_mem
+            # print(f"Level {level_idx}: mem_bw={mem_bw}, mem_latency={mem_latency}, inflection_point={inflection_point}", flush=True)
+            comp_int = float("inf") if num_mem == 0 else flop / num_mem
             if comp_int < inflection_point:  # mem-bound
                 level_time = (float("inf") if (mem_bw == 0 or num_mem == 0) else (num_mem / mem_bw)) + mem_latency
             else:  # compute-bound
@@ -826,9 +830,8 @@ class TimeCalculation:
 
         # print("Roofline: exited {}".format(name))
         return max_time
-
-
-    def getGEMMTime(self, dim1, dim2, dim3, name, original=False):
+    def getGEMMTime(self, dim1, dim2, dim3, name, 
+                    flashattn_enable=True, read_bytes_l2=0, write_bytes_l2=0, original=False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]
@@ -846,6 +849,13 @@ class TimeCalculation:
             GEMM_flop = gemm.GEMM_flop
             mem_access = gemm.mem_accesses
 
+            if flashattn_enable:
+                mem_access = list(mem_access)
+                mem_access[3] = 0 # no HBM accesses
+                mem_access[2] = read_bytes_l2 + write_bytes_l2 # explicitly set L2 accesses
+                mem_access = tuple(mem_access)
+                
+
             # Adjust shared accesses per effective SMs
             mem_access_per_sm = list(mem_access)
             reuse_M = (dim1 + gemm.l2_M - 1) // gemm.l2_M
@@ -855,8 +865,10 @@ class TimeCalculation:
             if eff_sm > 0:
                 mem_access_per_sm[1] = mem_access_per_sm[1] / eff_sm
 
-            GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name) + self.O
-
+            GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name, flashattn_enable=flashattn_enable) 
+            if flashattn_enable == False:
+                GEMM_time = GEMM_time+ self.O
+     
             tile_dims = (
                 (gemm.l0_M, gemm.l0_K, gemm.l0_N),
                 (gemm.l1_M, gemm.l1_K, gemm.l1_N),
@@ -890,7 +902,7 @@ class TimeCalculation:
         best_inner_code = best_choice[0]  # type: ignore[index]
         best_tile_dims = best_choice[1]  # type: ignore[index]
         return best_time, best_inner_code, best_tile_dims, mem_access
-
+    
     def generateTileSpace(self, dim1=None, dim2=None, dim3=None, original=False):
         tile_space = []
         tiles = [None] * self.num_levels
