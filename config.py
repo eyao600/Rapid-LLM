@@ -826,12 +826,32 @@ def parse_config(filename, config_type):
         config = MODELConfig(model_config=model_config, inference_config=None)
     elif config_type == "LLM":
         mp = dict(config_dict["model_param"])
-        attention_dict = mp.pop("attention", None)
+        if "attention" not in mp:
+            raise ValueError("model_param.attention section must be specified for LLM configs")
+        attention_dict = mp.pop("attention")
+        if not isinstance(attention_dict, dict):
+            raise ValueError("model_param.attention must be a mapping of attention parameters")
 
-        attn_type = str(attention_dict.get("attention_type", "mha")).lower()
+        if "attention_type" not in attention_dict:
+            raise ValueError("model_param.attention.attention_type must be specified")
+        attn_type_raw = attention_dict["attention_type"]
+        attn_type = str(attn_type_raw).strip().lower()
+        if attn_type not in {"mha", "gqa", "mla"}:
+            raise ValueError(
+                f"model_param.attention.attention_type must be one of {{'mha', 'gqa', 'mla'}} (got {attn_type_raw!r})"
+            )
+
         if "num_heads" not in attention_dict:
             raise ValueError("model_param.attention.num_heads must be specified")
-        num_heads = int(attention_dict["num_heads"])
+        try:
+            num_heads = int(attention_dict["num_heads"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"model_param.attention.num_heads must be an integer (got {attention_dict['num_heads']!r})"
+            ) from exc
+        if num_heads <= 0:
+            raise ValueError("model_param.attention.num_heads must be a positive integer")
+
         kv_heads_field = attention_dict.get("kv_heads")
 
         if attn_type == "gqa":
@@ -839,9 +859,22 @@ def parse_config(filename, config_type):
                 raise ValueError(
                     "model_param.attention.kv_heads must be specified when attention_type='gqa'"
                 )
-            kv_heads = int(kv_heads_field)
+            try:
+                kv_heads = int(kv_heads_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.attention.kv_heads must be an integer when attention_type='gqa' (got {kv_heads_field!r})"
+                ) from exc
         else:
-            kv_heads = num_heads
+            if kv_heads_field is None:
+                kv_heads = num_heads
+            else:
+                try:
+                    kv_heads = int(kv_heads_field)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"model_param.attention.kv_heads must be an integer (got {kv_heads_field!r})"
+                    ) from exc
 
         if kv_heads <= 0:
             raise ValueError("model_param.attention.kv_heads must be a positive integer")
@@ -852,12 +885,18 @@ def parse_config(filename, config_type):
 
         raw_flash_attention = attention_dict.get("use_flashattention", attention_dict.get("used_flash_attention", False))
         if isinstance(raw_flash_attention, str):
-            flash_attention = raw_flash_attention.strip().lower() in ("1", "true", "yes", "y")
+            flash_attention = raw_flash_attention.strip().lower() in {"1", "true", "yes", "y"}
         else:
             flash_attention = bool(raw_flash_attention)
 
         tile_size_field = attention_dict.get("attention_tile_size")
         attention_tile_size = int(tile_size_field) if tile_size_field is not None else None
+        if attention_tile_size is not None and attention_tile_size <= 0:
+            raise ValueError("model_param.attention.attention_tile_size must be a positive integer when provided")
+        if flash_attention and attention_tile_size is None:
+            raise ValueError(
+                "model_param.attention.attention_tile_size must be specified when flash attention is enabled"
+            )
 
         attention_cfg = LLMAttentionConfig(
             attention_type=attn_type,
@@ -868,54 +907,138 @@ def parse_config(filename, config_type):
         )
 
         moe_dict = mp.pop("MOE", mp.pop("moe", None))
-        if moe_dict is not None:
-            raw_use_moe = moe_dict.get("use_moe", False)
-            if isinstance(raw_use_moe, str):
-                use_moe = raw_use_moe.strip().lower() in {"1", "true", "yes", "y"}
-            else:
-                use_moe = bool(raw_use_moe)
-            num_experts_field = moe_dict.get("num_experts")
-            top_k_field = moe_dict.get("top_k")
-            num_experts = int(num_experts_field) if num_experts_field is not None else None
-            top_k = int(top_k_field) if top_k_field is not None else None
-            moe_cfg = LLMMoEConfig(
-                use_moe=use_moe,
-                num_experts=num_experts,
-                top_k=top_k,
-            )
+        if moe_dict is None:
+            raise ValueError("model_param.MOE block must be specified for LLM configs")
+        raw_use_moe = moe_dict.get("use_moe", False)
+        if isinstance(raw_use_moe, str):
+            use_moe = raw_use_moe.strip().lower() in {"1", "true", "yes", "y"}
         else:
-            moe_cfg = None
+            use_moe = bool(raw_use_moe)
+        num_experts_field = moe_dict.get("num_experts")
+        top_k_field = moe_dict.get("top_k")
+        if use_moe:
+            if num_experts_field is None:
+                raise ValueError("model_param.MOE.num_experts must be specified when use_moe is true")
+            if top_k_field is None:
+                raise ValueError("model_param.MOE.top_k must be specified when use_moe is true")
+        num_experts = int(num_experts_field) if num_experts_field is not None else None
+        if num_experts is not None and num_experts <= 0:
+            raise ValueError("model_param.MOE.num_experts must be a positive integer")
+        top_k = int(top_k_field) if top_k_field is not None else None
+        if top_k is not None and top_k <= 0:
+            raise ValueError("model_param.MOE.top_k must be a positive integer")
+        if use_moe and num_experts is not None and top_k is not None and top_k > num_experts:
+            raise ValueError("model_param.MOE.top_k cannot exceed num_experts")
+        moe_cfg = LLMMoEConfig(
+            use_moe=use_moe,
+            num_experts=num_experts,
+            top_k=top_k,
+        )
 
-        run_type = mp.pop("run_type", "training")
-        tied_embeddings_raw = mp.pop("tied_embeddings", True)
+        if "run_type" not in mp:
+            raise ValueError("model_param.run_type must be specified")
+        run_type_raw = mp.pop("run_type")
+        run_type = str(run_type_raw).strip().lower()
+        if run_type not in {"training", "inference"}:
+            raise ValueError(f"model_param.run_type must be either 'training' or 'inference' (got {run_type_raw!r})")
+        if "tied_embeddings" not in mp:
+            raise ValueError("model_param.tied_embeddings must be specified")
+        tied_embeddings_raw = mp.pop("tied_embeddings")
         if isinstance(tied_embeddings_raw, str):
             tied_embeddings = tied_embeddings_raw.strip().lower() in {"1", "true", "yes", "y"}
         else:
             tied_embeddings = bool(tied_embeddings_raw)
-        model_type_raw = mp.pop("model_type", "gpt")
+        if "model_type" not in mp:
+            raise ValueError("model_param.model_type must be specified")
+        model_type_raw = mp.pop("model_type")
         model_type = str(model_type_raw).strip().lower()
         if model_type not in {"gpt", "llama"}:
             raise ValueError(
                 f"model_param.model_type must be either 'gpt' or 'llama' (got {model_type_raw!r})"
             )
         decode_len = mp.pop("decode_len", None)
-        inference_dict = dict(config_dict.get("inference_param", {}) or {})
-        inference_config = LLMInferenceConfig(
-            sample_every=inference_dict["sample_every"],
-        )
+        if decode_len is not None:
+            try:
+                decode_len = int(decode_len)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.decode_len must be an integer when provided (got {decode_len!r})") from exc
+
+        inference_config = None
+        if run_type == "inference":
+            if decode_len is None:
+                raise ValueError("model_param.decode_len must be specified when run_type is 'inference'")
+            inference_dict = dict(config_dict.get("inference_param", {}) or {})
+            if "sample_every" not in inference_dict:
+                raise ValueError(
+                    "inference_param.sample_every must be provided when model_param.run_type is 'inference'"
+                )
+            sample_every_raw = inference_dict["sample_every"]
+            try:
+                sample_every = int(sample_every_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"inference_param.sample_every must be an integer (got {sample_every_raw!r})"
+                ) from exc
+            inference_config = LLMInferenceConfig(sample_every=sample_every)
+
+        if "mode" not in mp:
+            raise ValueError("model_param.mode must be specified")
+        mode_raw = mp.pop("mode")
+        mode = str(mode_raw).strip().upper()
+        if mode != "LLM":
+            raise ValueError(f"model_param.mode must be 'LLM' for LLM configs (got {mode_raw!r})")
+
+        def _pop_required_int(field: str) -> int:
+            if field not in mp:
+                raise ValueError(f"model_param.{field} must be specified")
+            raw_value = mp.pop(field)
+            try:
+                value = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.{field} must be an integer (got {raw_value!r})") from exc
+            if value <= 0:
+                raise ValueError(f"model_param.{field} must be a positive integer")
+            return value
+
+        num_layers = _pop_required_int("num_layers")
+        hidden_dim = _pop_required_int("hidden_dim")
+        batch_size = _pop_required_int("batch_size")
+        seq_len = _pop_required_int("seq_len")
+        vocab_size = _pop_required_int("vocab_size")
+
+        ffn_dim = mp.pop("ffn_dim", None)
+        if ffn_dim is not None:
+            try:
+                ffn_dim = int(ffn_dim)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.ffn_dim must be an integer when provided (got {ffn_dim!r})") from exc
+            if ffn_dim <= 0:
+                raise ValueError("model_param.ffn_dim must be a positive integer when provided")
+
+        ffn_mult = mp.pop("ffn_mult", None)
+        if ffn_mult is not None:
+            try:
+                ffn_mult = float(ffn_mult)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"model_param.ffn_mult must be numeric when provided (got {ffn_mult!r})") from exc
+            if ffn_mult <= 0:
+                raise ValueError("model_param.ffn_mult must be positive when provided")
+        if ffn_dim is None and ffn_mult is None:
+            raise ValueError("At least one of model_param.ffn_dim or model_param.ffn_mult must be specified")
+
         model_config = LLMConfig(
-            mode=mp.pop("mode"),
+            mode=mode,
             run_type=run_type,
             model_type=model_type,
             tied_embeddings=tied_embeddings,
-            num_layers=mp.pop("num_layers"),
-            hidden_dim=mp.pop("hidden_dim"),
-            batch_size=mp.pop("batch_size"),
-            seq_len=mp.pop("seq_len"),
+            num_layers=num_layers,
+            hidden_dim=hidden_dim,
+            batch_size=batch_size,
+            seq_len=seq_len,
             decode_len=decode_len,
-            ffn_dim=mp.pop("ffn_dim", None),
-            ffn_mult=mp.pop("ffn_mult", None),
-            vocab_size=mp.pop("vocab_size"),
+            ffn_dim=ffn_dim,
+            ffn_mult=ffn_mult,
+            vocab_size=vocab_size,
             n_tokens=0, # not used for now.
             all_reduce="every layer", # hard set for now.
             attention=attention_cfg,

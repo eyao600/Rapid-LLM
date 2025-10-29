@@ -5,7 +5,6 @@ model_param:
     model_type: "gpt"  # gpt assumes dense-style architecture with GELU; llama assumes llama-style architecture with SwiGLU
     batch_size: 1024  # Batch size
     seq_len: 16384
-    decode_len: 1024           # Number of autoregressive decode steps.
     hidden_dim: 8192
     attention:
         attention_type: "gqa"  # one of "mha","gqa","mla"
@@ -21,5 +20,3 @@ model_param:
     ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
     vocab_size: 800000  # Vocabulary size
     num_layers: 2
-inference_param:
-    sample_every: -1  # Sample decode steps every N steps for efficiency. -1 means only sample at start and end.

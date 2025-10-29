@@ -54,11 +54,14 @@ class Model_LLM:
           self.moe_num_experts = None
           self.moe_top_k = None
       
-      inference_cfg = getattr(exp_config, 'inference_config', None)
-      if inference_cfg is not None:
+      inference_cfg = getattr(exp_config, "inference_config", None)
+      if str(self.run_type).lower() == "inference":
+          if inference_cfg is None:
+              raise ValueError("Inference configuration not found for inference run_type")
           self.inference_sample_every = inference_cfg.sample_every
       else:
-          raise ValueError("Inference configuration not found")
+          # Training configs do not require inference sampling parameters.
+          self.inference_sample_every = -1
       
       
       
