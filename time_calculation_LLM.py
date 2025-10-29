@@ -129,6 +129,9 @@ class TimeCalculationLLM(TimeCalculation):
             mode,
             astra_policy_override=astra_policy,
         )
+        if self.num_workers > 1 and self.use_moe:
+            raise ValueError("MoE is only supported for single-worker runs (system_hierarchy.num_workers must be 1).")
+          
         self.output_dir = os.path.abspath(output_dir) if output_dir else os.getcwd()
         os.makedirs(self.output_dir, exist_ok=True)
         self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
@@ -295,13 +298,9 @@ class TimeCalculationLLM(TimeCalculation):
         )
         return reduction_time
 
-    def flash_attention_kernel_forward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    def flash_attention_kernel_forward(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
         """Return time for flash attention kernel."""
         #TODO gqa support
-        batch_size = self.microB
-        seq_len = self.seq_len
-        hidden_dim = self.hidden_dim
-        num_heads = self.num_heads
         shard_seq = math.ceil(seq_len / max(1, self.cp)) 
         num_units = 108 #number of units in a100
         d = hidden_dim // num_heads #gemm shape for one head is (seq_len, d) x (d, seq_len)
@@ -316,6 +315,7 @@ class TimeCalculationLLM(TimeCalculation):
         load_kv_bytes = Bc * d * 2 * num_units * self.precision.activations #load key and value for one tile from HBM to SRAM
         initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
         initial_load_time_per_head = initial_load_time * math.ceil(Tc/ num_units)
+        
         # attention score gemm
         load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
         attn_score_time_per_tile = self.getGEMMTime(Br, d, Bc, "attention_score_f",read_bytes_l2=load_q_bytes, flashattn_enable=True)[0] 
@@ -1436,7 +1436,7 @@ class TimeCalculationLLM(TimeCalculation):
                 "comm_size_backward": attention_size_b
             }
         elif self.flash_attention is True:
-            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward()
+            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, ffn_dim)
             attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = 2 * attention_f, 2 * attention_gemm_f, 2 * attention_reduction_f, 2 * attention_size_f
             transformer_results['attention'] = {
                 'forward': attention_f, 'backward': attention_b,
@@ -1982,8 +1982,6 @@ class TimeCalculationLLM(TimeCalculation):
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
-        
-        attention_type = self.attention_type
         kv_heads = self.kv_heads
         
         # ZeRO data-parallel stages:

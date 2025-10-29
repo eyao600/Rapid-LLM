@@ -277,7 +277,7 @@ def kv_cache_token_bytes(batch_size, kv_heads, head_dim, precision_bytes):
     return batch_size * kv_heads * head_dim * precision_bytes * 2
 
 
-def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
+def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_heads, kv_heads, ffn_dim, vocab_size, model_type="gpt"):
     """
     Generate GEMM shapes for a single decode step in autoregressive generation.
 
@@ -330,13 +330,22 @@ def autoregressive_decoder_gemm(batch_size, current_seq_len, d_model, num_heads,
     # Output projection & FFNs only process the new token
     gemms["output_proj"] = (batch_size, 1, d_model, d_model)
     projected_dim = 2 * ffn_dim if str(model_type).lower() == "llama" else ffn_dim
-    gemms["ffn1"] = (batch_size, 1, d_model, projected_dim)
-    gemms["ffn2"] = (batch_size, 1, ffn_dim, d_model)
+    if self.use_moe:
+        #assuming equal load balancing here
+
+        effective_batch_size = math.ceil(batch_size * self.top_k / self.num_experts)
+
+        gemms["ffn1"] = (effective_batch_size , 1, d_model, projected_dim ) #gemm shape per expert
+        gemms["ffn2"] = (effective_batch_size , 1, ffn_dim, d_model)
+    else:
+        gemms["ffn1"] = (batch_size, 1, d_model, projected_dim) 
+        gemms["ffn2"] = (batch_size, 1, ffn_dim, d_model)
 
     return gemms
 
 
 def process_decode_gemm_shapes(
+    self,
     batch_size,
     current_seq_len,
     d_model,
@@ -356,6 +365,7 @@ def process_decode_gemm_shapes(
     """
     # Generate decode GEMM shapes in 4D
     gemm_shapes_4d = autoregressive_decoder_gemm(
+        self,
         batch_size=batch_size,
         current_seq_len=current_seq_len,
         d_model=d_model,

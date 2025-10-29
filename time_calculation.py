@@ -435,10 +435,7 @@ class TimeCalculation:
             raw_top_k = getattr(self.model, "moe_top_k", None)
             self.moe_num_experts = int(raw_num_experts) if raw_num_experts is not None else None
             self.moe_top_k = int(raw_top_k) if raw_top_k is not None else None
-            if self.num_workers > 1:
-                if self.use_moe:
-                    raise ValueError("MoE is only supported for single-worker runs (system_hierarchy.num_workers must be 1).")
-             
+   
 
     def get_model_class(self, model_type):
         """Return the appropriate model class based on the model type."""

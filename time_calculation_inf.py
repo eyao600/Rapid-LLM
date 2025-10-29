@@ -37,6 +37,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
         gemm_shapes = gemm_shapes or LLM_util.process_decode_gemm_shapes(
+            self,
             batch_size=batch_size,
             current_seq_len=total_seq_len,
             d_model=self.hidden_dim,
@@ -53,17 +54,17 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         gemm_output_proj = gemm_shapes["output_proj"]
         gemm_ffn1 = gemm_shapes["ffn1"]
         gemm_ffn2 = gemm_shapes["ffn2"]
-
-        qkv_proj_time, qkv_proj_reduction, qkv_proj_size = self._tensor_parallelism_gemm_forward(
+        # FlashAttention is not used during single-token (incremental) decoding.
+        qkv_proj_time, qkv_proj_reduction, qkv_proj_size = self.parallelism_gemm_forward(
             gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV
         )
-        attention_score_time, attention_score_reduction, attention_score_size = self._tensor_parallelism_gemm_forward(
+        attention_score_time, attention_score_reduction, attention_score_size = self.parallelism_gemm_forward(
             gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE
         )
-        attention_output_time, attention_output_reduction, attention_output_size = self._tensor_parallelism_gemm_forward(
+        attention_output_time, attention_output_reduction, attention_output_size = self.parallelism_gemm_forward(
             gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT
         )
-        out_proj_time, _, out_proj_size = self._tensor_parallelism_gemm_forward(
+        out_proj_time, _, out_proj_size = self.parallelism_gemm_forward(
             gemm_output_proj, "decode_output_projection_f", gemm_type=GemmType.OUT_PROJ
         )
         out_proj_reduction = (
@@ -72,10 +73,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             else 0.0
         )
 
-        ffn1_time, ffn1_reduction, ffn1_size = self._tensor_parallelism_gemm_forward(
+        ffn1_time, ffn1_reduction, ffn1_size = self.parallelism_gemm_forward(
             gemm_ffn1, "decode_ffn1_f", gemm_type=GemmType.FFN1
         )
-        ffn2_time, _, ffn2_size = self._tensor_parallelism_gemm_forward(
+        ffn2_time, _, ffn2_size = self.parallelism_gemm_forward(
             gemm_ffn2, "decode_ffn2_f", gemm_type=GemmType.FFN2
         )
         ffn2_reduction = (
@@ -293,7 +294,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         num_heads = self.num_heads
         ffn_mult = self.ffn_mult
         ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
-
+        kv_heads = self.kv_heads
         if prefill_len == 0:
             print("Skipping prefill")
             return 0.0
@@ -308,7 +309,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             hidden_dim,
             prefill_len,
             num_heads,
-            self.kv_heads,
+            kv_heads,
             ffn_dim,
         )
 
@@ -403,6 +404,9 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             ffn_dim=self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim,
             vocab_size=self.vocab_size,
             num_layers=self.num_layers,
+            use_moe=self.use_moe,
+            num_experts=self.moe_num_experts,
+            top_k=self.moe_top_k,
             dp=self.dp,
             lp=self.lp,
             tp=self.tp,

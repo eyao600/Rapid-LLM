@@ -27,6 +27,11 @@ class InferenceConfig:
     ffn_dim: int
     vocab_size: int
     num_layers: int
+    use_moe: bool 
+    num_experts: int
+    top_k: int
+
+    
     dp: int = 1  # data parallel (acts as replica count during inference)
     lp: int = 1  # layer parallel
     tp: int = 1  # tensor parallel degree
@@ -59,6 +64,9 @@ class DecodeGraph(Graph):
         hw_config,
         model_config,
         time_calc_cls: Callable[..., Any],
+        use_moe,
+        num_experts,
+        top_k,
         *args,
         **kwargs,
     ):
@@ -68,6 +76,13 @@ class DecodeGraph(Graph):
         self.model_config = model_config
         self.time_calc_cls = time_calc_cls
         self._decode_sample_root: Optional[str] = None
+        self.use_moe = config.use_moe
+        self.num_experts = config.num_experts
+        self.top_k = config.top_k
+        # # Mirror MoE configuration expected by shared GEMM utilities
+        # self.use_moe = bool(getattr(config, "use_moe", False))
+        # self.num_experts = getattr(config, "num_experts", 1) or 1
+        # self.top_k = getattr(config, "top_k", 1) or 1
 
     def build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
         """
@@ -89,6 +104,7 @@ class DecodeGraph(Graph):
             total_seq_len = self.config.seq_len + generated_tokens
 
             gemm_shapes = LLM_util.process_decode_gemm_shapes(
+                self,
                 batch_size=self.config.batch_size,
                 current_seq_len=total_seq_len,
                 d_model=self.config.hidden_dim,
@@ -316,6 +332,9 @@ class InferenceEngine:
             hw_config=self.hw_config,
             model_config=self.model_config,
             time_calc_cls=self.time_calc_cls,
+            use_moe=self.config.use_moe,
+            num_experts=self.config.num_experts,
+            top_k=self.config.top_k,
         )
 
         return self.decode_graph.build_decode_graph()
