@@ -4,7 +4,7 @@
 import argparse
 import json
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import urllib.error
 import urllib.request
 
@@ -35,19 +35,25 @@ def _first(cfg: dict, *keys: str, default: Any = None) -> Any:
     return default
 
 
-def _infer_model_type(model_type_field: Optional[str]) -> str:
+def _infer_model_type(model_type_field: Optional[str]) -> Tuple[str, Optional[str]]:
+    alias = None
     if not model_type_field:
-        return "gpt"
+        return "gpt", alias
     lowered = model_type_field.lower()
+    normalized = lowered.replace("-", "").replace("_", "")
+    if "qwen2" in normalized:
+        return "llama", "qwen2"
+    if "phi3" in normalized:
+        return "llama", "phi3"
     if "llama" in lowered:
-        return "llama"
+        return "llama", alias
     if "gpt" in lowered or "opt" in lowered or "mpt" in lowered:
-        return "gpt"
+        return "gpt", alias
     # default catch-all
-    return "gpt"
+    return "gpt", alias
 
 
-def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
+def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> dict:
     hidden_dim = _first(
         cfg,
         "hidden_size",
@@ -147,8 +153,6 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
         _first(cfg, "tie_word_embeddings", default=_first(lang_cfg, "tie_word_embeddings", default=True))
     )
 
-    model_type = _infer_model_type(cfg.get("model_type"))
-
     vocab_size = _first(cfg, "vocab_size", default=_first(lang_cfg, "vocab_size", default=None))
     if vocab_size is None:
         raise SystemExit("Unable to deduce vocab_size from config.json.")
@@ -213,9 +217,6 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
             "vocab_size": int(vocab_size),
             "num_layers": int(num_layers),
         },
-        "inference_param": {
-            "sample_every": -1
-        },
     }
 
     return yaml_dict
@@ -249,7 +250,9 @@ def _str_to_bool_or_none(value: str) -> Optional[bool]:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     cfg = _fetch_hf_config(args.model_id, revision=args.revision)
-    yaml_config = _build_yaml_config(cfg, args)
+    orig_model_type = cfg.get("model_type")
+    inferred_model_type, alias = _infer_model_type(orig_model_type)
+    yaml_config = _build_yaml_config(cfg, args, inferred_model_type)
 
     yaml_dump = yaml.dump(
         yaml_config,
@@ -262,6 +265,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             fh.write(yaml_dump)
     else:
         sys.stdout.write(yaml_dump)
+
+    if alias:
+        print(f"[INFO] Mapping Hugging Face model_type '{orig_model_type}' to DeepFlow model_type 'llama'.")
+
+    lang_cfg = cfg.get("language_config", {})
+    if alias == "phi3":
+        sliding_candidates = [
+            cfg.get("sliding_window"),
+            lang_cfg.get("sliding_window"),
+        ]
+        if any(isinstance(value, int) and not isinstance(value, bool) for value in sliding_candidates):
+            print("[WARNING] Provided config uses phi3 Sliding Window Attention. This is not currently implemented in Deepflow and fully dense attention will be used instead.")
+    if alias == "qwen2":
+        sliding_candidates = [
+            cfg.get("use_sliding_window"),
+            lang_cfg.get("use_sliding_window"),
+        ]
+        if any(value is True for value in sliding_candidates):
+            print("[WARNING] Provided config uses qwen2 Sliding Window Attention. This is not currently implemented in Deepflow and fully dense attention will be used instead.")
 
     return 0
 

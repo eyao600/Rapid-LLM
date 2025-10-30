@@ -158,6 +158,40 @@ DeepFlow can generate and visualize graphs, and when using the AstraSim network 
 - Flattened execution mode: `output/LLM/astra_flat/`
 - Hierarchical/Hybrid modes: `output/LLM/astra_hier/`
 
+## Example case study: Tensor parallelism on inference runtime
+
+1. Start by creating a model config from Hugging Face. For example, to pull the Qwen/Qwen2.5-3B settings:
+
+```bash
+python configs/model-config/hf_to_config.py Qwen/Qwen2.5-3B --run-type inference --batch-size 32 --seq-len 65536 --decode-len 1024 --use-flashattention true --flash-tile-size 256 -o configs/model-config/Qwen2.5-3B.yaml
+```
+ The config file for Qwen2.5-3B is now autamatically generated under `configs/model-config`
+
+2. Use the example A100 hardware file and set tensor parallel degree to 1:
+
+
+Edit `configs/hardware-config/a100_80GB_example.yaml` so that `system_hierarchy.num_devices_per_node: 1` while `scheduling_param.tp: 1`. This models inference on one GPU without tensor parallelism.
+
+Run the inference estimation using the example configs:
+
+```bash
+python run_perf.py --hardware_config configs/hardware-config/a100_80GB_example.yaml --model_config configs/model-config/Qwen2.5-3B.yaml
+```
+
+3. To see the tensor-parallelism effect, modify the hardware file, switch to two devices per node and enable tensor parallelism:
+
+Edit `configs/hardware-config/a100_80GB_example.yaml` so that `system_hierarchy.num_devices_per_node: 2` and `scheduling_param.tp: 2`. This models inference on one GPU with tensor parallelism degree of 2.
+
+Re-run the same inference command with the updated hardware config.
+
+Comparing the two runs will show how increasing tensor parallelism changes the predicted inference runtime for this model.
+
+DeepFlow should report the following runtimes:  
+- TP = 1 (single GPU): LLM inference time: 281.67s  
+- TP = 2 (tensor degree of 2): LLM inference time: 157.17s
+
+
+
 ### Generated Files
 
 - `.et` files: Chakra execution traces for AstraSim replay.

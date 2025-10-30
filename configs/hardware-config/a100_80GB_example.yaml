@@ -143,7 +143,7 @@ perimeter_breakdown:
   intra_node: 0.33
   inter_node: 0.33
 system_hierarchy:
-  num_devices_per_node: 4
+  num_devices_per_node: 1
   num_nodes: 1
   inter_derate: 1
   intra_derate: 1
@@ -170,12 +170,15 @@ memory_hierarchy:
     type: DRAM
     scope: global
 scheduling_param:
-  auto: false
-  dp: 1
-  lp: 1
-  mb: 1
-  tp: 4
-  tp_sp: true
+  auto: false # not supported for LLM mode
+  ### LLM PARAMS ###
+  dp: 1 # acts as replica count during inference
+  lp: 1 # pipeline stages 
+  mb: 1 # number of micro-batches
+  tp: 1 # tensor parallelism
+  tp_sp: true # tensor-sequence parallelism
+  cp : 1 # context parallelism
+  ### LSTM/GEMM LEGACY PARAMS ###
   t: CR
   kp1: 4
   kp2: 1
