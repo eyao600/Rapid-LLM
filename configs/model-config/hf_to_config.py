@@ -65,12 +65,20 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
     if num_heads is None:
         raise SystemExit("Unable to deduce number of attention heads from config.json.")
 
+    lang_cfg = cfg.get("language_config", {})
+
     kv_heads = _first(
         cfg,
         "num_key_value_heads",
         "num_kv_heads",
         "n_kv_heads",
-        default=None,
+        default=_first(
+            lang_cfg,
+            "num_key_value_heads",
+            "num_kv_heads",
+            "n_kv_heads",
+            default=None,
+        ),
     )
 
     attention_type = "mha"
@@ -81,8 +89,47 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
     if kv_heads is not None and int(kv_heads) > 0 and int(kv_heads) != int(num_heads):
         attention_block["attention_type"] = "gqa"
         attention_block["kv_heads"] = int(kv_heads)
+    else:
+        attention_block["kv_heads"] = None
 
-    ffn_dim = _first(cfg, "intermediate_size", "mlp_dim", default=None)
+    use_flashattention = args.use_flashattention
+    if use_flashattention is None:
+        use_flashattention = bool(
+            _first(
+                cfg,
+                "flash_attention",
+                "use_flash_attention",
+                default=_first(lang_cfg, "flash_attention", "use_flash_attention", default=False),
+            )
+        )
+    attention_block["use_flashattention"] = bool(use_flashattention)
+
+    tile_size = args.flash_tile_size
+    if tile_size is None:
+        tile_size = _first(
+            cfg,
+            "flash_attention_block_size",
+            "attention_tile_size",
+            default=_first(
+                lang_cfg,
+                "flash_attention_block_size",
+                "attention_tile_size",
+                default=None,
+            ),
+        )
+    if tile_size is not None:
+        try:
+            tile_size = int(tile_size)
+        except (TypeError, ValueError):
+            tile_size = None
+    attention_block["attention_tile_size"] = tile_size
+
+    intermediate_size = _first(
+        cfg,
+        "intermediate_size",
+        "mlp_dim",
+        default=_first(lang_cfg, "intermediate_size", "mlp_dim", default=None),
+    )
 
     seq_len = args.seq_len
     if seq_len is None:
@@ -96,13 +143,58 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
         )
 
 
-    tied_embeddings = bool(_first(cfg, "tie_word_embeddings", default=True))
+    tied_embeddings = bool(
+        _first(cfg, "tie_word_embeddings", default=_first(lang_cfg, "tie_word_embeddings", default=True))
+    )
 
     model_type = _infer_model_type(cfg.get("model_type"))
 
-    vocab_size = _first(cfg, "vocab_size")
+    vocab_size = _first(cfg, "vocab_size", default=_first(lang_cfg, "vocab_size", default=None))
     if vocab_size is None:
         raise SystemExit("Unable to deduce vocab_size from config.json.")
+
+    intermediate_size_value = int(intermediate_size) if intermediate_size is not None else 4 * int(hidden_dim)
+
+    num_experts = _first(
+        cfg,
+        "num_local_experts",
+        "num_experts",
+        "expert_count",
+        "n_routed_experts",
+        default=_first(
+            lang_cfg,
+            "num_local_experts",
+            "num_experts",
+            "expert_count",
+            "n_routed_experts",
+            default=1,
+        ),
+    )
+    try:
+        num_experts_value = max(1, int(num_experts))
+    except (TypeError, ValueError):
+        num_experts_value = 1
+
+    top_k = _first(
+        cfg,
+        "num_experts_per_token",
+        "num_experts_per_tok",
+        "router_top_k",
+        "gate_top_k",
+        default=_first(
+            lang_cfg,
+            "num_experts_per_token",
+            "num_experts_per_tok",
+            "router_top_k",
+            "gate_top_k",
+            default=1,
+        ),
+    )
+    try:
+        top_k_value = max(1, int(top_k))
+    except (TypeError, ValueError):
+        top_k_value = 1
+    top_k_value = min(top_k_value, num_experts_value)
 
     yaml_dict = {
         "model_param": {
@@ -115,8 +207,9 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace) -> dict:
             "decode_len": args.decode_len,
             "hidden_dim": int(hidden_dim),
             "attention": attention_block,
-            "ffn_dim": int(ffn_dim) if ffn_dim is not None else None,
-            "ffn_mult": None,
+            "intermediate_size": intermediate_size_value,
+            "num_experts": num_experts_value,
+            "top_k": top_k_value,
             "vocab_size": int(vocab_size),
             "num_layers": int(num_layers),
         },
@@ -136,6 +229,8 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     parser.add_argument("--seq-len", type=int, default=None, help="Override sequence length. Defaults to HF config max position embeddings if not provided")
     parser.add_argument("--decode-len", type=int, default=0, help="Decode sequence length (default: 0)")
     parser.add_argument("--run-type", default="training", help="Config run_type field ('training' or 'inference')")
+    parser.add_argument("--use-flashattention", type=_str_to_bool_or_none, default=None, help="Override FlashAttention usage (true/false)")
+    parser.add_argument("--flash-tile-size", type=int, default=None, help="Override FlashAttention tile size")
     parser.add_argument("--output", "-o", default=None, help="Path to write YAML (defaults to stdout)")
     return parser.parse_args(argv)
 
