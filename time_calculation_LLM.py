@@ -837,12 +837,12 @@ class TimeCalculationLLM(TimeCalculation):
     
 
                 
-    def get_embedding_f(self):
+    def get_embedding_f(self, vocab_size, seq_len, hidden_dim):
         """
         Calculates the total time required for embedding operations, including computation and data transfer.
         """
         batch = self._effective_transformer_batch()
-        embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision.activations
+        embedding_mem = vocab_size * hidden_dim * self.precision.activations + seq_len * batch * hidden_dim * self.precision.activations
         embedding_time = self.roofline(
             0,
             embedding_mem,
@@ -1153,9 +1153,9 @@ class TimeCalculationLLM(TimeCalculation):
         return compute_time, reduction_time, total_bytes
 
     
-    def get_embedding_b(self):
+    def get_embedding_b(self, vocab_size, seq_len, hidden_dim):
         batch = self._effective_transformer_batch()
-        embedding_mem = 2 * self.seq_len * batch * self.hidden_dim * self.precision.gradients
+        embedding_mem = vocab_size * hidden_dim * self.precision.gradients + seq_len * batch * hidden_dim * self.precision.gradients
         embedding_mem_time = self.roofline(
             0,
             embedding_mem,
@@ -1491,8 +1491,8 @@ class TimeCalculationLLM(TimeCalculation):
             
 
         # Calculate non-GEMM operations
-        embedding_f = self.get_embedding_f()
-        embedding_b = self.get_embedding_b()
+        embedding_f = self.get_embedding_f(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
+        embedding_b = self.get_embedding_b(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
         transformer_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
 
 
@@ -1816,7 +1816,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         # these are used for dp all-reduce/reduce-scatter.
         # TODO: check the embedding_size below. I think only the first term is needed.
-        embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim)
+        embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim * batch_size)
         softmax_size = math.ceil(self.precision.grad_communication * hidden_dim * vocab_size)
         cross_layer_bytes = self.get_inter_layer_comm_latency_llm(batch_size, hidden_dim, seq_len)[1]
 

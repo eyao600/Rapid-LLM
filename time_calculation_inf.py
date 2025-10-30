@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM, GemmType
 from simulate_inf import DecodeSample, InferenceConfig, InferenceEngine
 import LLM_util
-
+import json
 
 class TimeCalculationLLMInference(TimeCalculationLLM):
     """Inference-specialized facade for ``TimeCalculationLLM``."""
@@ -272,6 +272,19 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
         )
+        if self._generate_graphs:
+            results_path = os.path.join(self.output_dir, "decode_transformer_results.txt")
+            with open(results_path, "w", encoding="utf-8") as results_file:
+                json.dump(
+                    {
+                        "transformer_results": transformer_results,
+                        "node_breakdown": node_breakdown,
+                    },
+                    results_file,
+                    indent=2,
+                    sort_keys=True,
+                )
+
         return self._prepare_execution_graphs(
             node_breakdown=node_breakdown,
             transformer_results=transformer_results,
@@ -376,8 +389,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
     def calc_decode_time(self) -> Tuple[float, List[DecodeSample]]:
         """
-        Calculate autoregressive decode phase execution time.
-
         Calculate autoregressive decode phase execution time using sample-based approach.
 
         Returns:
@@ -462,7 +473,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         prefill_store_bytes = token_bytes * prefill_len * num_layers
         decode_store_bytes = token_bytes * decode_len * num_layers
         decode_fetch_bytes = token_bytes * num_layers * (
-            decode_len * prefill_len + decode_len * (decode_len + 1) // 2
+            decode_len * (prefill_len + self.seq_len) // 2
         )
 
         def _to_gib(byte_val: int) -> str:

@@ -1166,7 +1166,7 @@ class Graph:
 
         return time
     
-    def simulate_memory(self, root, memory_data, mode = "training", output_folder = "output_graph/", filename="memory_graph"):
+    def simulate_memory(self, root, memory_data, mode = "training", output_folder = "output/LLM/", filename="memory_graph"):
         time = 0
         counter = 0
         event_queue = []
@@ -1481,7 +1481,7 @@ class Graph:
         peak_mem = max(entry["peak_gib"] for entry in summary) if summary else 0.0
         return time, peak_mem
 
-    def save_graph(self, roots, output_folder = "output_graph/", filename="graph"):
+    def save_graph(self, roots, output_folder = "output/LLM/", filename="graph"):
         os.makedirs(output_folder, exist_ok=True)
 
         printstr = " | Graph saved to    %s%s.png" % (output_folder, filename)

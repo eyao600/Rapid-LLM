@@ -828,7 +828,7 @@ class TimeCalculation:
         # print("Roofline: exited {}".format(name))
         return max_time
     def getGEMMTime(self, dim1, dim2, dim3, name, 
-                    flashattn_enable=True, read_bytes_l2=0, write_bytes_l2=0, original=False):
+                    flashattn_enable=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]

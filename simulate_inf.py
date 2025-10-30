@@ -115,6 +115,15 @@ class DecodeGraph(Graph):
                 model_type=self.model_config.model_config.model_type,
             )
 
+            if self._debug_graphs_enabled():
+                # write gemm_shapes to a file
+                # if dir doesnt exist make it
+                if not os.path.exists(f"output/LLM/decode_samples/step_{step_id:04d}"):
+                    os.makedirs(f"output/LLM/decode_samples/step_{step_id:04d}")
+                with open(f"output/LLM/decode_samples/step_{step_id:04d}/decode_shapes.txt", "w", encoding="utf-8") as f:
+                    for key, shape in gemm_shapes.items():
+                        f.write(f"{key}: {shape}\n")
+
             sample_time = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
@@ -171,7 +180,7 @@ class DecodeGraph(Graph):
             hw_config=self.hw_config,
             model_config=self.model_config,
             mode="LLM",
-            output_dir="./output_graph/",
+            output_dir="./output/LLM/",
         )
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
         sample_dir = None
