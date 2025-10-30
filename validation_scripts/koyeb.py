@@ -202,7 +202,7 @@ def run_all_and_plot() -> None:
   plt.plot(x, expected_tokps, marker="o", linestyle="--", color="#ff7f0e", alpha=0.7, label="Expected tok/s (Koyeb)")
   plt.xticks(x, labels, rotation=30, ha="right")
   plt.ylabel("Tokens per second (aggregate)")
-  plt.title("Koyeb vs DeepFlow (A100 SXM, no parallelism)")
+  plt.title("Koyeb vs DeepFlow (single A100 SXM, Llama3.1-8B)")
   plt.grid(True, linestyle=":", alpha=0.4)
   plt.legend()
 
