@@ -31,7 +31,6 @@ class Model_LLM:
       self.model_type       = exp_config.model_config.model_type
       # self.kv_heads       = exp_config.model_config.kv_heads  
       self.ffn_dim          = exp_config.model_config.ffn_dim
-      self.ffn_mult        = exp_config.model_config.ffn_mult
       self.n_tokens         = exp_config.model_config.n_tokens
       self.all_reduce       = "every layer"
       self.run_type         = exp_config.model_config.run_type

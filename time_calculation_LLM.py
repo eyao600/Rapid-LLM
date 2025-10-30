@@ -1981,8 +1981,7 @@ class TimeCalculationLLM(TimeCalculation):
         hidden_dim = self.hidden_dim
         seq_len = self.seq_len
         num_heads = self.num_heads
-        ffn_mult = self.ffn_mult
-        ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
+        ffn_dim = self.ffn_dim
         kv_heads = self.kv_heads
         
         # ZeRO data-parallel stages:

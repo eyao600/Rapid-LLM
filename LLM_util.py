@@ -205,7 +205,7 @@ def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
     n_heads                     = int(kwargs.get('num_heads', exp_model_config.model_config.num_heads))
     # projection          = exp_model_config.model_config.projection
     seq_len                   = int(kwargs.get('seq_len', exp_model_config.model_config.seq_len))
-    ffn_dim                   = int(kwargs.get('ffn_mult', exp_model_config.model_config.ffn_mult)) * hidden_dim if kwargs.get('ffn_mult', exp_model_config.model_config.ffn_mult) !=None else int(kwargs.get('ffn_dim', exp_model_config.model_config.ffn_dim))
+    ffn_dim                   = int(kwargs.get('ffn_dim', exp_model_config.model_config.ffn_dim))
     # G                   = exp_model_config.model_config.num_gates
     precision           = exp_hw_config.sw_config.precision
 

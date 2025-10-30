@@ -35,7 +35,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         comm_kind = "all_reduce" if seq_degree == 1 else "reduce_scatter"
 
-        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        ffn_dim = self.ffn_dim
         gemm_shapes = gemm_shapes or LLM_util.process_decode_gemm_shapes(
             self,
             batch_size=batch_size,
@@ -98,7 +98,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             batch=batch_size, seq_len=output_seq_len, d_model=self.hidden_dim
         )
 
-        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        ffn_dim = self.ffn_dim
         ffn2_shape = (
             batch_size,
             output_seq_len,
@@ -266,7 +266,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         total_seq_len: int,
         gemm_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
     ):
-        ffn_dim = self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim
+        ffn_dim = self.ffn_dim
         transformer_results, node_breakdown = self._build_decode_transformer_results(
             batch_size=batch_size,
             total_seq_len=total_seq_len,
@@ -305,8 +305,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         decode_len = self.model.decode_len
         prefill_len = self.seq_len - decode_len
         num_heads = self.num_heads
-        ffn_mult = self.ffn_mult
-        ffn_dim = self.hidden_dim * ffn_mult if ffn_mult else self.ffn_dim
+        ffn_dim = self.ffn_dim
         kv_heads = self.kv_heads
         if prefill_len == 0:
             print("Skipping prefill")
@@ -412,7 +411,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             hidden_dim=self.hidden_dim,
             num_heads=self.num_heads,
             kv_heads=self.kv_heads,
-            ffn_dim=self.hidden_dim * self.ffn_mult if self.ffn_mult else self.ffn_dim,
+            ffn_dim=self.ffn_dim,
             vocab_size=self.vocab_size,
             num_layers=self.num_layers,
             use_moe=self.use_moe,

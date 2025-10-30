@@ -15,6 +15,5 @@ model_param:
   num_experts: 1   # Number of experts in MoE layers. Set to 1 to disable MoE.
   top_k: 1   # Number of active experts per token in MoE
   ffn_dim: 11008 # Output dimension of the first FFN layer (typically 4×hidden_dim)
-  ffn_mult: null # Multiplier for FFN dimension  This is prioritized over ffn_dim.
   vocab_size: 32000  # Vocabulary size
   num_layers: 32 # Number of transformer layers
