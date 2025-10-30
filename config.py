@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import ruamel as _ruamel
 import ruamel.yaml as _yaml
+from ruamel.yaml import YAMLError as _YAMLError
 import math
 from collections import namedtuple as _namedtuple
 from typing import Optional
@@ -514,13 +515,6 @@ class LLMAttentionConfig:
 
 
 @dataclass
-class LLMMoEConfig:
-    use_moe: bool
-    num_experts: Optional[int] = None
-    top_k: Optional[int] = None
-
-
-@dataclass
 class LLMConfig:
     mode: str
     run_type: str
@@ -537,7 +531,8 @@ class LLMConfig:
     n_tokens: int
     all_reduce: str
     attention: LLMAttentionConfig
-    moe: Optional[LLMMoEConfig] = None
+    num_experts: int
+    top_k: int
 
     @property
     def num_heads(self) -> int:
@@ -546,6 +541,10 @@ class LLMConfig:
     @property
     def use_flashattention(self) -> bool:
         return bool(getattr(self.attention, "use_flashattention", False))
+
+    @property
+    def use_moe(self) -> bool:
+        return self.num_experts > 1
 LLMInferenceConfig = _namedtuple(
     "inference_param",
     [
@@ -726,7 +725,14 @@ def parse_config(filename, config_type):
             scheduling configurations
     """
     with open(filename, "r") as f:
-        config_dict = _yaml.load(f, Loader=_ruamel.yaml.Loader)
+        try:
+            config_dict = _yaml.load(f, Loader=_ruamel.yaml.Loader)
+        except _YAMLError as exc:
+            hint = (
+                f"Failed to parse YAML config '{filename}'. "
+                "Please check indentation and required sections like 'attention' and parameters such as 'num_experts'."
+            )
+            raise ValueError(hint) from exc
         # print(config_dict) 
         convert(config_dict)
     if config_type == "hardware":
@@ -906,34 +912,32 @@ def parse_config(filename, config_type):
             attention_tile_size=attention_tile_size,
         )
 
-        moe_dict = mp.pop("MOE", mp.pop("moe", None))
-        if moe_dict is None:
-            raise ValueError("model_param.MOE block must be specified for LLM configs")
-        raw_use_moe = moe_dict.get("use_moe", False)
-        if isinstance(raw_use_moe, str):
-            use_moe = raw_use_moe.strip().lower() in {"1", "true", "yes", "y"}
+        num_experts_field = mp.pop("num_experts", None)
+        if num_experts_field is None:
+            raise ValueError("model_param.num_experts must be specified for LLM configs")
+        try:
+            num_experts = int(num_experts_field)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"model_param.num_experts must be an integer (got {num_experts_field!r})"
+            ) from exc
+        if num_experts <= 0:
+            raise ValueError("model_param.num_experts must be a positive integer")
+
+        top_k_field = mp.pop("top_k", None)
+        if top_k_field is None:
+            top_k = 1
         else:
-            use_moe = bool(raw_use_moe)
-        num_experts_field = moe_dict.get("num_experts")
-        top_k_field = moe_dict.get("top_k")
-        if use_moe:
-            if num_experts_field is None:
-                raise ValueError("model_param.MOE.num_experts must be specified when use_moe is true")
-            if top_k_field is None:
-                raise ValueError("model_param.MOE.top_k must be specified when use_moe is true")
-        num_experts = int(num_experts_field) if num_experts_field is not None else None
-        if num_experts is not None and num_experts <= 0:
-            raise ValueError("model_param.MOE.num_experts must be a positive integer")
-        top_k = int(top_k_field) if top_k_field is not None else None
-        if top_k is not None and top_k <= 0:
-            raise ValueError("model_param.MOE.top_k must be a positive integer")
-        if use_moe and num_experts is not None and top_k is not None and top_k > num_experts:
-            raise ValueError("model_param.MOE.top_k cannot exceed num_experts")
-        moe_cfg = LLMMoEConfig(
-            use_moe=use_moe,
-            num_experts=num_experts,
-            top_k=top_k,
-        )
+            try:
+                top_k = int(top_k_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.top_k must be an integer when provided (got {top_k_field!r})"
+                ) from exc
+            if top_k <= 0:
+                raise ValueError("model_param.top_k must be a positive integer when provided")
+        if top_k > num_experts:
+            raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
 
         if "run_type" not in mp:
             raise ValueError("model_param.run_type must be specified")
@@ -1042,7 +1046,8 @@ def parse_config(filename, config_type):
             n_tokens=0, # not used for now.
             all_reduce="every layer", # hard set for now.
             attention=attention_cfg,
-            moe=moe_cfg,
+            num_experts=num_experts,
+            top_k=top_k,
         )
         config = MODELConfig(model_config=model_config, inference_config=inference_config)
     else:

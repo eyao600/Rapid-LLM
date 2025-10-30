@@ -74,9 +74,9 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
     else:
         projected_dim = ffn_dim
     if self.use_moe:
-        #assuming equal load balancing here
-        num_experts = self.moe_config.num_experts
-        top_k = self.moe_config.top_k
+        # assuming equal load balancing here
+        num_experts = max(1, int(getattr(self, "moe_num_experts", 1)))
+        top_k = max(1, int(getattr(self, "moe_top_k", 1)))
         gemms["ffn1"] = (batch_size, seq_len * top_k / num_experts, d_model, projected_dim ) #gemm shape per expert
         gemms["ffn2"] = (batch_size, seq_len * top_k / num_experts, ffn_dim, d_model)
     else:
@@ -331,9 +331,10 @@ def autoregressive_decoder_gemm(self, batch_size, current_seq_len, d_model, num_
     gemms["output_proj"] = (batch_size, 1, d_model, d_model)
     projected_dim = 2 * ffn_dim if str(model_type).lower() == "llama" else ffn_dim
     if self.use_moe:
-        #assuming equal load balancing here
-
-        effective_batch_size = math.ceil(batch_size * self.top_k / self.num_experts)
+        # assuming equal load balancing here
+        num_experts = max(1, int(getattr(self, "num_experts", getattr(self, "moe_num_experts", 1))))
+        top_k = max(1, int(getattr(self, "top_k", getattr(self, "moe_top_k", 1))))
+        effective_batch_size = math.ceil(batch_size * top_k / num_experts)
 
         gemms["ffn1"] = (effective_batch_size , 1, d_model, projected_dim ) #gemm shape per expert
         gemms["ffn2"] = (effective_batch_size , 1, ffn_dim, d_model)

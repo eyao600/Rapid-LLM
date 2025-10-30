@@ -40,19 +40,11 @@ class Model_LLM:
       self.use_flashattention = getattr(exp_config.model_config.attention, 'use_flashattention', False)
       self.attention_tile_size = getattr(exp_config.model_config.attention, 'attention_tile_size', None)
 
-      moe_cfg = getattr(exp_config.model_config, "moe", None)
-      if moe_cfg is not None:
-          self.moe = moe_cfg
-          self.use_moe = bool(getattr(moe_cfg, "use_moe", False))
-          self.moe_num_experts = (
-              int(moe_cfg.num_experts) if moe_cfg.num_experts is not None else None
-          )
-          self.moe_top_k = int(moe_cfg.top_k) if moe_cfg.top_k is not None else None
-      else:
-          self.moe = None
-          self.use_moe = False
-          self.moe_num_experts = None
-          self.moe_top_k = None
+      self.moe_num_experts = int(getattr(exp_config.model_config, "num_experts", 1))
+      self.moe_top_k = int(getattr(exp_config.model_config, "top_k", 1))
+      if self.moe_top_k > self.moe_num_experts:
+          raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
+      self.use_moe = self.moe_num_experts > 1
       
       inference_cfg = getattr(exp_config, "inference_config", None)
       if str(self.run_type).lower() == "inference":

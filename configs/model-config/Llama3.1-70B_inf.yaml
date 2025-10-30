@@ -13,10 +13,8 @@ model_param:
     kv_heads: 8
     use_flashattention: false  # Whether to use flash attention
     attention_tile_size: null  # Tile size for attention computation
-  MOE:
-    use_moe: false  # Whether to use Mixture of Experts layers
-    num_experts: null  # Number of experts in MoE layers
-    top_k: null  # Top-k experts to use in MoE layers
+  num_experts: 1  # Number of experts in MoE layers. Set to 1 to disable MoE.
+  top_k: 1  # Top-k experts to use in MoE layers
   ffn_dim: 28672
   ffn_mult: null
   vocab_size: 128256
