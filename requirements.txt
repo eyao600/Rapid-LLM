@@ -12,3 +12,4 @@ protobuf==5.28.2
 pydot==3.0.0
 graphviz==0.21
 joblib>=1.5.2
+seaborn

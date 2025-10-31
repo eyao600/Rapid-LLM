@@ -18,10 +18,12 @@ cd DeepFlow
 - `source [/path/to/new/virtual/environment]/bin/activate`
 - `uv sync`
 
+If uv is installed, prefix each command with `uv run` to execute it within the uv environment.
+
 #### Option B: Using pip
 
 - `python3 -m venv [/path/to/new/virtual/environment]`
-- `source [/path/to/new/virtual/environment]/bin/activate`
+- `source [/path/to/new/virtual/environment]/bin/activate.csh`
 - `pip install --upgrade pip`
 - `pip install -r requirements.txt`
 
