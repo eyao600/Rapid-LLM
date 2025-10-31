@@ -274,4 +274,4 @@ Comparing the two runs will show how increasing tensor parallelism changes the p
 - **Status:** Validation scripts are under development. Limited inference and training validation has been performed.
 - **Supported:** For inference, we validate against Koyeb's single NVIDIA A100 data on LLama3.1-8B. The relevant script can be found in `validation_scripts/koyeb.py`. Below is the resulting plot, comparing DeepFlow's predicted decode throughput with Koyeb's reported decode throughput, available at https://www.koyeb.com/docs/hardware/gpu-benchmarks. Average absolute error is ~6%.
 
-![Koyeb Validation](output/validation/koyeb_a100_sxm_no_parallelism.png)
+![Koyeb Validation](validation_scripts/koyeb_a100_sxm_no_parallelism.png)
