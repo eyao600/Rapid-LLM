@@ -103,7 +103,7 @@ execution_backend:
 
 ## Execution Modes
 
-DeepFlow can be used in 6 different modes.
+DeepFlow can be used in 2 different modes.
 
 ### Model Prediction Modes
 
@@ -121,28 +121,7 @@ DeepFlow can be used in 6 different modes.
      - Specify hardware parameters in `configs/hardware-config/[config.yaml]`.
      - Run `python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LLM.yaml`.
 
-3. **Performance Prediction Mode (LSTM End-to-End Application)**
-   - **When to use:** End-to-end LSTM prediction.
-   - **Note:** This mode has not been tested/validated with the AstraSim backend.
-   - **How:**
-     - Specify LSTM parameters in `configs/model-config/LSTM.yaml`.
-     - Specify hardware parameters in `configs/hardware-config/[config.yaml]`.
-     - Run `python run_perf.py --hardware_config configs/hardware-config/[config.yaml] --model_config configs/model-config/LSTM.yaml`.
-
 LLM mode is a work in progress with limited validation. Results are saved under `output/<mode>`.
-
-The following three modes are only tested/validated for LSTM (porting to LLM is very WIP):
-
-4. **Performance Prediction Mode (using `main.py` standalone argument; somewhat equivalent to option 2, for running on Slurm)**
-   - `python main.py stand_alone --exp_dir [/path/to/output/result/directory] --exp_config configs/[config.yaml]`
-
-5. **Architecture Search for a Fixed Parallelism Strategy**
-   - `python GD_search.py --exp_config configs/[config.yaml] --exp_dir [/path/to/output/directory] --debug False --index [index] --batch_size [batch] --hidden_dim [lstm_dim] --data_scale [dataset_scaling_factor] --dp [data parallel dim.] --lp [layer parallel dim.] --kp_type [0|1] --kp1 [kp1 dim.] --kp2 [kp2 dim.] --inter_derate [derate_factor_for_inter_package_bandwidth] --intra_derate [derate_factor_for_intra_package_bandwidth] --kp1_inter [False|True] --kp2_inter [False|True] --dp_inter [False|True] --lp_inter [False|True] --wafer_dim [package dim.]`
-   - **Example:**
-     `python GD_search.py --exp_config configs/exp_config.yaml --exp_dir output --debug False --index 40 --batch_size 256 --hidden_dim 19968 --data_scale 1 --dp 64 --lp 1 --kp_type 1 --kp1 1 --kp2 1 --inter_derate 0 --intra_derate 2 --kp1_inter False --kp2_inter False --dp_inter False --lp_inter False --wafer_dim 8`
-
-6. **Architecture Search Mode for All Types of Parallelism Strategies**
-   - `python main.py arch_search --exp_dir [/path/to/output/directory] --exp_config configs/[config.yaml]`
 
 ## AstraSim Artifact and Graph Visualization
 
