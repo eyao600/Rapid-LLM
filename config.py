@@ -140,13 +140,13 @@ class CoreConfig:
     @classmethod
     def from_dict(cls, core_config_dict):
         return cls(
-            nominal_power_per_mcu=core_config_dict["nominal_power_per_mcu"],
+            nominal_power_per_mcu=core_config_dict.get("nominal_power_per_mcu", 0.1),
             nominal_flop_rate_per_mcu=core_config_dict["nominal_flop_rate_per_mcu"],
             nominal_energy_per_flop=core_config_dict["nominal_energy_per_flop"],
-            nominal_voltage=core_config_dict["nominal_voltage"],
-            threshold_voltage=core_config_dict["threshold_voltage"],
-            margin_voltage=core_config_dict["margin_voltage"],
-            operating_area_per_mcu=core_config_dict["operating_area_per_mcu"],
+            nominal_voltage=core_config_dict.get("nominal_voltage", 0.1),
+            threshold_voltage=core_config_dict.get("threshold_voltage", 0.1),
+            margin_voltage=core_config_dict.get("margin_voltage", 0.1),
+            operating_area_per_mcu=core_config_dict.get("operating_area_per_mcu", 0.1),
             num_mcu_per_bundle=core_config_dict["num_mcu_per_bundle"],
             FMA_dims=(core_config_dict["FMA_d1"], core_config_dict["FMA_d2"]),
             dataflow=core_config_dict["dataflow"],
@@ -184,18 +184,18 @@ class DRAMConfig:
     def from_dict(cls, dram_config_dict):
         return cls(
             dynamic_energy_per_bit=dram_config_dict["dynamic_energy_per_bit"],
-            static_power_per_bit=dram_config_dict["static_power_per_bit"],
-            area_per_bit=dram_config_dict["area_per_bit"],
-            stack_capacity=dram_config_dict["stack_capacity"],
-            area_per_stack=dram_config_dict["area_per_stack"],
+            static_power_per_bit=dram_config_dict.get("static_power_per_bit", 0.1),
+            area_per_bit=dram_config_dict.get("area_per_bit", 0.1),
+            stack_capacity=dram_config_dict.get("stack_capacity", 0.1),
+            area_per_stack=dram_config_dict.get("area_per_stack", 0.1),
             latency=dram_config_dict["latency"],
-            mem_ctrl_area=dram_config_dict["mem_ctrl_area"],
-            nominal_voltage=dram_config_dict["nominal_voltage"],
-            threshold_voltage=dram_config_dict["threshold_voltage"],
-            margin_voltage=dram_config_dict["margin_voltage"],
-            num_links_per_mm=dram_config_dict["num_links_per_mm"],
-            num_links_per_stack=dram_config_dict["num_links_per_stack"],
-            max_voltage=dram_config_dict["max_voltage"],
+            mem_ctrl_area=dram_config_dict.get("mem_ctrl_area", 0.1),
+            nominal_voltage=dram_config_dict.get("nominal_voltage", 0.1),
+            threshold_voltage=dram_config_dict.get("threshold_voltage", 0.1),
+            margin_voltage=dram_config_dict.get("margin_voltage", 0.1),
+            num_links_per_mm=dram_config_dict.get("num_links_per_mm", 1),
+            num_links_per_stack=dram_config_dict.get("num_links_per_stack", 1),
+            max_voltage=dram_config_dict.get("max_voltage", 0.1),
             util=dram_config_dict["util"],
             size=dram_config_dict.get("size", None),
             bandwidth=dram_config_dict.get("bandwidth", None),
@@ -222,12 +222,12 @@ class SRAMConfig:
     def from_dict(cls, sram_config_dict):
         return cls(
             dynamic_energy_per_bit=sram_config_dict["dynamic_energy_per_bit"],
-            static_power_per_bit=sram_config_dict["static_power_per_bit"],
-            area_per_bit=sram_config_dict["area_per_bit"],
-            bank_capacity=sram_config_dict["bank_capacity"],
-            controller_area_per_link=sram_config_dict["controller_area_per_link"],
+            static_power_per_bit=sram_config_dict.get("static_power_per_bit", 0.1),
+            area_per_bit=sram_config_dict.get("area_per_bit", 0.1),
+            bank_capacity=sram_config_dict.get("bank_capacity", 0.1),
+            controller_area_per_link=sram_config_dict.get("controller_area_per_link", 0.1),
             latency=sram_config_dict["latency"],
-            overhead=sram_config_dict["overhead"],
+            overhead=sram_config_dict.get("overhead", 0.1),
             util=sram_config_dict["util"],
             size=sram_config_dict.get("size", None),
             bandwidth=sram_config_dict.get("bandwidth", None),
@@ -245,19 +245,23 @@ class SubNetworkConfig:
     margin_voltage: float
     num_links_per_mm: int
     util: float
+    operating_frequency: float = None  # Optional: overrides voltage-scaled frequency
+    bandwidth: float = None  # Optional: master parameter that directly sets throughput
 
     @classmethod
     def from_dict(cls, config_dict):
         return cls(
             latency=config_dict["latency"],
-            nominal_freq=config_dict["nominal_frequency"],
-            nominal_voltage=config_dict["nominal_voltage"],
-            nominal_energy_per_link=config_dict["nominal_energy_per_link"],
-            nominal_area_per_link=config_dict["nominal_area_per_link"],
-            threshold_voltage=config_dict["threshold_voltage"],
-            margin_voltage=config_dict["margin_voltage"],
-            num_links_per_mm=config_dict["num_links_per_mm"],
+            nominal_freq=config_dict.get("nominal_frequency", 0.1),
+            nominal_voltage=config_dict.get("nominal_voltage", 0.1),
+            nominal_energy_per_link=config_dict.get("nominal_energy_per_link", 0.1),
+            nominal_area_per_link=config_dict.get("nominal_area_per_link", 0.1),
+            threshold_voltage=config_dict.get("threshold_voltage", 0.1),
+            margin_voltage=config_dict.get("margin_voltage", 0.1),
+            num_links_per_mm=config_dict.get("num_links_per_mm", 1),
             util=config_dict["util"],
+            operating_frequency=config_dict.get("operating_frequency", None),
+            bandwidth=parse_bandwidth_string(config_dict.get("bandwidth", None)),
         )
 
 
@@ -407,8 +411,8 @@ class SystemHierarchyConfig:
                 system_config_dict["num_nodes"]
                 * system_config_dict["num_devices_per_node"]
             ),
-            inter_derate=system_config_dict["inter_derate"],
-            intra_derate=system_config_dict["intra_derate"],
+            inter_derate=system_config_dict.get("inter_derate", 1.0),
+            intra_derate=system_config_dict.get("intra_derate", 1.0),
             kp1_inter=system_config_dict["kp1_inter"],
             kp2_inter=system_config_dict["kp2_inter"],
             dp_inter=system_config_dict["dp_inter"],
@@ -717,6 +721,56 @@ def convert(d):
                             d[key1][key2][key3] = new_val
 
 
+def parse_bandwidth_string(value):
+    """Parse bandwidth/size string (e.g., '300 GB', '1986 GB') to bytes.
+
+    This function uses the same logic as convert() to parse bandwidth strings.
+    Returns the numeric value if already a number, or None if value is None.
+    """
+    if value is None:
+        return None
+
+    if not isinstance(value, str):
+        return float(value)
+
+    digit = [int(s) for s in value.split() if s.isdigit()]
+    order = [str(s) for s in value.split() if not s.isdigit()]
+
+    if not order or not digit:
+        # If no units found, try to parse as float
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(f"Cannot parse bandwidth value: {value}")
+
+    assert len(order) >= 1
+    assert len(digit) >= 1
+
+    prefix = order[0][0]
+    bit = order[0][1] if len(order[0]) > 1 else 'B'  # Default to Bytes
+    mult = 1
+
+    if prefix == "K":
+        mult = 1024
+    elif prefix == "M":
+        mult = 1024 * 1024
+    elif prefix == "G":
+        mult = 1024 * 1024 * 1024
+    elif prefix == "T":
+        mult = 1024 * 1024 * 1024 * 1024
+    else:
+        raise ValueError(f"Unknown prefix: {prefix} in bandwidth value: {value}")
+
+    if bit == "b":
+        mult = mult / 8  # Convert bits to Bytes
+    elif bit == "B":
+        mult = mult
+    else:
+        raise ValueError(f"Unknown type: {bit} in bandwidth value: {value}")
+
+    return digit[0] * mult
+
+
 def parse_config(filename, config_type):
     """Parse a yaml configuration file for this experiment.
     Args:
@@ -756,11 +810,32 @@ def parse_config(filename, config_type):
             sch_params["cp"] = None
         sch_config = SchedulingConfig(**sch_params)
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
-        power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
-        area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
-        perimeter_config = PerimeterBreakdownConfig.from_dict(
-            config_dict["perimeter_breakdown"]
-        )
+
+        # Optional breakdown configs (not needed for simplified configs)
+        if "power_breakdown" in config_dict:
+            power_config = PowerBreakdownConfig.from_dict(config_dict["power_breakdown"])
+        else:
+            # Create dummy power config with zeros
+            power_config = PowerBreakdownConfig(
+                TDP=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
+                network=NetworkPowerConfig(inter_node=1.0, intra_node=1.0)
+            )
+
+        if "area_breakdown" in config_dict:
+            area_config = AreaBreakdownConfig.from_dict(config_dict["area_breakdown"])
+        else:
+            # Create dummy area config with zeros
+            area_config = AreaBreakdownConfig(
+                proc_chip_area_budget=1.0, core=1.0, DRAM=1.0, L2=1.0, L1=1.0, reg_mem=1.0,
+                node_area_budget=1.0, network=NetworkAreaConfig(inter_node=1.0, intra_node=1.0)
+            )
+
+        if "perimeter_breakdown" in config_dict:
+            perimeter_config = PerimeterBreakdownConfig.from_dict(config_dict["perimeter_breakdown"])
+        else:
+            # Create dummy perimeter config with zeros
+            perimeter_config = PerimeterBreakdownConfig(DRAM=0.1, inter_node=0.1, intra_node=0.1)
+
         system_config = SystemHierarchyConfig.from_dict(config_dict["system_hierarchy"])
         memory_hierarchy_config = MemoryHierarchyConfig.from_dict(
             config_dict["memory_hierarchy"]

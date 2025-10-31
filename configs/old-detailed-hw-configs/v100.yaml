@@ -1,7 +1,3 @@
-# Config that models 20 V100 GPUs in a node.
-# We are ignoring NVLINK2.0 controller area for now.
-
-
 sw_param:
   kernel_launch_overhead: 9e-6   #9us
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
@@ -14,92 +10,147 @@ sw_param:
     # The following are equivalent: (tensor_format: 2.0, tensor_format: fp16, tensor_format: bf16).
     tensor_format: bf16  # baseline storage width for activations/gradients.
     # mixed_precision: true | false
-    # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes.
+    # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes. 
     # -> true enables AMP-style FP32 accumulations/optimizer states depending on param_storage_mode.
     # if true, optimizer states and stats are always FP32.
     mixed_precision: false
     # param_storage_mode: as_tensor_format | tensor_plus_fp32_master | fp32_params.
-    # -> as_tensor_format makes weights/gradients use tensor_format bytes.
+    # -> as_tensor_format makes weights/gradients use tensor_format bytes. 
     # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
     #    keeps a separate FP32 master copy for weights.
     # -> fp32_params makes weights *and* gradients use FP32 bytes without a master copy.
     param_storage_mode: as_tensor_format
     # kv_cache precision may be set as bytes, dtype string, or "as_tensor_format".
     kv_cache: as_tensor_format
-  h2d_bandwidth: 13297674240    # Bytes/s; set -1 to disable H2D timing
+  h2d_bandwidth: 13297674240    # Bytes/s; set -1 to disable H2D timing 
 
 tech_param:
   core:
-    operating_frequency: 1.33e9     #Hz
-    num_bundles: 1600     # 80 SMs per V100 * 20 GPUs
+    nominal_power_per_mcu: 0.13     #W
     nominal_flop_rate_per_mcu: 128
     nominal_energy_per_flop: 1.8e-13
+    nominal_area_per_mcu: 0.38     #mm^2
+    nominal_frequency: 1.33e9     #Hz
+    nominal_voltage: 0.8
+    threshold_voltage: 0.2
+    margin_voltage: 0.35
+    operating_area_per_mcu: 0.38     #!!!!operating_area n nominal_area should chnage hand-in-hand as they affect area scaling
     num_mcu_per_bundle: 8     #a bundle can be thought of as an SM, number of tensorcores per SM
     FMA_d1: 4                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
     FMA_d2: 4
     dataflow: best              #{wst. ast, ost, best, none}: wst: weight stationary, ast: activation stationary, ost: output stationary
     util: 0.85     #util should be 0.75 (12/16) for tensorcore
   DRAM:
-    size: 320 GB     # 16 GB per V100 * 20 GPUs
-    bandwidth: 18000 GB     # ~900 GB/s per V100 * 20
     dynamic_energy_per_bit: 4.2e-12     #Joules
+    static_power_per_bit: 0.6e-12
+    area_per_bit: 11e-10     #mm2
+    stack_capacity: 4 GB
+    area_per_stack: 100     #mm2
     latency: 100e-9
+    mem_ctrl_area: 5     #mm2 
+    nominal_frequency: 1.38e9
+    nominal_voltage: 1.2
+    threshold_voltage: 0.4
+    margin_voltage: 0.6
+    max_voltage: 1.8
+    num_links_per_mm: 400
+    num_links_per_stack: 1024
     util: 1
   SRAM-L2:
-    size: 120 MB     # 6 MB per V100 * 20
-    bandwidth: 61440 GB     # Estimated L2 bandwidth
     dynamic_energy_per_bit: 130e-15
+    static_power_per_bit: 8.4e-12
+    area_per_bit: 6.4e-8     #mm2
+    bank_capacity: 32 KB
+    controller_area_per_link: 0.004     #mm2 
+    controller_power_per_link: 0.04     #W
     latency: 0
+    overhead: 0.20     #20% circuitry overhead in cell area
     util: 0.45
   SRAM-L1:
-    size: 128000 KB     # 6400 KB per V100 * 20
-    bandwidth: 300 TB     # Estimated L1 bandwidth
     dynamic_energy_per_bit: 130e-15
+    static_power_per_bit: 9e-12
+    area_per_bit: 8e-8     #mm2
+    bank_capacity: 32 KB
+    controller_area_per_link: 0.00     #mm2 
+    controller_power_per_link: 0.0     #W
     latency: 0
+    overhead: 0.20
     util: 1
   SRAM-R:
-    size: 400 MB     # Register file
-    bandwidth: 1600 TB     # Estimated register bandwidth
     dynamic_energy_per_bit: 110e-15
+    static_power_per_bit: 9e-12
+    area_per_bit: 8e-8     #mm2
+    bank_capacity: 16 KB
+    controller_area_per_link: 0.00     #mm2 
+    controller_power_per_link: 0.0     #W
     latency: 0
+    overhead: 0.25
     util: 1
   network:
-        # How we arrived at the intra_node NVLINK 2.0 parameters:
-        # For nominal freuqnecy which is actually bits/second, we found 50GB/s PER NVLINK.
-        # However, each NVLINK is composed out of 32 WIRES (16 diff pairs, 8 per direction).
-        # So, 50 / 32 = 1.56 GB/s
-        # So 1.56 * 8 = 12.48 Gb/s PER NVLINK
-        # For energy, we found 8pj/bit.
-        # nominal_enery_per_link is ACTUALLY joules/byte per link.
-        # THIS MEANS WE ARE TREATING LINKS IN THE CODE AS PHYSICAL WIRES.
-        # then, for num_links_per_mm, we assume 815mm^2 V100 is square.
-        # perimeter is then 114.2
-        # 32 physical wires per NVlink, 6 NVlinks per chip, so 32*6 = 192 links per 114 mm^2
-        # Then, we DOUBLE the number to account for perimeter fraction is 0.5
-
-        # There is a major issue. The numbers calculated above are PER GPU.
-        # We have 20 workers in the node, but the code assumes the numbers are PER NODE, not per GPU. However it asks for links per ONE GPUs perimeter. THis makes no sense.
-    intra_node:     # We should model NVLINK 2.0
+    intra_node:
       latency: 5e-6
-      util: 0.95
-      bandwidth: 5000 Gb  # Total NVLINK bandwidth for 20 GPUs
-    inter_node:     # ignore for now, all comms are intra comms.
+      nominal_frequency: 3e9
+      nominal_voltage: 1
+      nominal_energy_per_link: 1e-12
+      nominal_area_per_link: 100e-6     #mm^2
+      num_links_per_mm: 400
+      threshold_voltage: 0.25
+      margin_voltage: 0.45
+      util: 1
+    inter_node:
       latency: 5e-6
+      nominal_frequency: 20e9
+      nominal_voltage: 1.2
+      nominal_energy_per_link: 13e-12
+      nominal_area_per_link: 0.045
+      num_links_per_mm: 20     #Assuming 4 layers on PCB and 200 um pitch for high speed signalling
+      threshold_voltage: 0.35
+      margin_voltage: 0.5
       util: 0.96
-      bandwidth: 300 Gb
+
+area_breakdown:
+  device_area_budget: 1230   #mm2
+  proc_chip_area_budget: 815   #mm2
+  core: 244.5
+  L2: 65.7053
+  L1: 8.3945
+  reg_mem: 17.93
+  DRAM: 20.212
+  network:
+    intra_node: 0.0
+    inter_node: 81.5
+
+power_breakdown:
+  TDP: 300
+  core: 112.35   #0.4927 if 0.171W per core #0.0189 for 15.7Tflops #0.1504 for 125TFLOps
+  DRAM: 48
+  L2: 2.4
+  L1: 31.23
+  reg_mem: 90.66
+  network:
+    intra_node: 0.0
+    inter_node: 2.805
+
+perimeter_breakdown:
+  DRAM: 0.5
+  intra_node: 0.0
+  inter_node: 0.5
 
 system_hierarchy:
-  num_devices_per_node: 1   # devices per package essentially
-  num_nodes: 20   # one package
-  kp1_inter: true
-  kp2_inter: true
+  num_devices_per_node: 1
+  num_nodes: 1
+  inter_derate: 1
+  intra_derate: 0
+  kp1_inter: false
+  kp2_inter: false
   dp_inter: false
   lp_inter: false
-  tp_inter: true
+  tp_inter: false
 
 network_topology:
-  inter_node: none     #mesh, torus, crossbar, custom, hierarchical
-  intra_node: mesh
+  # Allowed values: ring | fc | switch
+  inter_node: ring
+  intra_node: ring
 
 memory_hierarchy:
   l0:   #Register Memory
@@ -108,7 +159,7 @@ memory_hierarchy:
   l1:   #Shared Memory
     type: SRAM-L1
     scope: mcu-bundle
-  l2:   #L2
+  l2:   #L2 
     type: SRAM-L2
     scope: global
   l3:   #Global Memory
@@ -117,14 +168,16 @@ memory_hierarchy:
 
 scheduling_param:
   auto: false
-  dp: 1
-  lp: 1
-  mb: 1
-  tp: 20
-  tp_sp: false
-  cp: 1
+  ### LLM PARAMS ###
+  dp: 1 # acts as replica count during inference
+  lp: 1 # pipeline stages 
+  mb: 1 # number of micro-batches
+  tp: 1 # tensor parallelism
+  tp_sp: true # tensor-sequence parallelism
+  cp: 1  # context parallelism
+  ### LSTM/GEMM LEGACY PARAMS ###
   t: CR
-  kp1: 20
+  kp1: 1
   kp2: 1
   kp_hidden_dim1: 1
   kp_hidden_dim2: 1
@@ -138,6 +191,7 @@ scheduling_param:
   kp_softmax_type: -1
   kp_embedding_type: -1
   kp_projection_type: -1
+
 execution_backend:
   model: astra # analytical | astra
   astra:
