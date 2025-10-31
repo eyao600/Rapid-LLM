@@ -8,6 +8,7 @@ from LLM_execution import ExecutionMode, LLMExecutionDispatcher
 from simulate_LLM import Graph
 import LLM_util
 from time_calculation import TimeCalculation
+from itertools import zip_longest  # for element-wise aggregation of memory access lists
 
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name)
@@ -339,9 +340,11 @@ class TimeCalculationLLM(TimeCalculation):
         
         attention_forward_gemm_time = load_time + attn_score_time + attn_scale_softmax_time + attn_output_time
         attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
-       
+
+        # HBM traffic consists of only reading Q, K, V once and writing output once
+        attention_mem = 2 * seq_len * (hidden_dim + d * kv_heads) * self.precision.activations
         
-        return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f
+        return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f, attention_mem
     
     
     def flash_attention_kernel_backward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
@@ -394,16 +397,17 @@ class TimeCalculationLLM(TimeCalculation):
             return gemm_type
         raise TypeError(f"Unsupported gemm type specifier: {gemm_type!r}")
     
+    # assuming no context parallelism for now
     def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Any:
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
-            return self._tensor_parallelism_gemm_forward(gemm, name, gemm_type)
+            return self._tensor_parallelism_gemm_forward(gemm, name, gemm_type) # also return flops and mem accesses
         elif parallelism_mode == ParallelismMode.CONTEXT:
             return self._context_parallelism_gemm_forward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
             return self._tensor_context_hybrid_gemm_forward(gemm, name, gemm_type)
         elif parallelism_mode == ParallelismMode.SINGLE:
-            return self.single_gpu_gemm_forward(gemm, name, gemm_type)
+            return self.single_gpu_gemm_forward(gemm, name, gemm_type) # also return flops and mem accesses
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         
@@ -420,16 +424,21 @@ class TimeCalculationLLM(TimeCalculation):
             return self.single_gpu_gemm_backward(gemm, name, gemm_type)
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
+        
     def single_gpu_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
+        total_flops = 2 * batch * m * k * n
+        mem_accesses = []
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch + self.O
         elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
-            gemm_time = self.getGEMMTime(m, k, n, name)[0] * self.moe_num_experts
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name)
+            gemm_time *= self.moe_num_experts
         else :
-            gemm_time = self.getGEMMTime(m, k, n, name)[0]
-        return gemm_time, 0, 0
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name)
+        return gemm_time, 0, 0, total_flops, mem_accesses
+    
     def single_gpu_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
         batch, m, k, n = self._expand_gemm_descriptor(gemm)
         gemm_type = self._normalize_gemm_type(gemm_type)
@@ -639,26 +648,30 @@ class TimeCalculationLLM(TimeCalculation):
         size_bytes = 0
         total_bytes = 0
         reduction_time = 0
+        total_flops = 2 * batch * m * k * n
+        mem_accesses = []
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type is None:
             raise ValueError("gemm_type is required for tensor-parallel forward GEMM")
         
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
-            gemm_time = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name, disable_overhead=True)
+            gemm_time = gemm_time * batch / max(1, self.tp) + self.O
         elif gemm_type in (GemmType.FFN1, GemmType.FFN2) and self.use_moe:
             # MoE FFN layers replicate experts across all TP ranks, so no TP sharding here.
-            gemm_time = self.getGEMMTime(m, k, n, name)[0] * self.moe_num_experts 
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name)
+            gemm_time *= self.moe_num_experts
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             shard_n = math.ceil(n / max(1, self.tp))
-            gemm_time = self.getGEMMTime(m, k, shard_n, name)[0]
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, shard_n, name)
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):  # row wise
             shard_k = math.ceil(k / max(1, self.tp))
-            gemm_time = self.getGEMMTime(m, shard_k, n, name)[0]
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, shard_k, n, name)
             size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp
         elif gemm_type == GemmType.LINEAR_SOFTMAX: #assuming linear softmax is always column wise sharded
             shard_n = math.ceil(n / max(1, self.tp * self.cp ))
-            gemm_time = self.getGEMMTime(m, k, shard_n, name)[0]
+            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, shard_n, name)
             size_bytes = math.ceil(self.precision.activations * m * n)
             participants = self.tp * self.cp
         else:
@@ -669,7 +682,7 @@ class TimeCalculationLLM(TimeCalculation):
             reduction_time = self.get_tensor_reduction_time(total_bytes, kind=comm_kind_fwd, participants=participants, name=name)
 
 
-        return gemm_time, reduction_time, total_bytes
+        return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses
     
     def _tensor_parallelism_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None, comm_after: bool = False) -> Tuple[float, float]:
         """
@@ -857,7 +870,7 @@ class TimeCalculationLLM(TimeCalculation):
                     int(embedding_mem / 1e9), embedding_transfer_time
                 )
             )
-        return embedding_time + embedding_transfer_time
+        return embedding_time + embedding_transfer_time, embedding_mem
 
     def get_linear_softmax_f(self, gemm):
         """Estimate time for final projection + softmax forward.
@@ -865,7 +878,7 @@ class TimeCalculationLLM(TimeCalculation):
         """
         _, effective_m, k, n = self._effective_dims(gemm)
 
-        gemm_time, reduction_time, size_bytes = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
+        gemm_time, reduction_time, size_bytes,_,_ = self._tensor_parallelism_gemm_forward(gemm, "linear_softmax_f", gemm_type=GemmType.LINEAR_SOFTMAX)
 
             
         elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension
@@ -888,7 +901,7 @@ class TimeCalculationLLM(TimeCalculation):
             )
             print("Linear Softmax (f) point_time: {:,}\n".format(point_time))
 
-        return gemm_time + reduction_time + point_time
+        return gemm_time + reduction_time + point_time, point_mem
     
     def get_linear_softmax_b(self, gemm):
 
@@ -1339,7 +1352,19 @@ class TimeCalculationLLM(TimeCalculation):
 
             return reduction_time + apply_grad_time
     
-    
+    def _combine_mem(self, *args):
+            combined = {}
+            for d in args:
+                mem_levels = self._mem_levels(d)
+                for k, v in mem_levels.items():
+                    combined[k] = combined.get(k, 0) + v
+            return combined
+        
+    def _mem_levels(self, arr):
+        if isinstance(arr, (int, float)):
+            return {f"L{i}": (arr if i == self.num_levels - 1 else 0) for i in range(self.num_levels)}
+        return {f"L{i}": v for i, v in enumerate(arr or [])}
+
     # TODO TODO:
     # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
     # FIX at some point!
@@ -1376,9 +1401,22 @@ class TimeCalculationLLM(TimeCalculation):
         # Compute GEMM times and organize in structured dict
         transformer_results = {}
 
+        # assuming no context-parallelism for now and only running inference
+
+        # Helpers to handle variable-length returns (supports TP/Single returns with flops/mem and CP/Hybrid without)
+        def _extract_forward(ret):
+            # ret may be (time, red, size, flops, mem) or (time, red, size)
+            if len(ret) >= 5:
+                return ret[0], ret[1], ret[2], ret[3], ret[4]
+            elif len(ret) == 3:
+                return ret[0], ret[1], ret[2], 0, []
+            else:
+                return ret[0], 0, 0, 0, []
 
         # QKV Projection GEMM
-        qkv_proj_gemm_f,  qkv_proj_reduction_f, qkv_proj_size_f = self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", gemm_type=GemmType.QKV)
+        qkv_proj_gemm_f,  qkv_proj_reduction_f, qkv_proj_size_f, qkv_proj_flops_f, qkv_proj_mem_f = _extract_forward(
+            self.parallelism_gemm_forward(gemm_qkv_proj, "qkv_projection_f", gemm_type=GemmType.QKV)
+        )
         qkv_proj_gemm_b,  qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(gemm_qkv_proj, "qkv_projection_b", gemm_type=GemmType.QKV)
         qkv_proj_f = qkv_proj_gemm_f + qkv_proj_reduction_f
         qkv_proj_b = qkv_proj_gemm_b + qkv_proj_reduction_b
@@ -1386,11 +1424,16 @@ class TimeCalculationLLM(TimeCalculation):
             'forward': qkv_proj_f, 'backward': qkv_proj_b,
             'forward_gemm': qkv_proj_gemm_f, 'forward_reduction': qkv_proj_reduction_f,
             'backward_gemm': qkv_proj_gemm_b, 'backward_reduction': qkv_proj_reduction_b,
-            'comm_size_forward': qkv_proj_size_f, 'comm_size_backward': qkv_proj_size_b
+            'comm_size_forward': qkv_proj_size_f, 'comm_size_backward': qkv_proj_size_b,
+            'flops': qkv_proj_flops_f,
+            'memory_accesses': self._mem_levels(qkv_proj_mem_f),
         }
+
         if self.flash_attention is False:
             # Attention Score GEMM
-            attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f = self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", gemm_type=GemmType.ATTENTION_SCORE)
+            attn_score_gemm_f,  attn_score_reduction_f, attn_score_size_f, attn_score_flops_f, attn_score_mem_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_attention_score, "attention_score_f", gemm_type=GemmType.ATTENTION_SCORE)
+            )
             attn_score_gemm_b,  attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(gemm_attention_score, "attention_score_b", gemm_type=GemmType.ATTENTION_SCORE)
             attention_score_f = attn_score_gemm_f + attn_score_reduction_f
             attention_score_b = attn_score_gemm_b + attn_score_reduction_b
@@ -1398,15 +1441,18 @@ class TimeCalculationLLM(TimeCalculation):
                 'forward': attention_score_f, 'backward': attention_score_b,
                 'forward_gemm': attn_score_gemm_f, 'forward_reduction': attn_score_reduction_f,
                 'backward_gemm': attn_score_gemm_b, 'backward_reduction': attn_score_reduction_b,
-                'comm_size_forward': attn_score_size_f, 'comm_size_backward': attn_score_size_b
-                
+                'comm_size_forward': attn_score_size_f, 'comm_size_backward': attn_score_size_b,
+                'flops': attn_score_flops_f,
+                'memory_accesses': self._mem_levels(attn_score_mem_f),
             }
             attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
             attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
             transformer_results['attention_scale_softmax'] = {'forward': attention_scale_softmax_f, 'backward': attention_scale_softmax_b}
 
             # Attention Output GEMM
-            attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f = self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT)
+            attn_out_gemm_f,  attn_out_reduction_f, attn_out_size_f, attn_out_flops_f, attn_out_mem_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_attention_output, "attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT)
+            )
             attn_out_gemm_b,  attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(gemm_attention_output, "attention_output_b", gemm_type=GemmType.ATTENTION_OUTPUT)
             attention_output_f = attn_out_gemm_f + attn_out_reduction_f
             attention_output_b = attn_out_gemm_b + attn_out_reduction_b
@@ -1414,8 +1460,11 @@ class TimeCalculationLLM(TimeCalculation):
                 'forward': attention_output_f, 'backward': attention_output_b,
                 'forward_gemm': attn_out_gemm_f, 'forward_reduction': attn_out_reduction_f,
                 'backward_gemm': attn_out_gemm_b, 'backward_reduction': attn_out_reduction_b,
-                'comm_size_forward': attn_out_size_f, 'comm_size_backward': attn_out_size_b
+                'comm_size_forward': attn_out_size_f, 'comm_size_backward': attn_out_size_b,
+                'flops': attn_out_flops_f,
+                'memory_accesses': self._mem_levels(attn_out_mem_f),
             }
+            # Aggregate attention (score + softmax + output)
             attention_f = attention_score_f + attention_scale_softmax_f + attention_output_f
             attention_b = attention_score_b + attention_scale_softmax_b + attention_output_b
             attention_gemm_f = attn_score_gemm_f + attn_out_gemm_f + attention_scale_softmax_f
@@ -1424,6 +1473,12 @@ class TimeCalculationLLM(TimeCalculation):
             attention_reduction_b = attn_score_reduction_b + attn_out_reduction_b
             attention_size_f = attn_score_size_f + attn_out_size_f
             attention_size_b = attn_score_size_b + attn_out_size_b
+            # Aggregate flops and per-level memory accesses (score + output)
+            attention_flops = (attn_score_flops_f or 0) + (attn_out_flops_f or 0)
+            attention_mem = [
+                (a or 0) + (b or 0)
+                for a, b in zip_longest(attn_score_mem_f or [], attn_out_mem_f or [], fillvalue=0)
+            ]
             transformer_results["attention"] = {
                 'forward': attention_f,
                 'backward': attention_b,
@@ -1432,25 +1487,33 @@ class TimeCalculationLLM(TimeCalculation):
                 "backward_gemm": attention_gemm_b,
                 "backward_reduction": attention_reduction_b,
                 "comm_size_forward": attention_size_f,
-                "comm_size_backward": attention_size_b
+                "comm_size_backward": attention_size_b,
+                "flops": attention_flops,
+                "memory_accesses": self._mem_levels(attention_mem),
             }
         elif self.flash_attention is True:
-            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f = self.flash_attention_kernel_forward(batch_size,hidden_dim, seq_len, num_heads, kv_heads, num_SMs)
+            attention_f, attention_gemm_f, attention_reduction_f, attention_size_f, attention_mem = self.flash_attention_kernel_forward(batch_size,hidden_dim, seq_len, num_heads, kv_heads, num_SMs)
             # TODO WIP.
             attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = 2 * attention_f, 2 * attention_gemm_f, 2 * attention_reduction_f, 2 * attention_size_f
+
+            # flops for flash attention is 2* (QK^T + SV)
+            attention_flops = 2 * (batch_size * seq_len * (hidden_dim ** 2) + batch_size * (seq_len ** 2) * hidden_dim)
+            
             transformer_results['attention'] = {
                 'forward': attention_f, 'backward': attention_b,
                 'forward_gemm': attention_gemm_f, 'forward_reduction': attention_reduction_f,
                 'backward_gemm': attention_gemm_b, 'backward_reduction': attention_reduction_b,
-                'comm_size_forward': attention_size_f, 'comm_size_backward': attention_size_b
+                'comm_size_forward': attention_size_f, 'comm_size_backward': attention_size_b,
+                'flops': attention_flops,
+                'memory_accesses': self._mem_levels(attention_mem), # HBM only
             }
-            
-
         else:
             raise ValueError("flash_attention should be either True or False")
 
         # Output Projection GEMM
-        out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f = self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", gemm_type=GemmType.OUT_PROJ)
+        out_proj_gemm_f, out_proj_reduction_f, out_proj_size_f, out_proj_flops_f, out_proj_mem_f = _extract_forward(
+            self.parallelism_gemm_forward(gemm_output_proj, "output_projection_f", gemm_type=GemmType.OUT_PROJ)
+        )
         out_proj_gemm_b,  out_proj_reduction_b, out_proj_size_b = self.parallelism_gemm_backward(gemm_output_proj, "output_projection_b", gemm_type=GemmType.OUT_PROJ)
         output_proj_f = out_proj_gemm_f + out_proj_reduction_f
         output_proj_b = out_proj_gemm_b + out_proj_reduction_b
@@ -1458,13 +1521,15 @@ class TimeCalculationLLM(TimeCalculation):
             'forward': output_proj_f, 'backward': output_proj_b,
             'forward_gemm': out_proj_gemm_f, 'forward_reduction': out_proj_reduction_f,
             'backward_gemm': out_proj_gemm_b, 'backward_reduction': out_proj_reduction_b,
-            'comm_size_forward': out_proj_size_f, 'comm_size_backward': out_proj_size_b
-            
+            'comm_size_forward': out_proj_size_f, 'comm_size_backward': out_proj_size_b,
+            'flops': out_proj_flops_f,
+            'memory_accesses': self._mem_levels(out_proj_mem_f),
         }
 
-
         # FFN1 GEMM
-        ffn1_gemm_f,  ffn1_reduction_f, ffn1_size_f = self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
+        ffn1_gemm_f,  ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
+            self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
+        )
         ffn1_gemm_b,  ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1)
         ffn1_f = ffn1_gemm_f + ffn1_reduction_f
         ffn1_b = ffn1_gemm_b + ffn1_reduction_b
@@ -1472,11 +1537,15 @@ class TimeCalculationLLM(TimeCalculation):
             'forward': ffn1_f, 'backward': ffn1_b,
             'forward_gemm': ffn1_gemm_f, 'forward_reduction': ffn1_reduction_f,
             'backward_gemm': ffn1_gemm_b, 'backward_reduction': ffn1_reduction_b,
-            'comm_size_forward': ffn1_size_f, 'comm_size_backward': ffn1_size_b
+            'comm_size_forward': ffn1_size_f, 'comm_size_backward': ffn1_size_b,
+            'flops': ffn1_flops_f,
+            'memory_accesses': self._mem_levels(ffn1_mem_f),
         }
 
         # FFN2 GEMM
-        ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f = self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
+        ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
+            self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
+        )
         ffn2_gemm_b,  ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2)
         ffn2_f = ffn2_gemm_f + ffn2_reduction_f
         ffn2_b = ffn2_gemm_b + ffn2_reduction_b
@@ -1484,17 +1553,17 @@ class TimeCalculationLLM(TimeCalculation):
             'forward': ffn2_f, 'backward': ffn2_b,
             'forward_gemm': ffn2_gemm_f, 'forward_reduction': ffn2_reduction_f,
             'backward_gemm': ffn2_gemm_b, 'backward_reduction': ffn2_reduction_b,
-            'comm_size_forward': ffn2_size_f , 'comm_size_backward': ffn2_size_b
+            'comm_size_forward': ffn2_size_f , 'comm_size_backward': ffn2_size_b,
+            'flops': ffn2_flops_f,
+            'memory_accesses': self._mem_levels(ffn2_mem_f),
         }
         
             
 
         # Calculate non-GEMM operations
-        embedding_f = self.get_embedding_f(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
+        embedding_f, embedding_mem = self.get_embedding_f(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
         embedding_b = self.get_embedding_b(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
-        transformer_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b}
-
-
+        transformer_results['embedding'] = {'forward': embedding_f, 'backward': embedding_b, 'memory_accesses': self._mem_levels(embedding_mem)}
 
         residual1_f = self.get_residual_f(tensor_shape=gemm_output_proj)
         residual1_b = self.get_residual_b(tensor_shape=gemm_output_proj)
@@ -1502,7 +1571,15 @@ class TimeCalculationLLM(TimeCalculation):
 
         layernorm1_f, layernorm_reduction_f, LN1_comm_bytes_f= self.get_layernorm_f(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
         layernorm1_b, layernorm_reduction_b, LN1_comm_bytes_b= self.get_layernorm_b(batch=batch_size, seq_len=seq_len, d_model=hidden_dim)
-        transformer_results['layernorm1'] = {'forward': layernorm1_f + residual1_f +layernorm_reduction_f,'forward_compute': layernorm1_f + residual1_f, 'forward_reduction':layernorm_reduction_f, 'backward': layernorm1_b + residual1_b + layernorm_reduction_b,"backward_compute":layernorm1_b + residual1_b , 'backward_reduction': layernorm_reduction_b, 'comm_size_forward': LN1_comm_bytes_f, 'comm_size_backward': LN1_comm_bytes_b}
+        transformer_results['layernorm1'] = {
+            'forward': layernorm1_f + residual1_f +layernorm_reduction_f,
+            'forward_compute': layernorm1_f + residual1_f, 
+            'forward_reduction':layernorm_reduction_f, 
+            'backward': layernorm1_b + residual1_b + layernorm_reduction_b,
+            "backward_compute":layernorm1_b + residual1_b , 
+            'backward_reduction': layernorm_reduction_b, 
+            'comm_size_forward': LN1_comm_bytes_f, 'comm_size_backward': LN1_comm_bytes_b
+        }
 
         residual2_f = self.get_residual_f(tensor_shape=gemm_ffn2)
         residual2_b = self.get_residual_b(tensor_shape=gemm_ffn2)
@@ -1520,9 +1597,12 @@ class TimeCalculationLLM(TimeCalculation):
             act_b = self.get_gelu_b(tensor_shape=gemm_ffn1)
         transformer_results['gelu'] = {'forward': act_f, 'backward': act_b}
 
-        linear_softmax_f = self.get_linear_softmax_f(gemm=gemm_linear)
+        linear_softmax_f, linear_softmax_mem = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
-        transformer_results['linear_softmax'] = {'forward': linear_softmax_f, 'backward': linear_softmax_b}
+        transformer_results['linear_softmax'] = {
+            'forward': linear_softmax_f, 
+            'backward': linear_softmax_b, 
+            'memory_accesses': self._mem_levels(linear_softmax_mem)}
 
         # Calculate MHA and FFN times directly from results dict
         mha_time_f = ( 
@@ -1540,6 +1620,13 @@ class TimeCalculationLLM(TimeCalculation):
             "backward_reduction": qkv_proj_reduction_b + attention_reduction_b + out_proj_reduction_b,
             "comm_size_forward": qkv_proj_size_f + attention_size_f + out_proj_size_f,
             "comm_size_backward": qkv_proj_size_b + attention_size_b + out_proj_size_b,
+            "flops": qkv_proj_flops_f + transformer_results['attention']['flops'] + out_proj_flops_f,
+            "memory_accesses": self._combine_mem(
+                qkv_proj_mem_f,
+                attention_mem,
+                out_proj_mem_f,
+            ),
+
         }
 
         ffn_time_f = transformer_results['ffn1']['forward'] + transformer_results['ffn2']['forward'] + transformer_results['gelu']['forward']
@@ -1553,6 +1640,11 @@ class TimeCalculationLLM(TimeCalculation):
             "backward_reduction": ffn1_reduction_b + ffn2_reduction_b,
             "comm_size_forward": ffn2_size_f + ffn1_size_f,
             "comm_size_backward": ffn1_size_b + ffn2_size_b,
+            "flops": ffn1_flops_f + ffn2_flops_f,
+            "memory_accesses": self._combine_mem(
+                ffn1_mem_f,
+                ffn2_mem_f,
+            ),
         }
         # Calculate transformer times directly
         

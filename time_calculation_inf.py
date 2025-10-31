@@ -7,6 +7,20 @@ from time_calculation_LLM import LLMExecutionDispatcher, TimeCalculationLLM, Gem
 from simulate_inf import DecodeSample, InferenceConfig, InferenceEngine
 import LLM_util
 import json
+from itertools import zip_longest  # added for element-wise aggregation of memory access lists
+
+def convert_prefix(value: float) -> float:
+    """Assign SI unit prefixes to numerical values."""
+    if value > 1:
+        prefixes = ["", "k", "M", "G"]
+        index = min(int(math.log10(value) // 3), len(prefixes) - 1)
+        scaled_value = value / (1000 ** index)
+        return f"{scaled_value:.2f}{prefixes[index]}"
+    else:
+        prefixes = ["", "m", "µ", "n"]
+        index = min(int(-(math.log10(value) // 3)), len(prefixes) - 1)
+        scaled_value = value * (1000 ** index)
+        return f"{scaled_value:.2f}{prefixes[index]}"
 
 class TimeCalculationLLMInference(TimeCalculationLLM):
     """Inference-specialized facade for ``TimeCalculationLLM``."""
@@ -55,16 +69,17 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         gemm_ffn1 = gemm_shapes["ffn1"]
         gemm_ffn2 = gemm_shapes["ffn2"]
         # FlashAttention is not used during single-token (incremental) decoding.
-        qkv_proj_time, qkv_proj_reduction, qkv_proj_size = self.parallelism_gemm_forward(
+
+        qkv_proj_time, qkv_proj_reduction, qkv_proj_size, qkv_proj_flops, qkv_proj_mem = self.parallelism_gemm_forward(
             gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV
         )
-        attention_score_time, attention_score_reduction, attention_score_size = self.parallelism_gemm_forward(
+        attention_score_time, attention_score_reduction, attention_score_size, attention_score_flops, attention_score_mem = self.parallelism_gemm_forward(
             gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE
         )
-        attention_output_time, attention_output_reduction, attention_output_size = self.parallelism_gemm_forward(
+        attention_output_time, attention_output_reduction, attention_output_size, attention_output_flops, attention_output_mem = self.parallelism_gemm_forward(
             gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT
         )
-        out_proj_time, _, out_proj_size = self.parallelism_gemm_forward(
+        out_proj_time, _, out_proj_size, out_proj_flops, out_proj_mem = self.parallelism_gemm_forward(
             gemm_output_proj, "decode_output_projection_f", gemm_type=GemmType.OUT_PROJ
         )
         out_proj_reduction = (
@@ -73,10 +88,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             else 0.0
         )
 
-        ffn1_time, ffn1_reduction, ffn1_size = self.parallelism_gemm_forward(
+        ffn1_time, ffn1_reduction, ffn1_size, ffn1_flops, ffn1_mem = self.parallelism_gemm_forward(
             gemm_ffn1, "decode_ffn1_f", gemm_type=GemmType.FFN1
         )
-        ffn2_time, _, ffn2_size = self.parallelism_gemm_forward(
+        ffn2_time, _, ffn2_size, ffn2_flops, ffn2_mem = self.parallelism_gemm_forward(
             gemm_ffn2, "decode_ffn2_f", gemm_type=GemmType.FFN2
         )
         ffn2_reduction = (
@@ -116,7 +131,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             self.hidden_dim,
             self.vocab_size,
         )
-        linear_softmax_f = self.get_linear_softmax_f(linear_shape)
+        linear_softmax_f, _ = self.get_linear_softmax_f(linear_shape)
 
         if self.model_type == "llama":
             act_f = self.get_swiglu_f(gemm_ffn1)
@@ -153,6 +168,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             + layernorm2_reduction
         )
 
+        # Aggregate attention flops and memory accesses from score + output
+        attention_flops = (attention_score_flops or 0) + (attention_output_flops or 0)
+        attention_mem = [
+            (a or 0) + (b or 0)
+            for a, b in zip_longest(attention_score_mem, attention_output_mem, fillvalue=0)
+        ]
+
         transformer_results = {
             "qkv_proj": {
                 "forward": qkv_proj_time + qkv_proj_reduction,
@@ -163,6 +185,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": qkv_proj_size,
                 "comm_size_backward": 0,
+                "flops": qkv_proj_flops,
+                "memory_accesses": self._mem_levels(qkv_proj_mem),  # changed to per-level dict
             },
             "attention": {
                 "forward": attention_forward,
@@ -173,6 +197,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": attention_comm_bytes,
                 "comm_size_backward": 0,
+                "flops": attention_flops,
+                "memory_accesses": self._mem_levels(attention_mem),  # changed to per-level dict
             },
             "output_proj": {
                 "forward": out_proj_time + out_proj_reduction,
@@ -183,6 +209,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": out_proj_size,
                 "comm_size_backward": 0,
+                "flops": out_proj_flops,
+                "memory_accesses": self._mem_levels(out_proj_mem),  # changed to per-level dict
             },
             "MHA": {
                 "forward": mha_forward,
@@ -191,6 +219,12 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": qkv_proj_size + attention_comm_bytes + out_proj_size,
                 "comm_size_backward": 0,
+                "flops": qkv_proj_flops + attention_flops + out_proj_flops,
+                "memory_accesses": self._combine_mem(
+                    qkv_proj_mem,
+                    attention_mem,
+                    out_proj_mem,
+                ),
             },
             "ffn1": {
                 "forward": ffn1_forward,
@@ -201,6 +235,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": ffn1_size,
                 "comm_size_backward": 0,
+                "flops": ffn1_flops,
+                "memory_accesses": self._mem_levels(ffn1_mem),  # changed to per-level dict
             },
             "ffn2": {
                 "forward": ffn2_forward,
@@ -211,6 +247,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": ffn2_size,
                 "comm_size_backward": 0,
+                "flops": ffn2_flops,
+                "memory_accesses": self._mem_levels(ffn2_mem),  # changed to per-level dict
             },
             "MLP": {
                 "forward": mlp_forward,
@@ -219,6 +257,11 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
                 "backward_reduction": 0.0,
                 "comm_size_forward": ffn1_size + ffn2_size,
                 "comm_size_backward": 0,
+                "flops": ffn1_flops + ffn2_flops,
+                "memory_accesses": self._combine_mem(
+                    ffn1_mem,
+                    ffn2_mem,
+                ),
             },
             "gelu": {
                 "forward": act_f,
@@ -272,6 +315,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
         )
+
+        output_act_bytes = gemm_shapes["qkv_proj"][0] * gemm_shapes["qkv_proj"][1] * self.precision_bytes
+        energy = self.calc_energy(transformer_results, output_act_bytes)
+
         if self._generate_graphs:
             results_path = os.path.join(self.output_dir, "decode_transformer_results.txt")
             with open(results_path, "w", encoding="utf-8") as results_file:
@@ -296,7 +343,34 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             include_pipeline_backward=False,
             include_transformer_backward=False,
             gemm_shapes=gemm_shapes,
-        )
+        ), energy
+    
+    def calc_energy(self, transformer_results: Dict[str, Dict[str, float]], cross_layer_comm) -> float:
+        """
+        Calculate energy consumption based on transformer results.
+        """
+        total_flops = 0
+        total_hbm_bytes = 0
+        inter_comm_bytes = 0 # data parallelism?
+        for op_name, op_results in transformer_results.items():
+            if op_name in ['MHA', 'MLP', 'layernorm1', 'layernorm2', 'embedding', 'linear_softmax']:
+                total_flops += op_results.get("flops", 0)
+                total_hbm_bytes += op_results.get("memory_accesses", {}).get("L3", 0)
+                inter_comm_bytes += op_results.get("comm_size_forward", 0)
+
+        total_comm_bytes = self.num_layers * inter_comm_bytes + (self.lp - 1) * cross_layer_comm
+
+        energy_per_flop = self.core.nominal_energy_per_flop
+        energy_hbm_byte = self.DRAM.dynamic_energy_per_bit * 8
+        energy_comm_byte = self.network.intra_network.nominal_energy_per_link * 8  # 8 pJ/bit for interconnect
+
+        total_energy = (total_flops * energy_per_flop) + \
+            (total_hbm_bytes * energy_hbm_byte) + \
+                (total_comm_bytes * energy_comm_byte)   
+        
+        return total_energy
+
+
 
     def calc_time(self) -> float:
         batch_size = self._effective_transformer_batch()
@@ -325,6 +399,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             intermediate_size,
             num_SMs,
         )
+
+        output_act_bytes = batch_size * self.seq_len * hidden_dim * self.precision_bytes
+
+        total_energy = self.calc_energy(transformer_results, output_act_bytes)
 
         head_dim = hidden_dim // num_heads
         token_bytes = LLM_util.kv_cache_token_bytes(
@@ -385,7 +463,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         total_time = result.total_time
 
-        return total_time
+        return total_time, total_energy
 
     def calc_decode_time(self) -> Tuple[float, List[DecodeSample]]:
         """
@@ -435,8 +513,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         )
 
         # Build decode phase using sample-based approach with real DeepFlow integration
-        decode_time, decode_samples = inference_engine._build_decode_graph()
-        return decode_time, decode_samples
+        # decode_time, decode_energy, decode_samples = inference_engine._build_decode_graph()
+        return inference_engine._build_decode_graph()
 
     def calc_total_inference_time(self) -> dict:
         """
@@ -446,10 +524,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             dict: Breakdown of inference timing components
         """
         # Calculate prefill time (existing functionality)
-        prefill_time = self.calc_time()
+        prefill_time, prefill_energy = self.calc_time()
 
         # Calculate decode time (new functionality)
-        decode_time, decode_samples = self.calc_decode_time()
+        decode_time, decode_energy, decode_samples = self.calc_decode_time()
         total_time = prefill_time + decode_time
 
         time_to_first_token = prefill_time
@@ -498,6 +576,13 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             f"[kv-cache] prefill_store={_to_gib(prefill_store_bytes)}, "
             f"decode_store={_to_gib(decode_store_bytes)}, "
             f"decode_fetch={_to_gib(decode_fetch_bytes)}"
+        )
+        
+        total_energy = prefill_energy + decode_energy
+        print(
+            f"[prefill] energy: {convert_prefix(prefill_energy)}J, energy/tok: {convert_prefix(prefill_energy / (self._effective_transformer_batch() * prefill_len))}J",
+            f"[decode] energy: {convert_prefix(decode_energy)}J, energy/tok: {convert_prefix(decode_energy / (self._effective_transformer_batch() * decode_len))}J",
+            f"[total] energy: {convert_prefix(total_energy)}J, energy/tok: {convert_prefix(total_energy / (self._effective_transformer_batch() * (prefill_len + decode_len)))}J",
         )
 
 

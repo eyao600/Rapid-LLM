@@ -36,6 +36,7 @@ tech_param:
     num_bundles: 132     # number of bundles (SMs) [TPU]
     nominal_flop_rate_per_mcu: 1024     # F16 FLOP / cycle / SM is 4096 [Semi]
     nominal_power_per_mcu: 0.13     # (W)
+    nominal_energy_per_flop: 1.8e-13
     nominal_area_per_mcu: 1.006     # (mm^2)
     nominal_frequency: 1.23e9     # (Hz)
     nominal_voltage: 0.8     # (V)

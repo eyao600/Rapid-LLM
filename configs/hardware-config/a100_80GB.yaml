@@ -28,6 +28,7 @@ tech_param:
     operating_frequency: 1.41e9
     num_bundles: 108
     nominal_flop_rate_per_mcu: 512
+    nominal_energy_per_flop: 1.8e-13
     nominal_power_per_mcu: 0.13
     nominal_voltage: 0.8
     threshold_voltage: 0.2
@@ -98,7 +99,7 @@ tech_param:
       latency: 5e-6
       nominal_frequency: 3e9
       nominal_voltage: 1
-      nominal_energy_per_link: 1e-12
+      nominal_energy_per_link: 8e-12
       nominal_area_per_link: 100e-6
       num_links_per_mm: 400
       threshold_voltage: 0.25

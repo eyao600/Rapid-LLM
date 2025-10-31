@@ -193,6 +193,7 @@ class Core(Base):
         self.dataflow = exp_config.tech_config.core.dataflow
 
         self.nominal_flop_rate_per_mcu = exp_config.tech_config.core.nominal_flop_rate_per_mcu # TODO: Define it as a function of precision
+        self.nominal_energy_per_flop = exp_config.tech_config.core.nominal_energy_per_flop
         self.nominal_power_per_mcu = exp_config.tech_config.core.nominal_power_per_mcu
         self.util = exp_config.tech_config.core.util
 

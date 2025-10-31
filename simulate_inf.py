@@ -46,6 +46,7 @@ class DecodeSample:
     step_id: int
     current_seq_len: int
     execution_time: float
+    execution_energy: float
     graph_root: Any
     kv_cache_tokens: int
 
@@ -115,16 +116,7 @@ class DecodeGraph(Graph):
                 model_type=self.model_config.model_config.model_type,
             )
 
-            if self._debug_graphs_enabled():
-                # write gemm_shapes to a file
-                # if dir doesnt exist make it
-                if not os.path.exists(f"output/LLM/decode_samples/step_{step_id:04d}"):
-                    os.makedirs(f"output/LLM/decode_samples/step_{step_id:04d}")
-                with open(f"output/LLM/decode_samples/step_{step_id:04d}/decode_shapes.txt", "w", encoding="utf-8") as f:
-                    for key, shape in gemm_shapes.items():
-                        f.write(f"{key}: {shape}\n")
-
-            sample_time = self._execute_decode_step(
+            sample_time, sample_energy = self._execute_decode_step(
                 step_id=step_id,
                 total_seq_len=total_seq_len,
                 gemm_shapes=gemm_shapes,
@@ -135,14 +127,15 @@ class DecodeGraph(Graph):
                     step_id=step_id,
                     current_seq_len=total_seq_len,
                     execution_time=sample_time,
+                    execution_energy=sample_energy,
                     graph_root=None,
                     kv_cache_tokens=total_seq_len,
                 )
             )
 
-        total_decode_time = self._integrate_decode_samples(decode_samples)
+        total_decode_time, total_decode_energy = self._integrate_decode_samples(decode_samples)
 
-        return total_decode_time, decode_samples
+        return total_decode_time, total_decode_energy, decode_samples
 
     def _generate_sample_points(self) -> List[int]:
         """Generate decode step sample points based on sampling configuration."""
@@ -182,6 +175,7 @@ class DecodeGraph(Graph):
             mode="LLM",
             output_dir="./output/LLM/",
         )
+
         base_dir = temp_time_calc.output_dir.rstrip(os.sep)
         sample_dir = None
         if self._debug_graphs_enabled():
@@ -192,6 +186,10 @@ class DecodeGraph(Graph):
                 if os.path.isdir(root_dir):
                     shutil.rmtree(root_dir, ignore_errors=True)
             os.makedirs(sample_dir, exist_ok=True)
+            gemm_shapes_file = os.path.join(sample_dir, "decode_gemm_shapes.txt")
+            with open(gemm_shapes_file, "w", encoding="utf-8") as f:
+                for key, shape in gemm_shapes.items():
+                    f.write(f"{key}: {shape}\n")
             prev_output_dir = temp_time_calc.output_dir
             temp_time_calc.output_dir = sample_dir
 
@@ -202,7 +200,7 @@ class DecodeGraph(Graph):
             transformer_forward_root,
             transformer_backward_root,
             interconnect_params,
-        ) = temp_time_calc.prepare_decode_graphs(
+        ), energy = temp_time_calc.prepare_decode_graphs(
             batch_size=self.config.batch_size,
             total_seq_len=total_seq_len,
             gemm_shapes=gemm_shapes,
@@ -230,7 +228,7 @@ class DecodeGraph(Graph):
                 f"[decode] sample step {step_id}: seq_len={total_seq_len}, "
                 f"time={result.total_time:.4f}s"
             )
-        return result.total_time
+        return result.total_time, energy
 
     def _integrate_decode_samples(self, samples: List[DecodeSample]) -> float:
         """
@@ -243,14 +241,16 @@ class DecodeGraph(Graph):
             raise ValueError("No decode samples available for integration")
 
         total_time = 0.0
+        total_energy = 0.0
 
         for idx, sample in enumerate(samples):
             if idx == 0:
                 total_time += sample.execution_time
+                total_energy += sample.execution_energy
                 if self._debug_graphs_enabled():
                     print(
                         f"[decode] integration seed step {sample.step_id:02d}: "
-                        f"time={sample.execution_time:.4f}s"
+                        f"time={sample.execution_time:.4f}s, energy={sample.execution_energy:.4f}J"
                     )
                 continue
 
@@ -262,6 +262,11 @@ class DecodeGraph(Graph):
             midpoint = 0.5 * (prev_sample.execution_time + sample.execution_time)
             segment_time = midpoint * step_gap
             total_time += segment_time
+
+            midpoint_energy = 0.5 * (prev_sample.execution_energy + sample.execution_energy)
+            segment_energy = midpoint_energy * step_gap
+            total_energy += segment_energy
+
             print(
                 f"[decode] integration segment {prev_sample.step_id}->{sample.step_id}: "
                 f"width={step_gap}, midpoint={midpoint:.4f}s, contribution={segment_time:.4f}s"
@@ -272,17 +277,18 @@ class DecodeGraph(Graph):
         if remaining_steps > 0:
             tail_time = remaining_steps * last_sample.execution_time
             total_time += tail_time
+            total_energy += remaining_steps * last_sample.execution_energy
             print(
                 f"[decode] integration tail from {last_sample.step_id} covering {remaining_steps} steps: "
                 f"contribution={tail_time:.4f}s"
             )
 
         print(
-            f"[decode] total interpolated decode time: {total_time:.4f}s "
+            f"[decode] total interpolated decode time: {total_time:.4f}s, energy: {total_energy:.4f}J "
             f"from {len(samples)} samples"
         )
 
-        return total_time
+        return total_time, total_energy
 
     def _debug_graphs_enabled(self) -> bool:
         flag = os.environ.get("DEEPFLOW_VISUALIZE_GRAPHS")

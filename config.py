@@ -123,6 +123,7 @@ def _parse_precision_block(spec: dict) -> PrecisionConfig:
 class CoreConfig:
     nominal_power_per_mcu: float
     nominal_flop_rate_per_mcu: float
+    nominal_energy_per_flop: float
     nominal_voltage: float
     threshold_voltage: float
     margin_voltage: float
@@ -141,6 +142,7 @@ class CoreConfig:
         return cls(
             nominal_power_per_mcu=core_config_dict["nominal_power_per_mcu"],
             nominal_flop_rate_per_mcu=core_config_dict["nominal_flop_rate_per_mcu"],
+            nominal_energy_per_flop=core_config_dict["nominal_energy_per_flop"],
             nominal_voltage=core_config_dict["nominal_voltage"],
             threshold_voltage=core_config_dict["threshold_voltage"],
             margin_voltage=core_config_dict["margin_voltage"],

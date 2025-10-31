@@ -274,4 +274,7 @@ DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS=1 DEEPFLOW_VISUALIZE_GRAPHS=1 DEEPFLOW_PERSI
 - **Work in progress:** will be released after further refinement
 
 
+### Energy Estimation
+- **Supported** inference only with or without FlashAttention
+- energy due to prefill and decode is reported separately
 
