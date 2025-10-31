@@ -250,7 +250,7 @@ Comparing the two runs will show how increasing tensor parallelism changes the p
 - **Note:** optional sliding-window attention configurations (in `qwen2`, `phi3`) currently **fall back to dense attention**.
 
 ### Attention Types
-- **Supported:** **MHA** and **GQA** (`num_kv_heads`) for training and inference.
+- **Supported:** **MHA**,**GQA** (`num_kv_heads`) for training and inference. **MQA** == **GQA** with `num_kv_heads` set to 1, so is also supported.
 - **Work in progress:** **MLA**, potentially **sliding-window** attention
 
 ### Mixture of Experts (MoE)
