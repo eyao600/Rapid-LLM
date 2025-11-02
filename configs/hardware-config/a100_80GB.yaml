@@ -93,7 +93,7 @@ network:
       latency: 5e-6
       energy_per_bit: 8e-12 # (J/bit)
       util: 1.0
-    collective_override: {} # leave empty to use 'auto' for all collectives unless an override is needed
+    collective_override: {} # overrides execution_backend.collectives when provided
     parallelisms: [tp, cp]
   - id: dim1
     label: inter_wafer_ring_infiniband
@@ -104,7 +104,7 @@ network:
       latency: 5e-6
       energy_per_bit: 8e-12 # (J/bit)
       util: 1.0
-    collective_override: {} # defaults to 'auto' per collective
+    collective_override: {} # overrides execution_backend.collectives when provided
     parallelisms: [lp]
   - id: dim2
     label: wafer_dp_chains_ring_infiniband
@@ -115,7 +115,7 @@ network:
       latency: 5e-6
       energy_per_bit: 8e-12 # (J/bit)
       util: 0.96
-    collective_override: {} # defaults to 'auto' per collective
+    collective_override: {} # overrides execution_backend.collectives when provided
     parallelisms: [dp]
 
 
@@ -124,7 +124,8 @@ execution_backend:
   astra:
     backend: astra
     mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collective_override:
+    collectives:
+      # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
       # Note: leave to auto unless you have a specific reason to change it.
       all_gather: auto

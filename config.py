@@ -796,7 +796,6 @@ InferenceHWConfig = _namedtuple(
     "InferenceHWConfig",
     [
         "kvcache_type",
-        "kvcache_fetch_overlap",
     ],
 )
 
@@ -1047,7 +1046,6 @@ def parse_config(filename, config_type):
         inference_dict = config_dict.get("inference", {}) or {}
         inference_cfg = InferenceHWConfig(
             kvcache_type=inference_dict.get("kvcache_type", "hbm_only"),
-            kvcache_fetch_overlap=bool(inference_dict.get("kvcache_fetch_overlap", False)),
         )
 
         config = HWConfig(

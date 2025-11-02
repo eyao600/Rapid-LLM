@@ -104,7 +104,7 @@ network:
       latency: 5e-6
       energy_per_bit: 8e-12 # (J/bit)
       util: 1.0
-    collective_override: {}
+    collective_override: {} # overrides execution_backend.collectives when provided
     parallelisms: [tp, cp, lp, dp, kp1, kp2]
 
 
@@ -113,8 +113,9 @@ execution_backend:
   astra:
     backend: astra
     mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
-    collective_override:
-      # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree
+    collectives:
+      # Default collective algorithms. Per-dimension collective_override entries can override these.
+      # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
       # Note: leave to auto unless you have a specific reason to change it.
       all_gather: auto
       all_reduce: auto
