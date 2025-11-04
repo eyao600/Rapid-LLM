@@ -372,12 +372,18 @@ class NetworkDimensionLayout:
 
         if "size" not in raw:
             raise ValueError(f"network dimension '{label}' is missing required field 'size'")
-        try:
-            size = int(raw["size"])
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"network dimension '{label}' size must be an integer") from exc
-        if size < 1:
-            raise ValueError(f"network dimension '{label}' size must be >= 1")
+        size_raw = raw["size"]
+        size_is_auto = False
+        if isinstance(size_raw, str) and size_raw.strip().lower() == "auto":
+            size_is_auto = True
+            size = None
+        else:
+            try:
+                size = int(size_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"network dimension '{label}' size must be an integer") from exc
+            if size < 1:
+                raise ValueError(f"network dimension '{label}' size must be >= 1")
 
         topo_dict = raw.get("topology")
         if not isinstance(topo_dict, dict):
@@ -448,12 +454,25 @@ class NetworkDimensionLayout:
             normalized_parallelisms.append(normalized)
             alias_map[normalized] = name
 
+        computed_product = None
+        if size_is_auto:
+            computed_product = _compute_dimension_parallelism_product(
+                dimension_label=label,
+                normalized_names=tuple(normalized_parallelisms),
+                alias_map=alias_map,
+                parallelism_params=parallelism_params,
+            )
+            size = computed_product
+            if size < 1:
+                raise ValueError(f"network dimension '{label}' inferred size must be >= 1")
+
         _validate_dimension_parallelisms(
             dimension_label=label,
             dimension_size=size,
             normalized_names=tuple(normalized_parallelisms),
             alias_map=alias_map,
             parallelism_params=parallelism_params,
+            expected_product=computed_product,
         )
 
         return cls(
@@ -481,10 +500,35 @@ def _validate_dimension_parallelisms(
     normalized_names: Tuple[str, ...],
     alias_map: Dict[str, str],
     parallelism_params: Dict[str, object],
+    expected_product: Optional[int] = None,
 ) -> None:
     if not normalized_names:
         return
 
+    product = expected_product
+    if product is None:
+        product = _compute_dimension_parallelism_product(
+            dimension_label=dimension_label,
+            normalized_names=normalized_names,
+            alias_map=alias_map,
+            parallelism_params=parallelism_params,
+        )
+
+    if product != dimension_size:
+        readable = [alias_map.get(name, name) for name in normalized_names]
+        raise ValueError(
+            f"Network dimension '{dimension_label}' size mismatch: declared size {dimension_size} "
+            f"but parallelism factors ({readable}) imply {product}"
+        )
+
+
+def _compute_dimension_parallelism_product(
+    *,
+    dimension_label: str,
+    normalized_names: Tuple[str, ...],
+    alias_map: Dict[str, str],
+    parallelism_params: Dict[str, object],
+) -> int:
     product = 1
     for name in normalized_names:
         if name not in parallelism_params:
@@ -514,12 +558,7 @@ def _validate_dimension_parallelisms(
             )
         product *= factor
 
-    if product != dimension_size:
-        readable = [alias_map.get(name, name) for name in normalized_names]
-        raise ValueError(
-            f"network dimension '{dimension_label}' size mismatch: declared size {dimension_size} "
-            f"but product of parallelisms {readable} is {product}"
-        )
+    return product
 
 
 def _parse_network_layout(

@@ -6,3 +6,4 @@ venv/
 astra_cache/
 log/*.log
 tmp/
+output*/

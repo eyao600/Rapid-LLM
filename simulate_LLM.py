@@ -973,85 +973,96 @@ class Graph:
         if not gemm_entries:
             raise ValueError("Transformer GEMM times not provided")
 
-        tp_degree = self.tp
+        tp_degree = max(1, int(self.tp))
+        cp_degree = max(1, int(self.cp))
 
         root = Data_batch("transformer_root", 0, 0)
         op_id = 0
 
-        for rank in range(tp_degree):
-            previous = root
+        for cp_idx in range(cp_degree):
+            for tp_idx in range(tp_degree):
+                rank = tp_idx + cp_idx * tp_degree
+                previous = root
 
-            if direction in {"forward", "both"}:
-                for idx, entry in enumerate(gemm_entries):
-                    entry_name = entry.get("name", f"g{idx}")
-                    forward_cfg = entry.get("forward", {})
-                    fwd_duration = forward_cfg.get("duration")
-                    if fwd_duration is None:
-                        raise ValueError("Transformer GEMM entry missing forward duration")
+                if direction in {"forward", "both"}:
+                    for idx, entry in enumerate(gemm_entries):
+                        entry_name = entry.get("name", f"g{idx}")
+                        forward_cfg = entry.get("forward", {})
+                        fwd_duration = forward_cfg.get("duration")
+                        if fwd_duration is None:
+                            raise ValueError("Transformer GEMM entry missing forward duration")
 
-                    node = Node(
-                        name=f"{entry_name}_fwd_rank{rank}",
-                        op_id=op_id,
-                        hw_id=rank,
-                        duration=fwd_duration,
-                        fwd=True,
-                    )
-                    op_id += 1
-                    previous.add_child(node)
-                    previous = node
-                    comm_key = forward_cfg.get("comm_keys",None)
-                    if comm_key:
-                        if len(comm_key) > 1:
-                            print(f"*CONSTRUCT INFO: Multiple comm keys for {entry_name}")
-                            print(f"*CONSTRUCT INFO: Comm keys: {comm_key}")
-                            raise ValueError(f"Multiple comm keys for {entry_name}")
-
-                        comm_key = comm_key[0]
-                        if comm_key not in self.comm_metadata:
-                            raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                        comm_edge = self.create_comm_edge(
-                            name=comm_key,
+                        node = Node(
+                            name=f"{entry_name}_fwd_rank{rank}",
                             op_id=op_id,
-                            comm_key=comm_key,
-                            is_dp=False,
-                            local_hw_id=rank,
+                            hw_id=rank,
+                            duration=fwd_duration,
+                            fwd=True,
                         )
+                        node.tp_rank = tp_idx
+                        node.cp_rank = cp_idx
                         op_id += 1
-                        previous.add_child(comm_edge)
-                        previous = comm_edge
+                        previous.add_child(node)
+                        previous = node
+                        comm_key = forward_cfg.get("comm_keys", None)
+                        if comm_key:
+                            if len(comm_key) > 1:
+                                print(f"*CONSTRUCT INFO: Multiple comm keys for {entry_name}")
+                                print(f"*CONSTRUCT INFO: Comm keys: {comm_key}")
+                                raise ValueError(f"Multiple comm keys for {entry_name}")
 
-            if direction in {"backward", "both"}:
-                for idx, entry in enumerate(reversed(gemm_entries)):
-                    entry_name = entry.get("name", f"g{idx}")
-                    backward_cfg = entry.get("backward", {})
-                    bwd_duration = backward_cfg.get("duration")
-                    if bwd_duration is None:
-                        raise ValueError("Transformer GEMM entry missing backward duration")
+                            comm_key = comm_key[0]
+                            if comm_key not in self.comm_metadata:
+                                raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
+                            comm_edge = self.create_comm_edge(
+                                name=comm_key,
+                                op_id=op_id,
+                                comm_key=comm_key,
+                                is_dp=False,
+                                local_hw_id=rank,
+                            )
+                            comm_edge.tp_rank = tp_idx
+                            comm_edge.cp_rank = cp_idx
+                            op_id += 1
+                            previous.add_child(comm_edge)
+                            previous = comm_edge
 
-                    node = Node(
-                        name=f"{entry_name}_bwd_rank{rank}",
-                        op_id=op_id,
-                        hw_id=rank,
-                        duration=bwd_duration,
-                        fwd=False,
-                    )
-                    op_id += 1
-                    previous.add_child(node)
-                    previous = node
+                if direction in {"backward", "both"}:
+                    for idx, entry in enumerate(reversed(gemm_entries)):
+                        entry_name = entry.get("name", f"g{idx}")
+                        backward_cfg = entry.get("backward", {})
+                        bwd_duration = backward_cfg.get("duration")
+                        if bwd_duration is None:
+                            raise ValueError("Transformer GEMM entry missing backward duration")
 
-                    for comm_idx, comm_key in enumerate(backward_cfg.get("comm_keys", [])):
-                        if comm_key not in self.comm_metadata:
-                            raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
-                        comm_edge = self.create_comm_edge(
-                            name=comm_key,
+                        node = Node(
+                            name=f"{entry_name}_bwd_rank{rank}",
                             op_id=op_id,
-                            comm_key=comm_key,
-                            is_dp=False,
-                            local_hw_id=rank,
+                            hw_id=rank,
+                            duration=bwd_duration,
+                            fwd=False,
                         )
+                        node.tp_rank = tp_idx
+                        node.cp_rank = cp_idx
                         op_id += 1
-                        previous.add_child(comm_edge)
-                        previous = comm_edge
+                        previous.add_child(node)
+                        previous = node
+
+                        for comm_idx, comm_key in enumerate(backward_cfg.get("comm_keys", [])):
+                            if comm_key not in self.comm_metadata:
+                                raise KeyError(f"Missing transformer comm metadata for key '{comm_key}'")
+                            comm_edge = self.create_comm_edge(
+                                name=comm_key,
+                                op_id=op_id,
+                                comm_key=comm_key,
+                                is_dp=False,
+                                local_hw_id=rank,
+                            )
+                            comm_edge.tp_rank = tp_idx
+                            comm_edge.cp_rank = cp_idx
+                            op_id += 1
+                            previous.add_child(comm_edge)
+                            previous = comm_edge
 
         return root
         

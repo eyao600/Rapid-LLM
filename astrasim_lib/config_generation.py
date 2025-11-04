@@ -163,11 +163,6 @@ def generate_astrasim_configs_from_hw(
                     "Supported axes are tp, cp, lp, dp."
                 )
             effective *= axis_sizes[axis]
-        # if effective != int(getattr(dim, "size", effective)):
-        #     raise ValueError(
-        #         f"Network dimension '{dim.label}' size mismatch: declared {dim.size}, "
-        #         f"but parallelism factors imply {effective}."
-        #     )
         dim_infos.append((dim, axes, effective))
 
     active_dim_indices = [idx for idx, (dim, _, _) in enumerate(dim_infos) if int(getattr(dim, "size", 0)) > 1]

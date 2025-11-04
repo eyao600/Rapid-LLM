@@ -10,6 +10,7 @@ from astrasim_lib import ensure_chakra_available
 import pandas as pd
 import yaml
 import shutil
+import util
 
 import graphviz_async
 from tile import TiledGEMM, formatBytes
@@ -95,6 +96,7 @@ def _validate_network_topology(hw_config) -> None:
                     "Non-ring network topologies are not supported in analytical mode. "
                     "Only execution_backend.model='astra' (requires a valid AstraSim install) supports non-ring networks."
                 )
+
 
 def run_LSTM(
     exp_hw_config_path,
@@ -237,6 +239,7 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
     output_file = os.path.join(exp_dir, "LLM_training_results.txt")
     tc_llm = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=exp_dir)
     total_time = tc_llm.calc_time_llm()
+    topology_lines = util.network_topology_summary_training(exp_hw_config)
 
     with open(output_file, "a+") as handle:
         handle.write("\n\n==============================================\n")
@@ -245,9 +248,13 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("Execution Mode: {}\n".format(tc_llm.execution_mode.value))
         handle.write("Total Time: {0:.8f}\n".format(total_time))
         handle.write("\n")
-        handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh")
+        handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh\n")
+        handle.write("\n".join(topology_lines))
+        handle.write("\n")
 
     print("Training time for batch: {:.2f}s".format(tc_llm.get_time()))
+    for line in topology_lines:
+        print(line)
     print("LLM training results written to {}".format(output_file))
     warning_message = tc_llm.memory_capacity_warning()
     if warning_message:
@@ -306,6 +313,8 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
             )
         )
 
+    topology_lines = util.network_topology_summary_inference(exp_hw_config)
+
     output_path = os.path.join(exp_dir, "LLM_inference_results.txt")
     os.makedirs(exp_dir, exist_ok=True)
     with open(output_path, "w") as handle:
@@ -328,8 +337,12 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
             handle.write(f"Decode Generations per Second: start={start_gen_rate:.2f}, mid(token {mid_step})={mid_gen_rate:.2f}, end={end_gen_rate:.2f}\n")
             handle.write(f"Aggregate Decode Throughput Tok/s (batch={batch_size}, dp={dp_replicas}): start={start_gen_rate * batch_size * dp_replicas:.2f}, mid(token {mid_step})={mid_gen_rate * batch_size * dp_replicas:.2f}, end={end_gen_rate * batch_size * dp_replicas:.2f}\n")
         handle.write("\n")
-        handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh")
+        handle.write("For more info, turn on debug flags. See examples/llm_astra_inference_debug_graphviz.sh\n")
+        handle.write("\n".join(topology_lines))
+        handle.write("\n")
 
+    for line in topology_lines:
+        print(line)
     print("LLM inference results written to {}".format(output_path))
     warning_message = tc_inf.memory_capacity_warning()
     if warning_message:
