@@ -122,19 +122,24 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 
     return processed
 
-def get_transformer_mem_layer( dp, tp, batch_size, hidden_dim, seq_len, intermediate_size, n_heads, precision, zero_stage, model_type="gpt"):#https://www.determined.ai/blog/act-mem-1.  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
+def get_transformer_mem_layer( dp, tp, batch_size, hidden_dim, seq_len, intermediate_size, n_heads, precision, zero_stage, flash_attention, model_type="gpt"):#  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
     """ memory estimation of transformer layer for single gpu case in inference mode is supported.
     other modes or layers are work in progress."""
     #Activations refer to output activations that need to be stored
-    act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) #from https://arxiv.org/pdf/2205.05198
+
+    if flash_attention:
+        act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2) #flash attention activation saved
+    else:
+        act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) 
+    
+    
     act_memory_layer_inf = seq_len * batch_size * intermediate_size / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
     ffn_proj_factor = 3 if str(model_type).lower() == "llama" else 2
     
     
     transformer_param_layer = 4* hidden_dim * hidden_dim + intermediate_size * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
-    optimizer_mem = 10 * transformer_param_layer / dp # zero1 style optimizer memory
-    #TODO: which optimizer mem to use?
-    optimizer_mem = 10 * transformer_param_layer * (precision.optimizer_states / 2) / tp # don't divide by dp for DDP
+
+    optimizer_mem = (precision.optimizer_states * 2 + precision.activations) * transformer_param_layer / tp # don't divide by dp for DDP, NeMo ZeRO-1 optimizer style
     tensor_weight_memory_layer = transformer_param_layer * precision.parameters / tp #weight memory
     # master_parameters is set to 0 by default, so this works.
     master_weight_memory_layer = transformer_param_layer * precision.master_parameters / tp

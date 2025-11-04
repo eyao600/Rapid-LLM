@@ -2345,6 +2345,7 @@ class TimeCalculationLLM(TimeCalculation):
                 precision=self.precision,
                 model_type=self.model_type,
                 zero_stage=self.zero_stage,
+                flash_attention=self.flash_attention,
             )
         )
 
@@ -2437,7 +2438,8 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_graph = dispatcher.pipeline_graph
         self.pipeline_root = pipeline_root
         self.pipeline_interconnect = dispatcher.interconnect_params
-        
+        _, peak_mem = self._simulate_with_memory(graph_root, memory_data, mode="training")
+
 
 
         # debug helper. If set, print analytical transformer time and actual transformer time
