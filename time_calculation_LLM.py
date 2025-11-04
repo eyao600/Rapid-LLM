@@ -299,6 +299,7 @@ class TimeCalculationLLM(TimeCalculation):
             ll=self.LLTP,
             local_bytes=0,
             debug_label=name or "comm",
+            axis="tp",
         )
         return reduction_time
 
@@ -494,6 +495,8 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type is None:
             raise ValueError("gemm_type is required for tensor-context hybrid forward GEMM")
         
+        axis_hint = None
+
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             gemm_time = self.getGEMMTime(shard_m, k, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
@@ -503,16 +506,19 @@ class TimeCalculationLLM(TimeCalculation):
             total_bytes = self.get_kv_size_bytes()  / self.tp # each tp group holds a tp shard of kv for each cp group
             kind = "all_gather"
             participants = self.cp # all gather K V for each cp group
+            axis_hint = "cp"
         elif gemm_type == GemmType.OUT_PROJ:
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision.activations * shard_m * n)
             kind = "reduce_scatter"
             participants = self.tp # reduce scatter output activation for each tp group
+            axis_hint = "tp"
         elif gemm_type == GemmType.FFN2:  # row wise
             gemm_time = self.getGEMMTime(shard_m, shard_k, n, name)[0]
             total_bytes = math.ceil(self.precision.activations * shard_m * n)
             kind = "reduce_scatter"
             participants = self.tp  # reduce scatter output activation for each tp group
+            axis_hint = "tp"
         elif gemm_type == GemmType.FFN1:  # column wise
             gemm_time = self.getGEMMTime(shard_m, k, shard_n, name)[0]
         else:
@@ -527,6 +533,7 @@ class TimeCalculationLLM(TimeCalculation):
             ll=self.LLTP,
             local_bytes=0,
             debug_label=name or "comm",
+            axis=axis_hint,
         )
         return gemm_time, reduction_time, total_bytes
     def _tensor_context_hybrid_gemm_backward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
@@ -565,12 +572,15 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type is None:
             raise ValueError("gemm_type is required for tensor-context hybrid backward GEMM")
         
+        axis_hint = None
+
         if gemm_type == GemmType.ATTENTION_SCORE:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name, disable_overhead=True)[0] * batch / max(1, self.tp) + self.O
             total_bytes = self.precision.grad_communication * k * n * batch * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
             kind = "reduce_scatter"
             participants = self.cp
+            axis_hint = "cp"
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name)[0] * batch / max(1, self.tp)
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name)[0] * batch / max(1, self.tp)
@@ -580,22 +590,25 @@ class TimeCalculationLLM(TimeCalculation):
             total_bytes = math.ceil(self.precision.grad_communication * shard_m * k)
             kind = "reduce_scatter"
             participants = self.tp
+            axis_hint = "tp"
         elif gemm_type == GemmType.OUT_PROJ:
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
             total_bytes = self.get_kv_size_bytes() / self.tp
             kind = "all_gather"
             participants = self.cp
+            axis_hint = "cp"
         elif gemm_type == GemmType.FFN2:  # row wise
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
         elif gemm_type == GemmType.FFN1:  # column wise
-            
+
             grad_time_act = self.getGEMMTime(shard_m, shard_n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, shard_m, shard_n, name)[0]
             total_bytes = math.ceil(self.precision.grad_communication * shard_m * k)
             kind = "reduce_scatter"
             participants = self.tp
+            axis_hint = "tp"
         elif gemm_type == GemmType.LINEAR_SOFTMAX:
             grad_time_act = self.getGEMMTime(shard_m, n, shard_k, name)[0]
             grad_time_wt = self.getGEMMTime(shard_k, shard_m, n, name)[0]
@@ -614,6 +627,7 @@ class TimeCalculationLLM(TimeCalculation):
             ll=self.LLTP,
             local_bytes=0,
             debug_label=name or "comm",
+            axis=axis_hint,
         )
         return gemm_time, reduction_time, total_bytes
     def _tensor_parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
@@ -793,6 +807,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLTP,
                 local_bytes=0,
                 debug_label=name or "comm",
+                axis="cp",
             )
 
         return gemm_time, reduction_time, total_bytes
@@ -845,6 +860,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLTP,
                 local_bytes=0,
                 debug_label=name or "comm",
+                axis="cp",
             )
         return gemm_time, reduction_time, total_bytes
     
@@ -1128,6 +1144,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLTP,
                 local_bytes=0,
                 debug_label="layernorm_f_all_gather",
+                axis="tp",
             )
         else:
             reduction_time = 0.0
@@ -1164,6 +1181,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLTP,
                 local_bytes=0,
                 debug_label="layernorm_b_all_gather",
+                axis="tp",
             )
 
         else:
@@ -1286,6 +1304,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLD,
                 local_bytes=0.0,
                 debug_label="dp_zero_gradients",
+                axis="dp",
             )
 
             gather_time = 0.0
@@ -1299,6 +1318,7 @@ class TimeCalculationLLM(TimeCalculation):
                     ll=self.LLD,
                     local_bytes=0.0,
                     debug_label="dp_zero_param_gather_zero2",
+                    axis="dp",
                 )
             if self.debug:
                 print(f"apply_grad_time (ZeRO-{self.zero_stage}): {apply_grad_time}")
@@ -1317,6 +1337,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLD,
                 local_bytes=0.0,
                 debug_label="qkv_proj reduction",
+                axis="dp",
             )
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
 
@@ -1329,6 +1350,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLD,
                 local_bytes=0.0,
                 debug_label="output_proj reduction",
+                axis="dp",
             )
             apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
 
@@ -1342,6 +1364,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLD,
                 local_bytes=0.0,
                 debug_label="ffn1 reduction",
+                axis="dp",
             )
             apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
 
@@ -1354,6 +1377,7 @@ class TimeCalculationLLM(TimeCalculation):
                 ll=self.LLD,
                 local_bytes=0.0,
                 debug_label="ffn2 reduction",
+                axis="dp",
             )
             apply_grad_time += self.apply_grad(Dim0=intermediate_size, Dim1=d, name="ffn2 reduction")
 

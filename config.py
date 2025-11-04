@@ -354,6 +354,7 @@ class NetworkDimensionLayout:
     collective_override: Dict[str, str] = field(default_factory=dict)
     parallelisms: Tuple[str, ...] = field(default_factory=tuple)
     energy_per_bit: float = 0.0
+    faulty_links: Tuple[Tuple[int, int, float], ...] = field(default_factory=tuple)
 
     @classmethod
     def from_raw(
@@ -475,6 +476,51 @@ class NetworkDimensionLayout:
             expected_product=computed_product,
         )
 
+        faulty_links_raw = raw.get("faulty_links", [])
+        faulty_links: List[Tuple[int, int, float]] = []
+        if faulty_links_raw:
+            if not isinstance(faulty_links_raw, Sequence) or isinstance(faulty_links_raw, (str, bytes)):
+                raise ValueError(
+                    f"network dimension '{label}' faulty_links must be a sequence of [src, dst, weight] entries"
+                )
+            for idx, entry in enumerate(faulty_links_raw):
+                if (
+                    not isinstance(entry, Sequence)
+                    or isinstance(entry, (str, bytes))
+                    or len(entry) != 3
+                ):
+                    raise ValueError(
+                        f"network dimension '{label}' faulty_links[{idx}] must be a three-item sequence [src, dst, weight]"
+                    )
+                src_raw, dst_raw, weight_raw = entry
+                try:
+                    src = int(src_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"network dimension '{label}' faulty_links[{idx}][0] must be an integer endpoint"
+                    ) from exc
+                try:
+                    dst = int(dst_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"network dimension '{label}' faulty_links[{idx}][1] must be an integer endpoint"
+                    ) from exc
+                if src < 0 or dst < 0:
+                    raise ValueError(
+                        f"network dimension '{label}' faulty_links[{idx}] endpoints must be >= 0"
+                    )
+                try:
+                    weight = float(weight_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"network dimension '{label}' faulty_links[{idx}][2] must be a numeric reliability weight"
+                    ) from exc
+                if weight < 0.0 or weight > 1.0:
+                    raise ValueError(
+                        f"network dimension '{label}' faulty_links[{idx}] weight must be between 0.0 and 1.0"
+                    )
+                faulty_links.append((src, dst, weight))
+
         return cls(
             id=dim_id,
             label=label,
@@ -486,6 +532,7 @@ class NetworkDimensionLayout:
             collective_override=collective_override,
             parallelisms=tuple(normalized_parallelisms),
             energy_per_bit=energy_per_bit,
+            faulty_links=tuple(faulty_links),
         )
 
     @property

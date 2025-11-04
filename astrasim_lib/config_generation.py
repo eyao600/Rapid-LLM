@@ -121,6 +121,10 @@ def generate_astrasim_configs_from_hw(
     if not dimensions:
         raise ValueError("Hardware config is missing network dimensions required for AstraSim integration.")
 
+    exec_backend = getattr(hw_obj, "execution_backend", None)
+    astra_cfg = getattr(exec_backend, "astra", None) if exec_backend else None
+    astra_mode = str(getattr(astra_cfg, "mode", "") or "").strip().lower()
+
     sch_config = getattr(hw_obj, "sch_config", None)
     def _safe_int(value: Any, default: int = 1) -> int:
         try:
@@ -146,9 +150,9 @@ def generate_astrasim_configs_from_hw(
     allowed_axes = set(axis_sizes.keys()) if axes_filter else None
     # print(f"Allowed axes: {allowed_axes}")
     # print(f"Axes sizes: {axis_sizes}")
-    dim_infos: List[Tuple[Any, List[str], int]] = []
+    dim_infos: List[Tuple[Any, List[str], int, int]] = []
     # print(f"Filter: {axes_filter}")
-    for dim in dimensions:
+    for dim_idx, dim in enumerate(dimensions):
         axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
         # print(f"All axes for dimension {dim.label}: {axes}")
         if allowed_axes is not None and axes_filter:
@@ -163,44 +167,74 @@ def generate_astrasim_configs_from_hw(
                     "Supported axes are tp, cp, lp, dp."
                 )
             effective *= axis_sizes[axis]
-        dim_infos.append((dim, axes, effective))
+        dim_infos.append((dim, axes, effective, dim_idx))
 
-    active_dim_indices = [idx for idx, (dim, _, _) in enumerate(dim_infos) if int(getattr(dim, "size", 0)) > 1]
+    active_dim_indices = [
+        dim_idx
+        for dim, _, _, dim_idx in dim_infos
+        if int(getattr(dim, "size", 0) or 0) > 1
+    ]
+    allowed_fault_dim_indices: set[int] = set()
     if active_dim_indices:
         last_active_idx = active_dim_indices[-1]
+        if astra_mode in {"full_astrasim_hierarchical", "hybrid"}:
+            allowed_fault_dim_indices.add(0)
+            allowed_fault_dim_indices.add(last_active_idx)
+        else:
+            allowed_fault_dim_indices.add(last_active_idx)
         dp_in_active = False
-        for idx, (dim, axes, _) in enumerate(dim_infos):
-            if "dp" in axes:
-                if idx != last_active_idx:
-                    raise ValueError(
-                        f"Data-parallel axis must be assigned to the last active network dimension. "
-                        f"Dimension '{dim.label}' (index {idx}) includes 'dp', but last active dimension index is {last_active_idx}."
-                    )
-                dp_in_active = True
+        if axis_sizes.get("dp", 1) > 1:
+            for dim, axes, _, dim_idx in dim_infos:
+                if "dp" in axes:
+                    if dim_idx != last_active_idx:
+                        raise ValueError(
+                            f"Data-parallel axis must be assigned to the last active network dimension. "
+                            f"Dimension '{dim.label}' (index {dim_idx}) includes 'dp', but last active dimension index is {last_active_idx}."
+                        )
+                    dp_in_active = True
         if axis_sizes.get("dp", 1) > 1 and not dp_in_active:
             raise ValueError(
                 "Hardware config declares dp > 1, but no network dimension with size > 1 includes the 'dp' axis."
             )
+    else:
+        if any(getattr(dim, "faulty_links", ()) for dim, _, _, _ in dim_infos):
+            raise ValueError(
+                "Faulty links require at least one active (size > 1) network dimension."
+            )
 
+    if allowed_fault_dim_indices:
+        valid_indices = {idx for idx in allowed_fault_dim_indices if 0 <= idx < len(dimensions)}
+        for dim, _, _, dim_idx in dim_infos:
+            if getattr(dim, "faulty_links", ()):
+                if dim_idx not in valid_indices:
+                    raise ValueError(
+                        f"Faulty links for dimension '{dim.label}' (index {dim_idx}) are only permitted on "
+                        f"dimension indices {sorted(valid_indices)} for mode '{astra_mode or 'unspecified'}'."
+                    )
     target = int(npus_count)
+    
     axes_needed: List[str] = []
     remaining = target
+    
     for axis in axis_order_preference:
         size = axis_sizes.get(axis, 1)
+        
         if size <= 1:
             continue
+        
         if remaining % size == 0:
             axes_needed.append(axis)
             remaining //= size
+    
     if remaining != 1:
         raise ValueError(
             f"Unable to map requested npus_count={target} to network axes {axis_sizes}."
         )
 
     axes_needed_set = set(axes_needed)
-    selected_dims: List[Tuple[Any, List[str], int]] = []
+    selected_dims: List[Tuple[Any, List[str], int, int]] = []
     accumulated = 1
-    for dim, axes, _effective in dim_infos:
+    for dim, axes, _effective, dim_idx in dim_infos:
         selected_axes: List[str] = []
         size_contrib = 1
         for axis in axes:
@@ -211,14 +245,14 @@ def generate_astrasim_configs_from_hw(
             continue
         axes_needed_set.difference_update(selected_axes)
         accumulated *= size_contrib
-        selected_dims.append((dim, selected_axes, size_contrib))
+        selected_dims.append((dim, selected_axes, size_contrib, dim_idx))
     if axes_needed_set:
         raise ValueError(
             f"Requested npus_count={target} requires axes {axes_needed} but no network dimension covers {axes_needed_set}."
         )
     if accumulated != target:
         raise ValueError(
-            f"Selected network dimensions {[d.label for d, _, _ in selected_dims]} "
+            f"Selected network dimensions {[d.label for d, _, _, _ in selected_dims]} "
             f"describe {accumulated} NPUs but simulation expects {target} ranks."
         )
 
@@ -227,7 +261,7 @@ def generate_astrasim_configs_from_hw(
     bw_list: List[float] = []
     lat_list: List[float] = []
 
-    for dim, axes_selected, product_size in selected_dims:
+    for dim, axes_selected, product_size, _ in selected_dims:
         topo = _normalize_topology_name(dim.topology_type)
         size = product_size
         if topo == "Ring" and size <= 2:
@@ -239,7 +273,7 @@ def generate_astrasim_configs_from_hw(
         bw_list.append(round(_gbps_from_bps(effective_bw), 6))
         lat_list.append(round(_ns_from_s(latency_s), 3))
 
-    signature_parts = [str(size) for _dim, _axes, size in selected_dims]
+    signature_parts = [str(size) for _dim, _axes, size, _ in selected_dims]
     dim_signature = "_".join(signature_parts) if signature_parts else f"{target}"
 
     net_yaml = os.path.join(out_dir, f"network_analytical_{dim_signature}.yml")
@@ -257,8 +291,32 @@ def generate_astrasim_configs_from_hw(
         f"latency: [ {lat_str} ]   # ns\n"
     )
 
+    faulty_links_tuple: Tuple[Tuple[int, int, float], ...] = tuple()
+    if selected_dims:
+        dims_with_faults = [
+            (dim_idx, getattr(dim, "faulty_links", ()))
+            for dim, _axes, _size, dim_idx in selected_dims
+            if getattr(dim, "faulty_links", ())
+        ]
+        if dims_with_faults:
+            dims_with_faults.sort(key=lambda item: item[0])
+            _, faulty_links_tuple = dims_with_faults[-1]
+            faulty_links_tuple = tuple(faulty_links_tuple)
+            fault_entries = [
+                f"[{src}, {dst}, {float(weight):g}]"
+                for src, dst, weight in faulty_links_tuple
+            ]
+            faulty_links_str = f"[{', '.join(fault_entries)}]"
+            net_content += f"faulty_links: {faulty_links_str}\n"
+
     os.makedirs(os.path.dirname(net_yaml), exist_ok=True)
-    cache_key = (tuple(topo_list), tuple(npus_list), tuple(bw_list), tuple(lat_list))
+    cache_key = (
+        tuple(topo_list),
+        tuple(npus_list),
+        tuple(bw_list),
+        tuple(lat_list),
+        faulty_links_tuple,
+    )
     cached_path = _NET_YAML_CACHE.get(cache_key)
     need_write = True
     if cached_path and os.path.exists(cached_path):
@@ -277,10 +335,9 @@ def generate_astrasim_configs_from_hw(
         os.replace(tmp_path, net_yaml)
     _NET_YAML_CACHE[cache_key] = net_yaml
 
-    exec_backend = getattr(hw_obj, "execution_backend", None)
-    if exec_backend and exec_backend.astra:
-        coll = exec_backend.astra.collectives
-        sys_opts = getattr(exec_backend.astra, "sys_options", None)
+    if astra_cfg:
+        coll = astra_cfg.collectives
+        sys_opts = getattr(astra_cfg, "sys_options", None)
         default_ag = coll.all_gather
         default_ar = coll.all_reduce
         default_rs = coll.reduce_scatter
@@ -307,7 +364,7 @@ def generate_astrasim_configs_from_hw(
     rs_impl: List[str] = []
     a2a_impl: List[str] = []
 
-    for (dim, axes, _), topo_name in zip(selected_dims, topo_list):
+    for (dim, axes, _, _), topo_name in zip(selected_dims, topo_list):
         ag_impl.append(_collective_for_dimension(dim, topo_name, "all-gather", default_ag))
         ar_impl.append(_collective_for_dimension(dim, topo_name, "all-reduce", default_ar))
         rs_impl.append(_collective_for_dimension(dim, topo_name, "reduce-scatter", default_rs))

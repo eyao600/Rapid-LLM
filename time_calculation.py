@@ -27,18 +27,18 @@ class NetworkModel:
         self._roofline = roofline_cb
         self._astra_policy = astra_policy or "analytical"
 
-    def _astra_collective(self, kind: str, participants: int, size_bytes: int) -> float:
+    def _astra_collective(self, kind: str, participants: int, size_bytes: int, axis: Optional[str] = None) -> float:
         part = int(participants)
         if part <= 1 or size_bytes <= 0:
             return 0.0
         byte_count = int(math.ceil(size_bytes))
+        axes_filter = [str(axis).lower()] if axis else None
         _, max_sec = run_cache_astrasim(
             self.hw_config,
             comm=kind,
             npus_count=part,
             size_bytes=byte_count,
-            astra_config_dir="./astra_cache",
-            cache_path="./astra_cache/cache.json",
+            axes_filter=axes_filter,
         )
         return float(max_sec)
 
@@ -54,6 +54,7 @@ class NetworkModel:
         local_bytes: float = 0.0,
         local_ops: float = 0.0,
         debug_label: str = "",
+        axis: Optional[str] = None,
     ) -> float:
         if size_bytes <= 0:
             return 0.0
@@ -76,7 +77,8 @@ class NetworkModel:
             if kind in collective_ops or kind == "pipeline":
                 # Pipeline uses 2 NPUs for point-to-point, others use part
                 npus = 2 if kind == "pipeline" else part
-                network_time = self._astra_collective(kind, npus, network_bytes)
+                axis_filter = None if kind == "pipeline" else axis
+                network_time = self._astra_collective(kind, npus, network_bytes, axis_filter)
             else:
                 raise ValueError(f"Unsupported collective operation: {kind}")
         else:

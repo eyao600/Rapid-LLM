@@ -1567,19 +1567,26 @@ def run_astra_simulation_only_onepath(
 
         # Run AstraSim simulation on forward graph (cached via manifest)
         print(f"[AstraSim] Executing forward simulation with {rank_count} ranks...")
-        fwd_times, fwd_total = run_cache_astrasim(
-            time_calc_obj.hw_config,
-            comm="graph",
-            npus_count=rank_count,
-            size_bytes=0,
-            astra_config_dir="./astra_cache",
-            cache_path="./astra_cache/cache.json",
-            manifest_json_path=fwd_manifest,
-            workload_prefix=fwd_et_prefix,
-            comm_group_json=comm_groups_path,
-            axes_filter=axes_filter,
-            files=astra_configs,
-        )
+        cache_override_env = os.environ.pop("ASTRA_CACHE_DIR", None)
+        local_cache_dir = work_dir
+        local_cache_path = os.path.join(work_dir, "cache.json")
+        try:
+            fwd_times, fwd_total = run_cache_astrasim(
+                time_calc_obj.hw_config,
+                comm="graph",
+                npus_count=rank_count,
+                size_bytes=0,
+                astra_config_dir=local_cache_dir,
+                cache_path=local_cache_path,
+                manifest_json_path=fwd_manifest,
+                workload_prefix=fwd_et_prefix,
+                comm_group_json=comm_groups_path,
+                axes_filter=axes_filter,
+                files=astra_configs,
+            )
+        finally:
+            if cache_override_env is not None:
+                os.environ["ASTRA_CACHE_DIR"] = cache_override_env
 
 
         conversion_and_sim_time = time.time() - astrasim_start
