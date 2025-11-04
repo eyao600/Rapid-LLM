@@ -33,6 +33,7 @@ If uv is used, make sure to use `uv run` instead of `python` to execute python s
 - `git submodule update --remote -- astra-sim`
 - `ASTRA_SIM=$(realpath ./astra-sim)`
 - `cd ${ASTRA_SIM}`
+- `git submodule update --remote -- extern/network_backend/analytical`
 - `./build/astra_analytical/build.sh`
 - `cd ..`
 

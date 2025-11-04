@@ -1135,7 +1135,7 @@ class Graph:
                         print("child {}  ready at time {} ".format(child.name, time))
 
             if isinstance(event, Node):
-                GPU_list[event.hw_id] = True
+                GPU_list[int(event.hw_id)] = True
 
                 
 
@@ -1157,7 +1157,7 @@ class Graph:
                     ready_list.remove(event)
 
                 elif isinstance(event, Node): 
-                    if GPU_list[event.hw_id] == True:
+                    if GPU_list[int(event.hw_id)] == True:
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
                         event.scheduled = True
@@ -1165,7 +1165,7 @@ class Graph:
                         if debug:
                             print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
                         counter = counter + 1
-                        GPU_list[event.hw_id] = False
+                        GPU_list[int(event.hw_id)] = False
                         ready_list.remove(event)
                 elif isinstance(event, Edge): 
                     new_time = time + event.duration
@@ -1436,20 +1436,20 @@ class Graph:
                         print("child {}  ready at time {} ".format(child.name, time))
 
             if isinstance(event, Node):
-                GPU_list[event.hw_id] = True
+                GPU_list[int(event.hw_id)] = True
                 is_transformer_block = _is_transformer_block(event) #TODO: embedding and softmax layers
                 if mode == "training":
                     if not event.fwd:
                         if is_transformer_block:
-                            memory_snapshot.release_activation(event.hw_id, event, time)
+                            memory_snapshot.release_activation(int(event.hw_id), event, time)
                     elif event.fwd:
                         if is_transformer_block:
-                            memory_snapshot.allocate_activation(event.hw_id, event, time)
+                            memory_snapshot.allocate_activation(int(event.hw_id), event, time)
                 elif mode == "inference":
                     if event.fwd:
                         if is_transformer_block:
-                            memory_snapshot.allocate_activation(event.hw_id, event, time)
-                            memory_snapshot.release_activation(event.hw_id, event, time)
+                            memory_snapshot.allocate_activation(int(event.hw_id), event, time)
+                            memory_snapshot.release_activation(int(event.hw_id), event, time)
 
                 
             for event in ready_list[:]:
@@ -1468,7 +1468,7 @@ class Graph:
                     ready_list.remove(event)
 
                 elif isinstance(event, Node): 
-                    if GPU_list[event.hw_id] == True:
+                    if GPU_list[int(event.hw_id)] == True:
                         new_time = time + event.duration
                         heappush(event_queue, (new_time, counter, event))
                         event.scheduled = True
@@ -1476,7 +1476,7 @@ class Graph:
                         if debug:
                             print("{}.{} enqueued at time {} at device {}".format(event.name, event.op_id, time, event.hw_id))
                         counter = counter + 1
-                        GPU_list[event.hw_id] = False
+                        GPU_list[int(event.hw_id)] = False
                         ready_list.remove(event)
                 elif isinstance(event, Edge): 
                     new_time = time + event.duration
