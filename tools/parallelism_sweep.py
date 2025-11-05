@@ -88,6 +88,9 @@ REPORT_OUTPUT_PATH = "tools/parallelism_sweep.tsv"
 # AstraSim cache handling within DeepFlow (mirrors run_perf default options).
 ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWRITE
 
+# Plotting behaviour toggles
+MEM_AWARE_FILTER = True  # When True, skip memory-violating configurations in plots.
+
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
 MAX_WORKERS = 16
 
@@ -508,11 +511,18 @@ def plot_results(results, output_path):
         print("No successful configurations to plot.", file=sys.stderr)
         return
 
+    plot_entries = results
+    if MEM_AWARE_FILTER:
+        plot_entries = [item for item in results if not item.get("memory_exceeded", False)]
+        if not plot_entries:
+            print("Warning: all configurations violate memory limits; skipping plot.", file=sys.stderr)
+            return
+
     metric_key = "runtime" if PLOT_METRIC.lower() == "runtime" else "performance"
 
     # Build tidy frame (include GPU exponent)
     rows = []
-    for i, item in enumerate(results):
+    for i, item in enumerate(plot_entries):
         p = item["parallelism"]
         ng = int(item["num_gpus"])
         rows.append({
@@ -580,7 +590,7 @@ def plot_results(results, output_path):
 
 
     # Best runtime star — place at the matching exponent category index
-    best = min(results, key=lambda it: it["runtime"])
+    best = min(plot_entries, key=lambda it: it["runtime"])
     best_exp = _gpu_exp(int(best["num_gpus"]))
     best_idx = order.index(best_exp)
     best_y = float(best[metric_key])
