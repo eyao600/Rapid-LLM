@@ -12,6 +12,8 @@ jitter to avoid overlap.
 
 from __future__ import print_function
 
+import argparse
+import ast
 import copy
 import itertools
 import math
@@ -33,6 +35,12 @@ import config
 from time_calculation_LLM import TimeCalculationLLM
 from LLM_util import process_gemm_shapes
 
+import seaborn as sns
+import numpy as np
+import pandas as pd
+import math
+import numpy as np
+from matplotlib.patches import Polygon
 
 # -----------------------------------------------------------------------------
 # Global configuration knobs (no CLI)
@@ -87,6 +95,68 @@ MAX_WORKERS = 96
 # -----------------------------------------------------------------------------
 # Helper utilities
 # -----------------------------------------------------------------------------
+
+def add_rgb_ternary_legend(ax,
+                           corner_labels=("R = log2(tp+cp)",
+                                          "G = log2(lp)",
+                                          "B = log2(dp)"),
+                           gamma=0.85,
+                           inset_xywh=(0.72, 0.58, 0.24, 0.24),  # Axes fraction: x, y, w, h
+                           n=120):
+    """
+    Draw a tiny triangular legend that shows how the RGB mix works.
+    - Uses barycentric blending inside an equilateral triangle.
+    - 'gamma' should match your color gamma used in the scatter.
+    - inset_xywh is (x0,y0,w,h) in axes-relative coords.
+    """
+    # Inset axis
+    iax = ax.inset_axes(inset_xywh, transform=ax.transAxes)
+    iax.set_aspect("equal")
+    iax.set_axis_off()
+
+    # Equilateral triangle vertices (R, G, B corners)
+    A = np.array([0.0, 0.0])                        # R corner
+    B = np.array([1.0, 0.0])                        # G corner
+    C = np.array([0.5, math.sqrt(3)/2.0])           # B corner
+
+    # Sample interior with barycentric coords r,g,b (r+g+b=1)
+    xs, ys, cols = [], [], []
+    for i in range(n + 1):
+        for j in range(n + 1 - i):
+            r = i / n
+            g = j / n
+            b = 1.0 - r - g
+            p = r * A + g * B + b * C
+            # apply same gamma tweak used in your plot colors
+            rr = r ** gamma
+            gg = g ** gamma
+            bb = b ** gamma
+            xs.append(p[0]); ys.append(p[1]); cols.append((rr, gg, bb))
+
+    # iax.scatter(xs, ys, s=2, c=cols, edgecolors="none")
+    iax.add_patch(Polygon([A, B, C], facecolor="none", edgecolor="black", linewidth=1))
+
+    # Corner labels
+    iax.text(A[0]-0.06, A[1]-0.04, corner_labels[0], ha="right", va="top", fontsize=8)
+    iax.text(B[0]+0.06, B[1]-0.04, corner_labels[1], ha="left",  va="top", fontsize=8)
+    iax.text(C[0],      C[1]+0.06, corner_labels[2], ha="center", va="bottom", fontsize=8)
+
+    # Optional tick marks (25/50/75%) along edges (comment out if you want it cleaner)
+    for t in (0.25, 0.5, 0.75):
+        # Edge AB (vary r vs g, b=0)
+        p = (1-t) * A + t * B
+        iax.plot([p[0]], [p[1]], marker="|", color="black", ms=6)
+        # Edge BC (vary g vs b, r=0)
+        p = (1-t) * B + t * C
+        iax.plot([p[0]], [p[1]], marker="_", color="black", ms=6)
+        # Edge CA (vary b vs r, g=0)
+        p = (1-t) * C + t * A
+        iax.plot([p[0]], [p[1]], marker="|", color="black", ms=6)
+
+    # Tiny caption (how channels were normalized)
+    iax.text(0.5, -0.18, "Each channel min–max normalized\nthen gamma-adjusted",
+             ha="center", va="top", fontsize=7, transform=iax.transAxes)
+
 
 def read_yaml(path):
     with open(path, "r") as handle:
@@ -143,6 +213,38 @@ def make_temp_hw_config(base_hw_dict, parallel_settings):
             os.unlink(tmp_file.name)
         except Exception:
             pass
+
+def _rgb_from_parallelism(entries, gamma: float = 0.85):
+    """
+    Build per-point RGBA colors using:
+      R = log2(tp+cp), G = log2(lp), B = log2(dp)
+    Each channel is min-max normalized over the dataset, then gamma-adjusted.
+    """
+    tps = np.array([max(1, int(e["parallelism"].get("tp", 1))) for e in entries], dtype=float)
+    cps = np.array([max(1, int(e["parallelism"].get("cp", 1))) for e in entries], dtype=float)
+    dps = np.array([max(1, int(e["parallelism"].get("dp", 1))) for e in entries], dtype=float)
+    lps = np.array([max(1, int(e["parallelism"].get("lp", 1))) for e in entries], dtype=float)
+
+    r_raw = np.log2(tps + cps)
+    g_raw = np.log2(lps)
+    b_raw = np.log2(dps)
+
+    def _norm(x):
+        xmin, xmax = float(np.min(x)), float(np.max(x))
+        if not np.isfinite(xmin) or not np.isfinite(xmax) or xmax <= xmin:
+            return np.zeros_like(x)
+        y = (x - xmin) / (xmax - xmin)
+        if gamma and gamma != 1.0:
+            y = np.power(y, gamma)
+        return y
+
+    r = _norm(r_raw)
+    g = _norm(g_raw)
+    b = _norm(b_raw)
+
+    # RGBA with slight transparency to reduce overdraw
+    return np.stack([r, g, b, np.full_like(r, 0.9)], axis=1)
+
 
 
 def gpu_peak_flops(hw_config) -> float:
@@ -319,6 +421,61 @@ def write_report(results, path):
             handle.write("\t".join(row) + "\n")
 
 
+def _parse_float(value: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def load_results_from_report(path: str) -> List[Dict[str, object]]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"No report found at {path}")
+
+    results: List[Dict[str, object]] = []
+    with open(path, "r") as handle:
+        header = handle.readline()
+        if not header:
+            return results
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) < 10:
+                print(f"Warning: skipping malformed row in report: {line}", file=sys.stderr)
+                continue
+            try:
+                parallelism = ast.literal_eval(parts[9])
+            except (SyntaxError, ValueError) as exc:
+                print(f"Warning: failed to parse parallelism '{parts[9]}': {exc}", file=sys.stderr)
+                continue
+            entry = {
+                "num_gpus": int(parts[0]),
+                "runtime": _parse_float(parts[1]),
+                "performance": _parse_float(parts[2]),
+                "total_flops": _parse_float(parts[3]),
+                "achieved_flops": _parse_float(parts[4]),
+                "peak_flops": _parse_float(parts[5]),
+                "mfu": _parse_float(parts[6]),
+                "memory_exceeded": str(parts[7]).strip().lower() == "true",
+                "memory_violation_gb": _parse_float(parts[8]),
+                "parallelism": parallelism,
+            }
+            results.append(entry)
+    return results
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="DeepFlow parallelism sweep utility.")
+    parser.add_argument(
+        "--plot_only",
+        action="store_true",
+        help="Skip evaluation and only regenerate plots from the existing TSV report.",
+    )
+    return parser.parse_args()
+
+
 def jitter_positions(gpu_counts, jitter_width):
     jittered = []
     for count in gpu_counts:
@@ -327,69 +484,274 @@ def jitter_positions(gpu_counts, jitter_width):
     return jittered
 
 
+# def plot_results_legacy(results, output_path):
+#     if not results:
+#         print("No successful configurations to plot.", file=sys.stderr)
+#         return
+
+#     random.seed(PLOT_JITTER_SEED)
+#     xs = jitter_positions([item["num_gpus"] for item in results], PLOT_JITTER_WIDTH)
+#     metric_key = "runtime" if PLOT_METRIC.lower() == "runtime" else "performance"
+#     ys = [item[metric_key] for item in results]
+
+#     plt.figure(figsize=(10, 6))
+#     plt.scatter(xs, ys, s=60, alpha=0.7, edgecolors="none")
+
+#     best = min(results, key=lambda item: item["runtime"])
+#     best_x = best["num_gpus"]
+#     best_y = best[metric_key]
+#     plt.scatter([best_x], [best_y], s=180, marker="*", c="red", label="Best runtime")
+
+#     plt.xlabel("Number of GPUs")
+#     if metric_key == "runtime":
+#         plt.ylabel("Runtime (s)")
+#     else:
+#         plt.ylabel("Performance (1 / s)")
+#     plt.xscale("log")
+#     if metric_key == "runtime":
+#         plt.yscale("log")
+#     plt.title("Parallelism sweep")
+#     plt.grid(alpha=0.3)
+#     xticks = sorted(set(item["num_gpus"] for item in results))
+#     plt.xticks(xticks, [str(int(x)) for x in xticks])
+#     plt.legend(loc="best")
+#     plt.tight_layout()
+#     plt.savefig(output_path, dpi=200)
+#     plt.close()
+#     print("Saved scatter plot to {}".format(output_path))
+
+def _gpu_exp(n: int) -> float:
+    """Return log2(num_gpus). Assumes powers of two; will return floats otherwise."""
+    return math.log2(float(n))
+
+
 def plot_results(results, output_path):
     if not results:
         print("No successful configurations to plot.", file=sys.stderr)
         return
 
-    random.seed(PLOT_JITTER_SEED)
-    xs = jitter_positions([item["num_gpus"] for item in results], PLOT_JITTER_WIDTH)
     metric_key = "runtime" if PLOT_METRIC.lower() == "runtime" else "performance"
-    ys = [item[metric_key] for item in results]
+
+    # Build tidy frame (include GPU exponent)
+    rows = []
+    for i, item in enumerate(results):
+        p = item["parallelism"]
+        ng = int(item["num_gpus"])
+        rows.append({
+            "row_id": i,
+            "num_gpus": ng,
+            "gpu_exp": _gpu_exp(ng),
+            "tp": int(p.get("tp", 1)),
+            "cp": int(p.get("cp", 1)),
+            "dp": int(p.get("dp", 1)),
+            "lp": int(p.get("lp", 1)),
+            metric_key: float(item[metric_key]),
+        })
+    df = pd.DataFrame(rows)
+
+    # Order categories by exponent (gives even spacing like log2)
+    order = sorted(df["gpu_exp"].unique())
+    df["gpu_exp_cat"] = pd.Categorical(df["gpu_exp"], categories=order, ordered=True)
+
+    # --- Per-point RGB colors: R=log2(tp+cp), G=log2(lp), B=log2(dp) ---
+    tps = df["tp"].to_numpy(dtype=float)
+    cps = df["cp"].to_numpy(dtype=float)
+    dps = df["dp"].to_numpy(dtype=float)
+    lps = df["lp"].to_numpy(dtype=float)
+
+    r_raw = np.log2(tps + cps)
+    g_raw = np.log2(lps)
+    b_raw = np.log2(dps)
+
+    def _norm(x, gamma=0.85):
+        x = x.astype(float)
+        xmin, xmax = float(np.min(x)), float(np.max(x))
+        if not np.isfinite(xmin) or not np.isfinite(xmax) or xmax <= xmin:
+            y = np.zeros_like(x)
+        else:
+            y = (x - xmin) / (xmax - xmin)
+        return np.power(y, gamma) if gamma and gamma != 1.0 else y
+
+    r = _norm(r_raw)
+    g = _norm(g_raw)
+    b = _norm(b_raw)
+    a = np.full_like(r, 0.9)
+
+    # Palette: unique color per row via hue="row_id"
+    palette = {rid: (float(r[i]), float(g[i]), float(b[i]), float(a[i]))
+               for i, rid in enumerate(df["row_id"])}
 
     plt.figure(figsize=(10, 6))
-    plt.scatter(xs, ys, s=60, alpha=0.7, edgecolors="none")
+    ax = sns.swarmplot(
+        data=df,
+        x="gpu_exp_cat",
+        y=metric_key,
+        hue="row_id",
+        palette=palette,   # per-point RGBA
+        size=3.75,
+        linewidth=0,
+        dodge=False,
+        legend=False
+    )
+    # add_rgb_ternary_legend(
+    #     ax,
+    #     corner_labels=("R = log2(tp+cp)", "G = log2(lp)", "B = log2(dp)"),
+    #     gamma=0.85,                      # match your _rgb_from_parallelism gamma
+    #     inset_xywh=(0.70, 0.50, 0.26, 0.26)  # tweak position/size to taste
+    # )
 
-    best = min(results, key=lambda item: item["runtime"])
-    best_x = best["num_gpus"]
-    best_y = best[metric_key]
-    plt.scatter([best_x], [best_y], s=180, marker="*", c="red", label="Best runtime")
 
-    plt.xlabel("Number of GPUs")
+    # Best runtime star — place at the matching exponent category index
+    best = min(results, key=lambda it: it["runtime"])
+    best_exp = _gpu_exp(int(best["num_gpus"]))
+    best_idx = order.index(best_exp)
+    best_y = float(best[metric_key])
+    ax.scatter([best_idx], [best_y], s=180, marker="*", c="red", zorder=5, label="Best runtime")
+
+    # Labels & scales
+    ax.set_xlabel("Number of GPUs (log2 categories)")
     if metric_key == "runtime":
-        plt.ylabel("Runtime (s)")
+        ax.set_ylabel("Runtime (s)")
+        ax.set_yscale("log")
     else:
-        plt.ylabel("Performance (1 / s)")
-    plt.xscale("log")
-    if metric_key == "runtime":
-        plt.yscale("log")
-    plt.title("Parallelism sweep")
-    plt.grid(alpha=0.3)
-    xticks = sorted(set(item["num_gpus"] for item in results))
-    plt.xticks(xticks, [str(int(x)) for x in xticks])
-    plt.legend(loc="best")
+        ax.set_ylabel("Performance (1 / s)")
+
+    # Tick labels show the REAL GPU count (2**exp) so axis *looks* log2
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([str(int(round(2 ** e))) if float(e).is_integer() else f"2^{e:.2f}"
+                        for e in order])
+
+    ax.set_title("Parallelism sweep – beeswarm on log2(GPUs) categories")
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(loc="best")
+
+    # Reminder of color encoding
+    ax.text(0.99, 0.01,
+            "Color: R=log2(tp+cp), G=log2(lp), B=log2(dp)",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=9, alpha=0.8)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
     plt.close()
-    print("Saved scatter plot to {}".format(output_path))
+    print(f"Saved swarm plot to {output_path}")
 
 
-def plot_mfu(results, output_path):
-    if not results:
-        return
-    random.seed(PLOT_JITTER_SEED)
-    xs = jitter_positions([item["num_gpus"] for item in results], PLOT_JITTER_WIDTH)
-    ys = [item["mfu"] for item in results]
-    plt.figure(figsize=(10, 6))
-    plt.scatter(xs, ys, s=60, alpha=0.7, edgecolors="none")
-    valid = [item for item in results if item["mfu"] == item["mfu"]]
-    if valid:
-        best = max(valid, key=lambda item: item["mfu"])
-        plt.scatter([best["num_gpus"]], [best["mfu"]], s=180, marker="*", c="green", label="Max MFU")
-    plt.xlabel("Number of GPUs")
-    plt.ylabel("MFU")
-    plt.xscale("log")
-    plt.ylim(0.0, 1.05)
-    plt.title("Parallelism sweep - MFU")
-    plt.grid(alpha=0.3)
-    xticks = sorted(set(item["num_gpus"] for item in results))
-    plt.xticks(xticks, [str(int(x)) for x in xticks])
-    if valid:
-        plt.legend(loc="best")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    plt.close()
-    print("Saved MFU scatter plot to {}".format(output_path))
+# def plot_results_categorical(results, output_path):
+#     if not results:
+#         print("No successful configurations to plot.", file=sys.stderr)
+#         return
+
+#     metric_key = "runtime" if PLOT_METRIC.lower() == "runtime" else "performance"
+
+#     # Build a tidy DataFrame for seaborn (categorical x keeps each GPU count together)
+#     df_rows = []
+#     for item in results:
+#         p = item["parallelism"]
+#         df_rows.append({
+#             "num_gpus": int(item["num_gpus"]),
+#             metric_key: float(item[metric_key]),
+#             "tp": int(p.get("tp", 1)),
+#             "cp": int(p.get("cp", 1)),
+#             "dp": int(p.get("dp", 1)),
+#             "lp": int(p.get("lp", 1)),
+#         })
+#     df = pd.DataFrame(df_rows)
+
+#     # Order GPU categories left->right by numeric value
+#     order = sorted(df["num_gpus"].unique())
+#     df["num_gpus_cat"] = pd.Categorical(df["num_gpus"], categories=order, ordered=True)
+
+#     # --- Beeswarm placement ---
+#     plt.figure(figsize=(10, 6))
+#     ax = sns.swarmplot(
+#         data=df,
+#         x="num_gpus_cat",
+#         y=metric_key,
+#         size=5,
+#         color="k",         # temporary (we'll recolor with our RGBs after layout)
+#         linewidth=0,
+#         alpha=0.0          # invisible; we only want the positions it computes
+#     )
+
+#     # Grab the laid-out positions, remove seaborn's collection, and redraw with our colors
+#     if not ax.collections:
+#         print("Warning: swarmplot produced no collections.", file=sys.stderr)
+#         return
+#     coll = ax.collections[0]
+#     offsets = coll.get_offsets()        # Nx2 array (x_index, y_value) in data coords (x is categorical index)
+#     coll.remove()
+
+#     # Compute per-point RGBA colors from parallelism
+#     colors = _rgb_from_parallelism(results, gamma=0.85)
+
+#     # Plot the recolored points at the computed positions
+#     ax.scatter(
+#         offsets[:, 0], offsets[:, 1],
+#         s=60,
+#         c=colors,
+#         edgecolors="none",
+#         zorder=3
+#     )
+
+#     # Global best marker (use category index for x)
+#     best = min(results, key=lambda item: item["runtime"])
+#     best_x_idx = order.index(int(best["num_gpus"]))  # categorical index
+#     best_y = float(best[metric_key])
+#     ax.scatter([best_x_idx], [best_y], s=180, marker="*", c="red", zorder=5, label="Best runtime")
+
+#     # Axes/labels
+#     ax.set_xlabel("Number of GPUs")
+#     if metric_key == "runtime":
+#         ax.set_ylabel("Runtime (s)")
+#         ax.set_yscale("log")
+#     else:
+#         ax.set_ylabel("Performance (1 / s)")
+
+#     # Pretty ticks for categorical axis
+#     ax.set_xticks(range(len(order)))
+#     ax.set_xticklabels([str(x) for x in order])
+
+#     ax.set_title("Parallelism sweep (beeswarm with log-RGB coloring)")
+#     ax.grid(alpha=0.3, axis="y")
+#     ax.legend(loc="best")
+
+#     # Small caption to recall color encoding
+#     ax.text(0.99, 0.01,
+#             "Color channels: R=log2(tp+cp), G=log2(lp), B=log2(dp)",
+#             transform=ax.transAxes, ha="right", va="bottom", fontsize=9, alpha=0.8)
+
+#     plt.tight_layout()
+#     plt.savefig(output_path, dpi=200)
+#     plt.close()
+#     print(f"Saved swarm plot to {output_path}")
+
+
+# def plot_mfu(results, output_path):
+#     if not results:
+#         return
+#     random.seed(PLOT_JITTER_SEED)
+#     xs = jitter_positions([item["num_gpus"] for item in results], PLOT_JITTER_WIDTH)
+#     ys = [item["mfu"] for item in results]
+#     plt.figure(figsize=(10, 6))
+#     plt.scatter(xs, ys, s=60, alpha=0.7, edgecolors="none")
+#     valid = [item for item in results if item["mfu"] == item["mfu"]]
+#     if valid:
+#         best = max(valid, key=lambda item: item["mfu"])
+#         plt.scatter([best["num_gpus"]], [best["mfu"]], s=180, marker="*", c="green", label="Max MFU")
+#     plt.xlabel("Number of GPUs")
+#     plt.ylabel("MFU")
+#     plt.xscale("log")
+#     plt.ylim(0.0, 1.05)
+#     plt.title("Parallelism sweep - MFU")
+#     plt.grid(alpha=0.3)
+#     xticks = sorted(set(item["num_gpus"] for item in results))
+#     plt.xticks(xticks, [str(int(x)) for x in xticks])
+#     if valid:
+#         plt.legend(loc="best")
+#     plt.tight_layout()
+#     plt.savefig(output_path, dpi=200)
+#     plt.close()
+#     print("Saved MFU scatter plot to {}".format(output_path))
 
 
 _GLOBAL_MODEL_CONFIG = None
@@ -442,64 +804,117 @@ def _build_tasks(
 
 
 def main():
+    args = parse_args()
     set_astrasim_cache_mode(ASTRA_CACHE_MODE)
 
-    base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
-    mode = determine_model_mode(MODEL_CONFIG_PATH)
+    results: List[Dict[str, object]] = []
 
-    gpu_axes = list(PARALLELISM_SWEEP.keys())
-    other_axes = list(OTHER_PARALLELISM_OPTIONS.keys())
-    gpu_combos = list(cartesian_product(PARALLELISM_SWEEP))
-    other_combos = list(cartesian_product(OTHER_PARALLELISM_OPTIONS))
-    task_items = _build_tasks(gpu_combos, other_combos)
-    print("Enumerating {} parallelism combinations: {}".format(len(task_items), ", ".join(gpu_axes)))
+    if args.plot_only:
+        try:
+            results = load_results_from_report(REPORT_OUTPUT_PATH)
+        except FileNotFoundError as exc:
+            print(str(exc))
+            return
 
-    results = []
-    skipped_out_of_range = 0
-    skipped_errors = 0
-    error_messages: List[str] = []
-    evaluated = 0
+        if not results:
+            print(f"No entries found in {REPORT_OUTPUT_PATH}; nothing to plot.")
+            return
 
-    filtered_tasks: List[Tuple[Tuple[str, object], ...]] = []
-    for items in task_items:
-        settings = dict(items)
-        num_gpus = total_gpu_count(settings)
-        if GPU_COUNT_MIN <= num_gpus <= GPU_COUNT_MAX:
-            filtered_tasks.append(items)
-        else:
-            skipped_out_of_range += 1
-
-    if not filtered_tasks:
-        print("No configurations within GPU count bounds.")
-        return
-
-    available_cpus = max(1, os.cpu_count() or 1)
-    if MAX_WORKERS is None or MAX_WORKERS <= 0:
-        worker_limit = max(1, available_cpus - 1)
+        best = min(results, key=lambda item: item["runtime"])
+        print(f"Loaded {len(results)} configuration(s) from {REPORT_OUTPUT_PATH}")
+        print("\nBest configuration (lowest runtime):")
+        print("  Parallelism: {}".format(best["parallelism"]))
+        print("  GPUs: {}".format(best["num_gpus"]))
+        print("  Runtime: {:.4f} s".format(best["runtime"]))
+        print("  Performance (1/s): {:.4f}".format(best["performance"]))
+        print("  Total FLOPs: {:.3e}".format(best["total_flops"]))
+        print("  MFU: {:.3f}".format(best["mfu"]))
+        if best["memory_exceeded"]:
+            print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
     else:
-        worker_limit = min(MAX_WORKERS, max(1, available_cpus - 1))
-    worker_count = max(1, worker_limit)
-    print(f"Using {worker_count} worker process(es) (out of {available_cpus} CPUs).")
+        base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
+        mode = determine_model_mode(MODEL_CONFIG_PATH)
 
-    if worker_count > 1 and len(filtered_tasks) > 1:
-        with ProcessPoolExecutor(
-            max_workers=worker_count,
-            initializer=_worker_init,
-            initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
-        ) as executor:
-            futures = {executor.submit(_worker_task, items): items for items in filtered_tasks}
+        gpu_axes = list(PARALLELISM_SWEEP.keys())
+        other_axes = list(OTHER_PARALLELISM_OPTIONS.keys())
+        gpu_combos = list(cartesian_product(PARALLELISM_SWEEP))
+        other_combos = list(cartesian_product(OTHER_PARALLELISM_OPTIONS))
+        task_items = _build_tasks(gpu_combos, other_combos)
+        print("Enumerating {} parallelism combinations: {}".format(len(task_items), ", ".join(gpu_axes)))
+
+        skipped_out_of_range = 0
+        skipped_errors = 0
+        error_messages: List[str] = []
+        evaluated = 0
+
+        filtered_tasks: List[Tuple[Tuple[str, object], ...]] = []
+        for items in task_items:
+            settings = dict(items)
+            num_gpus = total_gpu_count(settings)
+            if GPU_COUNT_MIN <= num_gpus <= GPU_COUNT_MAX:
+                filtered_tasks.append(items)
+            else:
+                skipped_out_of_range += 1
+
+        if not filtered_tasks:
+            print("No configurations within GPU count bounds.")
+            return
+
+        available_cpus = max(1, os.cpu_count() or 1)
+        if MAX_WORKERS is None or MAX_WORKERS <= 0:
+            worker_limit = max(1, available_cpus - 1)
+        else:
+            worker_limit = min(MAX_WORKERS, max(1, available_cpus - 1))
+        worker_count = max(1, worker_limit)
+        print(f"Using {worker_count} worker process(es) (out of {available_cpus} CPUs).")
+
+        if worker_count > 1 and len(filtered_tasks) > 1:
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                initializer=_worker_init,
+                initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+            ) as executor:
+                futures = {executor.submit(_worker_task, items): items for items in filtered_tasks}
+                with tqdm(total=len(filtered_tasks), desc="Evaluating", unit="config") as progress:
+                    for future in as_completed(futures):
+                        progress.update(1)
+                        result = future.result()
+                        settings = result["parallelism"]
+                        num_gpus = total_gpu_count(settings)
+                        if result["status"] != "ok":
+                            skipped_errors += 1
+                            msg = result.get("error") or "unknown error"
+                            error_messages.append(f"{settings}: {msg}")
+                            continue
+                        metrics = result["metrics"]
+                        evaluated += 1
+                        entry = {
+                            "parallelism": settings,
+                            "num_gpus": num_gpus,
+                            "runtime": metrics["runtime"],
+                            "performance": metrics["performance"],
+                            "total_flops": metrics["total_flops"],
+                            "achieved_flops": metrics["achieved_flops"],
+                            "peak_flops": metrics["peak_flops"],
+                            "mfu": metrics["mfu"],
+                            "memory_exceeded": metrics["memory_exceeded"],
+                            "memory_violation_gb": metrics["memory_violation_gb"],
+                        }
+                        results.append(entry)
+        else:
+            model_config_obj = config.parse_config(MODEL_CONFIG_PATH, config_type=mode)
             with tqdm(total=len(filtered_tasks), desc="Evaluating", unit="config") as progress:
-                for future in as_completed(futures):
-                    progress.update(1)
-                    result = future.result()
-                    settings = result["parallelism"]
+                for items in filtered_tasks:
+                    settings = dict(items)
                     num_gpus = total_gpu_count(settings)
-                    if result["status"] != "ok":
+                    progress.update(1)
+                    try:
+                        metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
+                    except Exception as exc:
                         skipped_errors += 1
-                        msg = result.get("error") or "unknown error"
-                        error_messages.append(f"{settings}: {msg}")
+                        error_messages.append(f"{settings}: {exc}")
                         continue
-                    metrics = result["metrics"]
+
                     evaluated += 1
                     entry = {
                         "parallelism": settings,
@@ -514,75 +929,50 @@ def main():
                         "memory_violation_gb": metrics["memory_violation_gb"],
                     }
                     results.append(entry)
-    else:
-        model_config_obj = config.parse_config(MODEL_CONFIG_PATH, config_type=mode)
-        with tqdm(total=len(filtered_tasks), desc="Evaluating", unit="config") as progress:
-            for items in filtered_tasks:
-                settings = dict(items)
-                num_gpus = total_gpu_count(settings)
-                progress.update(1)
-                try:
-                    metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
-                except Exception as exc:
-                    skipped_errors += 1
-                    error_messages.append(f"{settings}: {exc}")
-                    continue
 
-                evaluated += 1
-                entry = {
-                    "parallelism": settings,
-                    "num_gpus": num_gpus,
-                    "runtime": metrics["runtime"],
-                    "performance": metrics["performance"],
-                    "total_flops": metrics["total_flops"],
-                    "achieved_flops": metrics["achieved_flops"],
-                    "peak_flops": metrics["peak_flops"],
-                    "mfu": metrics["mfu"],
-                    "memory_exceeded": metrics["memory_exceeded"],
-                    "memory_violation_gb": metrics["memory_violation_gb"],
-                }
-                results.append(entry)
-
-    total_skipped = skipped_out_of_range + skipped_errors
-    if not results:
-        print(
-            "No valid configurations evaluated ({} skipped: {} out-of-range, {} errors).".format(
-                total_skipped, skipped_out_of_range, skipped_errors
+        total_skipped = skipped_out_of_range + skipped_errors
+        if not results:
+            print(
+                "No valid configurations evaluated ({} skipped: {} out-of-range, {} errors).".format(
+                    total_skipped, skipped_out_of_range, skipped_errors
+                )
             )
+            if error_messages:
+                print("Encountered errors for configurations:")
+                for msg in error_messages:
+                    print(f"  {msg}")
+            return
+
+        best = min(results, key=lambda item: item["runtime"])
+        print(
+            f"Evaluated {evaluated} configuration(s); skipped {total_skipped} "
+            f"(out_of_range={skipped_out_of_range}, errors={skipped_errors})."
         )
         if error_messages:
-            print("Encountered errors for configurations:")
+            print("Some configurations failed:")
             for msg in error_messages:
                 print(f"  {msg}")
+        print("\nBest configuration (lowest runtime):")
+        print("  Parallelism: {}".format(best["parallelism"]))
+        print("  GPUs: {}".format(best["num_gpus"]))
+        print("  Runtime: {:.4f} s".format(best["runtime"]))
+        print("  Performance (1/s): {:.4f}".format(best["performance"]))
+        print("  Total FLOPs: {:.3e}".format(best["total_flops"]))
+        print("  MFU: {:.3f}".format(best["mfu"]))
+        if best["memory_exceeded"]:
+            print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
+
+        try:
+            write_report(results, REPORT_OUTPUT_PATH)
+            print("Wrote detailed report to {}".format(REPORT_OUTPUT_PATH))
+        except Exception as exc:
+            print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
+
+    if not results:
         return
 
-    best = min(results, key=lambda item: item["runtime"])
-    print(
-        f"Evaluated {evaluated} configuration(s); skipped {total_skipped} "
-        f"(out_of_range={skipped_out_of_range}, errors={skipped_errors})."
-    )
-    if error_messages:
-        print("Some configurations failed:")
-        for msg in error_messages:
-            print(f"  {msg}")
-    print("\nBest configuration (lowest runtime):")
-    print("  Parallelism: {}".format(best["parallelism"]))
-    print("  GPUs: {}".format(best["num_gpus"]))
-    print("  Runtime: {:.4f} s".format(best["runtime"]))
-    print("  Performance (1/s): {:.4f}".format(best["performance"]))
-    print("  Total FLOPs: {:.3e}".format(best["total_flops"]))
-    print("  MFU: {:.3f}".format(best["mfu"]))
-    if best["memory_exceeded"]:
-        print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
-
-    try:
-        write_report(results, REPORT_OUTPUT_PATH)
-        print("Wrote detailed report to {}".format(REPORT_OUTPUT_PATH))
-    except Exception as exc:
-        print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
-
     plot_results(results, PLOT_OUTPUT_PATH)
-    plot_mfu(results, PLOT_MFU_OUTPUT_PATH)
+    # plot_mfu(results, PLOT_MFU_OUTPUT_PATH)
 
 
 if __name__ == "__main__":
