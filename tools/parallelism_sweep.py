@@ -53,10 +53,10 @@ MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-405B.yaml"
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
 # Keys should match the entries under the YAML "parallelism" section.
 PARALLELISM_SWEEP = {
-    "tp": [2**i for i in range(0, 9)],
-    "cp": [2**i for i in range(0, 9)],
-    "dp": [2**i for i in range(0, 9)],
-    "lp": [2**i for i in range(0, 9)],
+    "tp": [2**i for i in range(0, 3)],
+    "cp": [2**i for i in range(0, 3)],
+    "dp": [2**i for i in range(0, 3)],
+    "lp": [2**i for i in range(0, 3)],
 }
 
 # Optional knobs that still live inside the parallelism section but do not
@@ -67,8 +67,8 @@ OTHER_PARALLELISM_OPTIONS = {
 
 # GPU count filter: only evaluate combinations whose TP*CP*DP*LP fall inside
 # this inclusive range.
-GPU_COUNT_MIN = 64
-GPU_COUNT_MAX = 1024
+GPU_COUNT_MIN = 16
+GPU_COUNT_MAX = 64
 
 # Select the y-axis metric for the scatter plot and report. Accepted values:
 #   "runtime"     -> plot raw runtime in seconds (lower is better)
@@ -89,7 +89,7 @@ REPORT_OUTPUT_PATH = "tools/parallelism_sweep.tsv"
 ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWRITE
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 96
+MAX_WORKERS = 16
 
 
 # -----------------------------------------------------------------------------
@@ -262,29 +262,23 @@ def gpu_peak_flops(hw_config) -> float:
 
 
 def compute_total_flops(calculator: TimeCalculationLLM) -> float:
-    """Estimate total FLOPs executed for one batch."""
-    batch_size = calculator._effective_transformer_batch()
+    """Estimate total FLOPs executed for one global batch (forward + backward)."""
+    global_batch = getattr(calculator, "batch_size", None)
+    if global_batch is None or global_batch <= 0:
+        global_batch = calculator._effective_transformer_batch()
+    if not global_batch or global_batch <= 0:
+        return float("nan")
+
     vocab_size = calculator.vocab_size
     hidden_dim = calculator.hidden_dim
     seq_len = calculator.seq_len
     num_heads = calculator.num_heads
     kv_heads = calculator.kv_heads
     intermediate_size = calculator.intermediate_size
-    num_SMs = calculator.hw_config.tech_config.core.num_bundles or 1
 
-    transformer_timings, _ = calculator.compute_all_gemm_and_node_times(
-        batch_size,
-        vocab_size,
-        hidden_dim,
-        seq_len,
-        num_heads,
-        kv_heads,
-        intermediate_size,
-        num_SMs,
-    )
     gemm_shapes = process_gemm_shapes(
         calculator,
-        batch_size,
+        global_batch,
         seq_len,
         hidden_dim,
         num_heads,
@@ -308,42 +302,26 @@ def compute_total_flops(calculator: TimeCalculationLLM) -> float:
             return 2.0 * float(m) * float(k) * float(n)
         return 0.0
 
-    fallback_forward = {
-        "qkv_proj": _gemm_flops(gemm_shapes.get("qkv_proj")),
-        "attention_score": _gemm_flops(gemm_shapes.get("attention_score")),
-        "attention_output": _gemm_flops(gemm_shapes.get("attention_output")),
-        "output_proj": _gemm_flops(gemm_shapes.get("output_proj")),
-        "ffn1": _gemm_flops(gemm_shapes.get("ffn1")),
-        "ffn2": _gemm_flops(gemm_shapes.get("ffn2")),
-        "linear_softmax": _gemm_flops(gemm_shapes.get("linear")),
-    }
-    fallback_forward["attention"] = (
-        fallback_forward["attention_score"] + fallback_forward["attention_output"]
-    )
-
-    def _op_flops(name: str, fallback: float = 0.0, include_backward: bool = True) -> float:
-        timing = transformer_timings.get(name)
-        forward = 0.0
-        if timing is not None and timing.forward is not None:
-            forward = float(timing.forward.flops or 0.0)
-        if forward <= 0 and fallback > 0:
-            forward = fallback
-        backward = 0.0
-        if include_backward and timing is not None and timing.backward is not None:
-            backward = float(timing.backward.flops or 0.0)
-        if include_backward and backward <= 0 and forward > 0:
-            backward = 2.0 * forward
+    def _forward_backward(shape) -> float:
+        forward = _gemm_flops(shape)
+        if forward <= 0.0:
+            return 0.0
+        backward = 2.0 * forward
         return forward + backward
 
-    per_layer_ops = ("qkv_proj", "attention", "output_proj", "ffn1", "ffn2")
-    per_layer_flops = sum(
-        _op_flops(name, fallback_forward.get(name, 0.0)) for name in per_layer_ops
-    )
+    per_layer_flops = 0.0
+    per_layer_flops += _forward_backward(gemm_shapes.get("qkv_proj"))
+    per_layer_flops += _forward_backward(gemm_shapes.get("attention_score"))
+    per_layer_flops += _forward_backward(gemm_shapes.get("attention_output"))
+    per_layer_flops += _forward_backward(gemm_shapes.get("output_proj"))
+    per_layer_flops += _forward_backward(gemm_shapes.get("ffn1"))
+    per_layer_flops += _forward_backward(gemm_shapes.get("ffn2"))
 
-    total_flops = per_layer_flops * calculator.num_layers
+    total_flops = per_layer_flops * float(calculator.num_layers)
 
-    total_flops += _op_flops("linear_softmax", fallback=fallback_forward.get("linear_softmax", 0.0), include_backward=True)
-    total_flops += _op_flops("embedding", fallback=0.0, include_backward=True)
+    total_flops += _forward_backward(gemm_shapes.get("linear"))
+
+    # Embedding forward/backward is comparatively small; keep placeholder for future refinement.
 
     return float(total_flops)
 

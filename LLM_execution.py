@@ -679,7 +679,7 @@ class LLMExecutionDispatcher:
 
             if enforce_layout and declared > 1 and not first_active_checked:
                 canon = sorted(dim_axes)
-                if canon != ["cp", "tp"]:
+                if canon != ["cp", "tp"] and canon != ["tp", "cp"] and (axis_sizes["tp"] > 1 or axis_sizes["cp"] > 1):
                     raise ValueError(
                         "For hierarchical/hybrid AstraSim modes, the first active network "
                         "dimension must contain exactly {'tp','cp'} to represent the tensor/context cluster."
