@@ -354,7 +354,6 @@ class NetworkDimensionLayout:
     collective_override: Dict[str, str] = field(default_factory=dict)
     parallelisms: Tuple[str, ...] = field(default_factory=tuple)
     energy_per_bit: float = 0.0
-    faulty_links: Tuple[Tuple[int, int, float], ...] = field(default_factory=tuple)
 
     @classmethod
     def from_raw(
@@ -476,51 +475,6 @@ class NetworkDimensionLayout:
             expected_product=computed_product,
         )
 
-        faulty_links_raw = raw.get("faulty_links", [])
-        faulty_links: List[Tuple[int, int, float]] = []
-        if faulty_links_raw:
-            if not isinstance(faulty_links_raw, Sequence) or isinstance(faulty_links_raw, (str, bytes)):
-                raise ValueError(
-                    f"network dimension '{label}' faulty_links must be a sequence of [src, dst, weight] entries"
-                )
-            for idx, entry in enumerate(faulty_links_raw):
-                if (
-                    not isinstance(entry, Sequence)
-                    or isinstance(entry, (str, bytes))
-                    or len(entry) != 3
-                ):
-                    raise ValueError(
-                        f"network dimension '{label}' faulty_links[{idx}] must be a three-item sequence [src, dst, weight]"
-                    )
-                src_raw, dst_raw, weight_raw = entry
-                try:
-                    src = int(src_raw)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"network dimension '{label}' faulty_links[{idx}][0] must be an integer endpoint"
-                    ) from exc
-                try:
-                    dst = int(dst_raw)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"network dimension '{label}' faulty_links[{idx}][1] must be an integer endpoint"
-                    ) from exc
-                if src < 0 or dst < 0:
-                    raise ValueError(
-                        f"network dimension '{label}' faulty_links[{idx}] endpoints must be >= 0"
-                    )
-                try:
-                    weight = float(weight_raw)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"network dimension '{label}' faulty_links[{idx}][2] must be a numeric reliability weight"
-                    ) from exc
-                if weight < 0.0 or weight > 1.0:
-                    raise ValueError(
-                        f"network dimension '{label}' faulty_links[{idx}] weight must be between 0.0 and 1.0"
-                    )
-                faulty_links.append((src, dst, weight))
-
         return cls(
             id=dim_id,
             label=label,
@@ -532,7 +486,6 @@ class NetworkDimensionLayout:
             collective_override=collective_override,
             parallelisms=tuple(normalized_parallelisms),
             energy_per_bit=energy_per_bit,
-            faulty_links=tuple(faulty_links),
         )
 
     @property
@@ -611,15 +564,23 @@ def _compute_dimension_parallelism_product(
 def _parse_network_layout(
     network_spec,
     parallelism_params: Dict[str, object],
-) -> Tuple[NetworkDimensionLayout, ...]:
+) -> Tuple[Tuple[NetworkDimensionLayout, ...], Tuple[Tuple[int, int, float], ...]]:
     if network_spec is None:
-        return tuple()
+        return tuple(), tuple()
 
-    if not isinstance(network_spec, Sequence) or isinstance(network_spec, (str, bytes)):
-        raise ValueError("network section must be a sequence of dimension mappings")
+    faulty_links: Tuple[Tuple[int, int, float], ...] = tuple()
+    dimensions_spec = network_spec
+    if isinstance(network_spec, dict):
+        faulty_links = _parse_faulty_links("network", network_spec.get("faulty_links", []))
+        dimensions_spec = network_spec.get("dimensions")
+        if dimensions_spec is None:
+            raise ValueError("network.dimensions must be specified when network is a mapping")
+
+    if not isinstance(dimensions_spec, Sequence) or isinstance(dimensions_spec, (str, bytes)):
+        raise ValueError("network.dimensions must be a sequence of dimension mappings")
 
     dimensions: List[NetworkDimensionLayout] = []
-    for index, entry in enumerate(network_spec):
+    for index, entry in enumerate(dimensions_spec):
         dimensions.append(
             NetworkDimensionLayout.from_raw(
                 entry,
@@ -627,12 +588,13 @@ def _parse_network_layout(
                 index=index,
             )
         )
-    return tuple(dimensions)
+    return tuple(dimensions), faulty_links
 
 
 @dataclass(frozen=True)
 class NetworkLayoutConfig:
     dimensions: Tuple[NetworkDimensionLayout, ...]
+    faulty_links: Tuple[Tuple[int, int, float], ...] = field(default_factory=tuple)
     parallelism_map: Dict[str, NetworkDimensionLayout] = field(default_factory=dict)
 
     def primary_dimension(self) -> Optional[NetworkDimensionLayout]:
@@ -651,8 +613,53 @@ class NetworkLayoutConfig:
         return dim.effective_bandwidth, dim.latency
 
 
+def _parse_faulty_links(owner_label: str, faulty_links_raw) -> Tuple[Tuple[int, int, float], ...]:
+    entries: List[Tuple[int, int, float]] = []
+    if not faulty_links_raw:
+        return tuple()
+    if not isinstance(faulty_links_raw, Sequence) or isinstance(faulty_links_raw, (str, bytes)):
+        raise ValueError(
+            f"{owner_label} faulty_links must be a sequence of [src, dst, weight] entries"
+        )
+    for idx, entry in enumerate(faulty_links_raw):
+        if not isinstance(entry, Sequence) or isinstance(entry, (str, bytes)) or len(entry) != 3:
+            raise ValueError(
+                f"{owner_label} faulty_links[{idx}] must be a three-item sequence [src, dst, weight]"
+            )
+        src_raw, dst_raw, weight_raw = entry
+        try:
+            src = int(src_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{owner_label} faulty_links[{idx}][0] must be an integer endpoint"
+            ) from exc
+        try:
+            dst = int(dst_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{owner_label} faulty_links[{idx}][1] must be an integer endpoint"
+            ) from exc
+        if src < 0 or dst < 0:
+            raise ValueError(
+                f"{owner_label} faulty_links[{idx}] endpoints must be >= 0"
+            )
+        try:
+            weight = float(weight_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{owner_label} faulty_links[{idx}][2] must be a numeric reliability weight"
+            ) from exc
+        if weight < 0.0 or weight > 1.0:
+            raise ValueError(
+                f"{owner_label} faulty_links[{idx}] weight must be between 0.0 and 1.0"
+            )
+        entries.append((src, dst, weight))
+    return tuple(entries)
+
+
 def _build_network_layout_config(
     dimensions: Sequence[NetworkDimensionLayout],
+    faulty_links: Sequence[Tuple[int, int, float]] = (),
 ) -> NetworkLayoutConfig:
     parallelism_map: Dict[str, NetworkDimensionLayout] = {}
     for dim in dimensions:
@@ -662,7 +669,11 @@ def _build_network_layout_config(
                     f"parallelism '{pname}' assigned to multiple network dimensions"
                 )
             parallelism_map[pname] = dim
-    return NetworkLayoutConfig(dimensions=tuple(dimensions), parallelism_map=parallelism_map)
+    return NetworkLayoutConfig(
+        dimensions=tuple(dimensions),
+        faulty_links=tuple(faulty_links),
+        parallelism_map=parallelism_map,
+    )
 
 
 _PARALLELISM_DEFAULTS: Dict[str, object] = {
@@ -1066,10 +1077,10 @@ def parse_config(filename, config_type):
         scheduling_for_network = {str(k).lower(): v for k, v in parallelism_params.items()}
 
         network_spec = config_dict.get("network")
-        network_dimensions = _parse_network_layout(network_spec, scheduling_for_network)
+        network_dimensions, network_faults = _parse_network_layout(network_spec, scheduling_for_network)
         if not network_dimensions:
             raise ValueError("network section must define at least one dimension")
-        network_layout_config = _build_network_layout_config(network_dimensions)
+        network_layout_config = _build_network_layout_config(network_dimensions, network_faults)
 
         tech_config = TechConfig.from_dict(config_dict["tech_param"])
 

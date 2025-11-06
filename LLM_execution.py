@@ -8,6 +8,8 @@ from typing import Any, Dict, Tuple, Optional, List, Set, Sequence
 
 import simulate_LLM
 from astrasim_lib import run_astra_simulation_only_onepath
+from astrasim_lib.fault_projection import FaultProjectionResult, FaultSpace
+from astrasim_lib.layout_utils import axis_layout_from_descriptor
 from simulate_LLM import Graph
 
 
@@ -639,6 +641,9 @@ class LLMExecutionDispatcher:
         self._transformer_rank_layout: Optional[Dict[str, Any]] = None
         self._pipeline_rank_layout: Optional[Dict[str, Any]] = None
         self._rank_layout = self._build_rank_layout_descriptor()
+        self._fault_space: Optional[FaultSpace] = None
+        self._fault_projections: Dict[str, FaultProjectionResult] = {}
+        self._initialize_fault_mappings()
 
     def _build_rank_layout_descriptor(self) -> Dict[str, Any]:
         hw_config = getattr(self.time_calc, "hw_config", None)
@@ -758,6 +763,102 @@ class LLMExecutionDispatcher:
 
         return descriptor
 
+    def _initialize_fault_mappings(self) -> None:
+        hw_config = getattr(self.time_calc, "hw_config", None)
+        network_layout = getattr(hw_config, "network_layout", None)
+        faulty_links: Tuple[Tuple[int, int, float], ...] = tuple(
+            getattr(network_layout, "faulty_links", ()) or ()
+        )
+        if not faulty_links:
+            self._fault_space = None
+            self._fault_projections = {}
+            return
+        if not self._rank_layout:
+            raise ValueError("Faulty links require a populated rank layout descriptor.")
+        axis_layout = axis_layout_from_descriptor(self._rank_layout)
+        axis_dim_map = self._axis_to_dimension_map(network_layout)
+        self._fault_space = FaultSpace(
+            axis_layout,
+            faulty_links,
+            axis_to_dimension=axis_dim_map,
+        )
+        self._fault_projections = self._build_fault_projections_from_space(self._fault_space)
+        self._validate_fault_coverage()
+
+    def _axis_to_dimension_map(self, network_layout) -> Dict[str, int]:
+        mapping: Dict[str, int] = {}
+        if network_layout is None:
+            return mapping
+        dimensions = getattr(network_layout, "dimensions", None)
+        if not dimensions:
+            return mapping
+        for idx, dim in enumerate(dimensions):
+            for axis in getattr(dim, "parallelisms", ()) or ():
+                normalized = str(axis).strip().lower()
+                if normalized:
+                    mapping[normalized] = idx
+        return mapping
+
+    def _build_fault_projections_from_space(
+        self,
+        space: FaultSpace,
+    ) -> Dict[str, FaultProjectionResult]:
+        projections: Dict[str, FaultProjectionResult] = {}
+        if not space.entries:
+            return projections
+
+        global_axes = tuple(space.layout.axis_order)
+        if global_axes:
+            projections["global"] = space.project(global_axes)
+
+        transformer_axes: Tuple[str, ...] = tuple(
+            self._transformer_rank_layout.get("axis_order", ())
+        ) if self._transformer_rank_layout else tuple()
+        if transformer_axes:
+            projections["transformer"] = space.project(transformer_axes)
+
+        pipeline_axes: Tuple[str, ...] = tuple(
+            self._pipeline_rank_layout.get("axis_order", ())
+        ) if self._pipeline_rank_layout else tuple()
+        if pipeline_axes:
+            projections["pipeline"] = space.project(pipeline_axes)
+
+        return projections
+
+    def _validate_fault_coverage(self) -> None:
+        if self._fault_space is None:
+            return
+        covered: Set[Tuple[int, int, float]] = set()
+        for label in ("transformer", "pipeline"):
+            proj = self._fault_projections.get(label)
+            if proj:
+                covered.update(proj.covered_originals)
+        uncovered = [
+            entry.original
+            for entry in self._fault_space.entries
+            if entry.original not in covered
+        ]
+        if uncovered:
+            formatted = ", ".join(str(item) for item in uncovered)
+            raise ValueError(
+                "Faulty links do not map to any transformer or pipeline axis subset: "
+                f"{formatted}"
+            )
+
+    def _fault_projection_for(self, label: str) -> Optional[FaultProjectionResult]:
+        return self._fault_projections.get(label)
+
+    def _fault_links_for(self, label: str) -> Tuple[Tuple[int, int, float], ...]:
+        projection = self._fault_projection_for(label)
+        if projection is None:
+            return tuple()
+        return projection.remapped_links
+
+    def _fault_override(self, label: str) -> Optional[Tuple[Tuple[int, int, float], ...]]:
+        if self._fault_space is None:
+            return None
+        return self._fault_links_for(label)
+
     def run(self, mode: ExecutionMode) -> ExecutionResult:
         if mode == ExecutionMode.ANALYTICAL:
             return self._run_pipeline_with_analytical_comm(ExecutionMode.ANALYTICAL)
@@ -827,8 +928,10 @@ class LLMExecutionDispatcher:
         if self.time_calc.persist_astrasim_artifacts:
             artifact_dir = os.path.join(self.time_calc.output_dir, "astra_hier")
 
+        pipeline_fault_override = self._fault_override("pipeline")
         run_kwargs = {
             "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
+            "faulty_links_override": pipeline_fault_override,
         }
         run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
         effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
@@ -1009,6 +1112,7 @@ class LLMExecutionDispatcher:
         bwd_per_rank = None
         fwd_max = 0
         bwd_max = 0
+        transformer_fault_override = self._fault_override("transformer")
         if self.transformer_forward_root:
             layout = getattr(self, "_transformer_rank_layout", None)
             if layout:
@@ -1021,6 +1125,7 @@ class LLMExecutionDispatcher:
                 artifact_dir_fwd,
                 dp_override=1,
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+                faulty_links_override=transformer_fault_override,
             )
         if self.transformer_backward_root:
             layout = getattr(self, "_transformer_rank_layout", None)
@@ -1034,6 +1139,7 @@ class LLMExecutionDispatcher:
                 artifact_dir_bwd,
                 dp_override=1,
                 persist_artifacts=self.time_calc.persist_astrasim_artifacts,
+                faulty_links_override=transformer_fault_override,
             )
 
         self.time_calc.transformer_astrasim_per_rank_forward = fwd_per_rank

@@ -47,16 +47,16 @@ from matplotlib.patches import Polygon
 # -----------------------------------------------------------------------------
 
 # Paths to the baseline configuration files
-HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
+HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB_faraz.yaml"
 MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-405B.yaml"
 
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
 # Keys should match the entries under the YAML "parallelism" section.
 PARALLELISM_SWEEP = {
-    "tp": [2**i for i in range(0, 3)],
-    "cp": [2**i for i in range(0, 3)],
-    "dp": [2**i for i in range(0, 3)],
-    "lp": [2**i for i in range(0, 3)],
+    "tp": [2**i for i in range(0, 9)],
+    "cp": [2**i for i in range(0, 9)],
+    "dp": [2**i for i in range(0, 9)],
+    "lp": [2**i for i in range(0, 9)],
 }
 
 # Optional knobs that still live inside the parallelism section but do not
@@ -67,8 +67,11 @@ OTHER_PARALLELISM_OPTIONS = {
 
 # GPU count filter: only evaluate combinations whose TP*CP*DP*LP fall inside
 # this inclusive range.
-GPU_COUNT_MIN = 16
-GPU_COUNT_MAX = 64
+GPU_COUNT_MIN = 64
+GPU_COUNT_MAX = 1024
+
+# When True, discard configurations whose tp*cp product is not a square power of two.
+ENFORCE_SQUARE_TP_CP = False
 
 # Select the y-axis metric for the scatter plot and report. Accepted values:
 #   "runtime"     -> plot raw runtime in seconds (lower is better)
@@ -89,10 +92,10 @@ REPORT_OUTPUT_PATH = "tools/parallelism_sweep.tsv"
 ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWRITE
 
 # Plotting behaviour toggles
-MEM_AWARE_FILTER = True  # When True, skip memory-violating configurations in plots.
+MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in plots.
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 16
+MAX_WORKERS = 100
 
 
 # -----------------------------------------------------------------------------
@@ -194,19 +197,45 @@ def total_gpu_count(parallel_cfg):
     return total
 
 
-def make_temp_hw_config(base_hw_dict, parallel_settings):
-    """Return parsed HW config for the given parallelism override."""
+def tp_cp_product_is_power_of_two_square(tp_value, cp_value):
+    """Return True when tp*cp is a square whose root is also a power of two."""
+    if tp_value == 1 and cp_value == 1:
+        return False # special case
+    try:
+        tp_int = int(tp_value)
+        cp_int = int(cp_value)
+    except (TypeError, ValueError):
+        return False
+    if tp_int <= 0 or cp_int <= 0:
+        return False
+    product = tp_int * cp_int
+    root = math.isqrt(product)
+    if root * root != product:
+        return False
+    return (root & (root - 1)) == 0
+
+
+def make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=None):
+    """Return (parsed HW config, YAML string) for the given override."""
     updated = copy.deepcopy(base_hw_dict)
     parallel_block = updated.setdefault("parallelism", {})
     for key, value in parallel_settings.items():
         parallel_block[key] = value
+
+    if hw_mutator:
+        hw_mutator(updated)
+    try:
+        debug_yaml = yaml.safe_dump(updated, default_flow_style=False)
+    except Exception:
+        debug_yaml = None
 
     tmp_file = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     try:
         yaml.safe_dump(updated, tmp_file, default_flow_style=False, sort_keys=False)
         tmp_file.flush()
         tmp_file.close()
-        return config.parse_config(tmp_file.name, config_type="hardware")
+        hw_config = config.parse_config(tmp_file.name, config_type="hardware")
+        return hw_config, debug_yaml
     finally:
         try:
             tmp_file.close()
@@ -329,8 +358,16 @@ def compute_total_flops(calculator: TimeCalculationLLM) -> float:
     return float(total_flops)
 
 
-def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings):
-    hw_config = make_temp_hw_config(hw_dict, parallel_settings)
+def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_mutator=None):
+    hw_config, debug_yaml = make_temp_hw_config(hw_dict, parallel_settings, hw_mutator=hw_mutator)
+    # if debug_yaml:
+    #     print("=== DEBUG HW CONFIG ===")
+    #     print(debug_yaml)
+    #     try:
+    #         with open("debug.yaml", "w") as debug_handle:
+    #             debug_handle.write(debug_yaml)
+    #     except Exception as exc:
+            # print(f"Warning: failed to write debug.yaml: {exc}", file=sys.stderr)
     temp_dir = tempfile.mkdtemp(prefix="parallelism_sweep_")
     try:
         calculator = TimeCalculationLLM(hw_config, model_config_obj, mode, output_dir=temp_dir)
@@ -352,6 +389,7 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings):
             "achieved_flops": achieved_flops,
             "memory_exceeded": getattr(calculator, "memory_capacity_exceeded", False),
             "memory_violation_gb": getattr(calculator, "memory_capacity_violation_gb", 0.0),
+            "hw_yaml": debug_yaml,
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -453,6 +491,11 @@ def parse_args():
         "--plot_only",
         action="store_true",
         help="Skip evaluation and only regenerate plots from the existing TSV report.",
+    )
+    parser.add_argument(
+        "--enforce-square-tp-cp",
+        action="store_true",
+        help="Require tp*cp to be a square power of two when enumerating configurations.",
     )
     return parser.parse_args()
 
@@ -795,6 +838,8 @@ def main():
     args = parse_args()
     set_astrasim_cache_mode(ASTRA_CACHE_MODE)
 
+    enforce_square = ENFORCE_SQUARE_TP_CP or args.enforce_square_tp_cp
+
     results: List[Dict[str, object]] = []
 
     if args.plot_only:
@@ -836,9 +881,13 @@ def main():
         evaluated = 0
 
         filtered_tasks: List[Tuple[Tuple[str, object], ...]] = []
+        skipped_square_constraint = 0
         for items in task_items:
             settings = dict(items)
             num_gpus = total_gpu_count(settings)
+            if enforce_square and not tp_cp_product_is_power_of_two_square(settings.get("tp"), settings.get("cp")):
+                skipped_square_constraint += 1
+                continue
             if GPU_COUNT_MIN <= num_gpus <= GPU_COUNT_MAX:
                 filtered_tasks.append(items)
             else:
@@ -847,6 +896,8 @@ def main():
         if not filtered_tasks:
             print("No configurations within GPU count bounds.")
             return
+        if enforce_square and skipped_square_constraint:
+            print(f"Skipped {skipped_square_constraint} configuration(s) due to tp*cp square constraint.")
 
         available_cpus = max(1, os.cpu_count() or 1)
         if MAX_WORKERS is None or MAX_WORKERS <= 0:

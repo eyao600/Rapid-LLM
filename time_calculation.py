@@ -33,12 +33,15 @@ class NetworkModel:
             return 0.0
         byte_count = int(math.ceil(size_bytes))
         axes_filter = [str(axis).lower()] if axis else None
+        # for collectives ONLY, we cannot use 2D topologies (Mesh2D, Torus2D, KingMesh2D)
+        # transform them to their 1D equivalents (Ring, Mesh, HyperCube (?))
         _, max_sec = run_cache_astrasim(
             self.hw_config,
             comm=kind,
             npus_count=part,
             size_bytes=byte_count,
             axes_filter=axes_filter,
+            transform_2d_to_1d=True,
         )
         return float(max_sec)
 

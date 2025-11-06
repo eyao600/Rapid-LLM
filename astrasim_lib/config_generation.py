@@ -112,6 +112,9 @@ def generate_astrasim_configs_from_hw(
     npus_count: Optional[int] = None,
     *,
     axes_filter: Optional[Sequence[str]] = None,
+    transform_2d_to_1d: bool = False,
+    faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
+    reuse_cached_network: bool = True,
 ) -> Dict[str, str]:
     """Write AstraSim network/system configs derived from ``hw_obj``."""
     if npus_count is None:
@@ -119,6 +122,14 @@ def generate_astrasim_configs_from_hw(
 
     layout = getattr(hw_obj, "network_layout", None)
     dimensions = list(getattr(layout, "dimensions", [])) if layout else []
+    layout_faults: Tuple[Tuple[int, int, float], ...]
+    if faulty_links_override is not None:
+        layout_faults = tuple(
+            (int(src), int(dst), float(weight))
+            for src, dst, weight in faulty_links_override
+        )
+    else:
+        layout_faults = tuple(getattr(layout, "faulty_links", ()) or ()) if layout else tuple()
     if not dimensions:
         raise ValueError("Hardware config is missing network dimensions required for AstraSim integration.")
 
@@ -207,14 +218,8 @@ def generate_astrasim_configs_from_hw(
         for dim, _, _, dim_idx in dim_infos
         if int(getattr(dim, "size", 0) or 0) > 1
     ]
-    allowed_fault_dim_indices: set[int] = set()
     if active_dim_indices:
         last_active_idx = active_dim_indices[-1]
-        if astra_mode in {"full_astrasim_hierarchical", "hybrid"}:
-            allowed_fault_dim_indices.add(0)
-            allowed_fault_dim_indices.add(last_active_idx)
-        else:
-            allowed_fault_dim_indices.add(last_active_idx)
         dp_in_active = False
         if axis_sizes.get("dp", 1) > 1:
             for dim, axes, _, dim_idx in dim_infos:
@@ -230,20 +235,10 @@ def generate_astrasim_configs_from_hw(
                 "Hardware config declares dp > 1, but no network dimension with size > 1 includes the 'dp' axis."
             )
     else:
-        if any(getattr(dim, "faulty_links", ()) for dim, _, _, _ in dim_infos):
+        if layout_faults:
             raise ValueError(
                 "Faulty links require at least one active (size > 1) network dimension."
             )
-
-    if allowed_fault_dim_indices:
-        valid_indices = {idx for idx in allowed_fault_dim_indices if 0 <= idx < len(dimensions)}
-        for dim, _, _, dim_idx in dim_infos:
-            if getattr(dim, "faulty_links", ()):
-                if dim_idx not in valid_indices:
-                    raise ValueError(
-                        f"Faulty links for dimension '{dim.label}' (index {dim_idx}) are only permitted on "
-                        f"dimension indices {sorted(valid_indices)} for mode '{astra_mode or 'unspecified'}'."
-                    )
     target = int(npus_count)
     
     axes_needed: List[str] = []
@@ -297,6 +292,13 @@ def generate_astrasim_configs_from_hw(
     for dim, axes_selected, product_size, _ in selected_dims:
         topo = _normalize_topology_name(dim.topology_type)
         size = product_size
+        if transform_2d_to_1d and topo in ["Torus2D", "Mesh2D", "KingMesh2D"]:
+            if topo == "Torus2D":
+                topo = "Ring"
+            if topo == "Mesh2D":
+                topo = "Mesh"
+            if topo == "KingMesh2D":
+                topo = "HyperCube"
         if topo == "Ring" and size <= 2:
             topo = "FullyConnected"
         effective_bw = float(getattr(dim, "effective_bandwidth", dim.bandwidth))
@@ -324,23 +326,14 @@ def generate_astrasim_configs_from_hw(
         f"latency: [ {lat_str} ]   # ns\n"
     )
 
-    faulty_links_tuple: Tuple[Tuple[int, int, float], ...] = tuple()
-    if selected_dims:
-        dims_with_faults = [
-            (dim_idx, getattr(dim, "faulty_links", ()))
-            for dim, _axes, _size, dim_idx in selected_dims
-            if getattr(dim, "faulty_links", ())
+    faulty_links_tuple: Tuple[Tuple[int, int, float], ...] = tuple(layout_faults)
+    if faulty_links_tuple:
+        fault_entries = [
+            f"[{src}, {dst}, {float(weight):g}]"
+            for src, dst, weight in faulty_links_tuple
         ]
-        if dims_with_faults:
-            dims_with_faults.sort(key=lambda item: item[0])
-            _, faulty_links_tuple = dims_with_faults[-1]
-            faulty_links_tuple = tuple(faulty_links_tuple)
-            fault_entries = [
-                f"[{src}, {dst}, {float(weight):g}]"
-                for src, dst, weight in faulty_links_tuple
-            ]
-            faulty_links_str = f"[{', '.join(fault_entries)}]"
-            net_content += f"faulty_links: {faulty_links_str}\n"
+        faulty_links_str = f"[{', '.join(fault_entries)}]"
+        net_content += f"faulty_links: {faulty_links_str}\n"
 
     os.makedirs(os.path.dirname(net_yaml), exist_ok=True)
     cache_key = (
@@ -350,7 +343,7 @@ def generate_astrasim_configs_from_hw(
         tuple(lat_list),
         faulty_links_tuple,
     )
-    cached_path = _NET_YAML_CACHE.get(cache_key)
+    cached_path = _NET_YAML_CACHE.get(cache_key) if reuse_cached_network else None
     need_write = True
     if cached_path and os.path.exists(cached_path):
         try:
@@ -366,7 +359,8 @@ def generate_astrasim_configs_from_hw(
         with open(tmp_path, "w", encoding="utf-8") as handle:
             handle.write(net_content)
         os.replace(tmp_path, net_yaml)
-    _NET_YAML_CACHE[cache_key] = net_yaml
+    if reuse_cached_network:
+        _NET_YAML_CACHE[cache_key] = net_yaml
 
     if astra_cfg:
         coll = astra_cfg.collectives

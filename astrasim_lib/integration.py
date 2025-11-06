@@ -318,6 +318,7 @@ def run_cache_astrasim(
     workload_prefix: Optional[str] = None,
     comm_group_json: Optional[str] = None,
     axes_filter: Optional[Sequence[str]] = None,
+    transform_2d_to_1d: bool = False,
     files = None,
 ) -> Tuple[List[float], float]:
     """Run AstraSim with caching to avoid recomputation when inputs match."""
@@ -376,6 +377,7 @@ def run_cache_astrasim(
                 out_dir=astra_config_dir,
                 npus_count=npus_count,
                 axes_filter=axes_filter_tuple,
+                transform_2d_to_1d=transform_2d_to_1d,
             )
         topo_list = files.get("topology_list")
         npus_per_dim = files.get("npus_per_dim")

@@ -40,6 +40,7 @@ from .et_utils import (
     write_et_node,
 )
 from .integration import get_remote_memory_path, run_astrasim_analytical, run_cache_astrasim
+from .layout_utils import derive_axes_filter
 from simulate_LLM import visualize_graph
 
 
@@ -163,25 +164,6 @@ def _build_axis_groups(
             key: sorted(set(values)) for key, values in groups.items() if values
         }
     return axis_groups
-
-
-def _derive_axes_filter(
-    axis_order: Sequence[str],
-    axis_sizes: Mapping[str, int],
-    dp_count: int,
-) -> Optional[List[str]]:
-    axes: List[str] = []
-    for axis in axis_order:
-        try:
-            size = max(1, int(axis_sizes.get(axis, 1)))
-        except Exception:
-            size = 1
-        if size > 1 and axis not in axes:
-            axes.append(axis)
-    if dp_count > 1:
-        axes = [axis for axis in axes if axis != "dp"]
-        axes.append("dp")
-    return axes or None
 
 
 def _assign_collective_labels(
@@ -1485,6 +1467,7 @@ def run_astra_simulation_only_onepath(
     output_dir: str = "astra_comparison_output",
     dp_override: Optional[int] = None,
     persist_artifacts: Optional[bool] = None,
+    faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
 ):
     """
     Run AstraSim simulation on DeepFlow graph and print results.
@@ -1493,6 +1476,7 @@ def run_astra_simulation_only_onepath(
         fwdbwd_root: Forward and backward graph root node
         time_calc_obj: TimeCalculationLLM object with hw_config and dp attributes
         output_dir: Directory for temporary files and results
+        faulty_links_override: Optional remapped faulty link list for this run
     """
     print("\n" + "="*60)
     print("ASTRASIM SIMULATION RESULTS")
@@ -1559,7 +1543,9 @@ def run_astra_simulation_only_onepath(
 
         rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
         axis_order, axis_sizes = _extract_axis_layout(rank_layout)    
-        axes_filter = _derive_axes_filter(axis_order, axis_sizes, dp_count)
+        axes_filter = derive_axes_filter(axis_order, axis_sizes, dp_count)
+        if not axes_filter:
+            axes_filter = None
         if synthetic_pair:
             axes_filter = ["synthetic2"]
         astra_configs = generate_astrasim_configs_from_hw(
@@ -1567,6 +1553,8 @@ def run_astra_simulation_only_onepath(
             work_dir,
             rank_count,
             axes_filter=axes_filter,
+            faulty_links_override=faulty_links_override,
+            reuse_cached_network=not persist,
         )
 
         # Run AstraSim simulation on forward graph (cached via manifest)
