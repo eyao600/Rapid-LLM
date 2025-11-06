@@ -329,7 +329,14 @@ class TimeCalculation:
             self.N = self.model.N
             
         if mode == "LLM":
-            self.batch_size = self.model.batch_size
+            self.global_batch_size = self.model.global_batch_size
+            self.gradient_accumulation_steps = self.model.gradient_accumulation_steps
+
+            if self.global_batch_size % self.gradient_accumulation_steps != 0:
+                raise ValueError(
+                    "Global batch size must be divisible by gradient accumulation steps"
+                )
+            self.batch_size = self.global_batch_size // self.gradient_accumulation_steps
             self.vocab_size = self.model.vocab_size
             self.num_layers = self.model.num_layers
             self.hidden_dim = self.model.hidden_dim

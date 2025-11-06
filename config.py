@@ -766,7 +766,8 @@ class LLMConfig:
     tied_embeddings: bool
     num_layers: int
     hidden_dim: int
-    batch_size: int
+    global_batch_size: int
+    gradient_accumulation_steps: int
     seq_len: int
     decode_len: Optional[int]
     intermediate_size: Optional[int]
@@ -788,6 +789,12 @@ class LLMConfig:
     @property
     def use_moe(self) -> bool:
         return self.num_experts > 1
+
+
+    @property
+    def grad_accumulation_steps(self) -> int:
+        """Backward-compatible alias for gradient accumulation steps."""
+        return self.gradient_accumulation_steps
 LLMInferenceConfig = _namedtuple(
     "inference_param",
     [
@@ -1331,7 +1338,25 @@ def parse_config(filename, config_type):
 
         num_layers = _pop_required_int("num_layers")
         hidden_dim = _pop_required_int("hidden_dim")
-        batch_size = _pop_required_int("batch_size")
+
+        global_batch_size = _pop_required_int("global_batch_size")
+
+
+        grad_accum_field = mp.pop("gradient_accumulation_steps", None)
+        if grad_accum_field is None:
+            grad_accum_field = mp.pop("gradient_accumulation_step", None)
+        if grad_accum_field is None:
+            gradient_accumulation_steps = 1
+        else:
+            try:
+                gradient_accumulation_steps = int(grad_accum_field)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_param.gradient_accumulation_steps must be an integer (got {grad_accum_field!r})"
+                ) from exc
+            if gradient_accumulation_steps <= 0:
+                raise ValueError("model_param.gradient_accumulation_steps must be a positive integer")
+
         seq_len = _pop_required_int("seq_len")
         vocab_size = _pop_required_int("vocab_size")
 
@@ -1352,7 +1377,8 @@ def parse_config(filename, config_type):
             tied_embeddings=tied_embeddings,
             num_layers=num_layers,
             hidden_dim=hidden_dim,
-            batch_size=batch_size,
+            global_batch_size=global_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
             seq_len=seq_len,
             decode_len=decode_len,
             intermediate_size=intermediate_size,

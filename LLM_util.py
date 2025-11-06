@@ -128,9 +128,7 @@ def get_transformer_mem_layer( dp, tp, lp, mb, batch_size, hidden_dim, seq_len, 
     #Activations refer to output activations that need to be stored
 
     if flash_attention:
-        # act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2) #flash attention activation saved full recompute
-        # act_memory_layer = seq_len * batch_size * hidden_dim * 2 * (precision.activations / 2)
-        act_memory_layer = seq_len * 1 * hidden_dim * (34 / tp ) * (precision.activations / 2) #assuming micro batch size 1 and selective recompute
+        act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2) #assuming selective recompute
     else:
         act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) 
     
@@ -207,7 +205,17 @@ def get_embedding_weight_mem(
     
 def get_tot_mem_req(exp_hw_config, exp_model_config, **kwargs):
     # Model Params
-    batch_size                   = int(kwargs.get('batch_size', exp_model_config.model_config.batch_size))
+    default_global_batch = getattr(
+        exp_model_config.model_config,
+        "global_batch_size",
+        getattr(exp_model_config.model_config, "batch_size"),
+    )
+    batch_size = int(
+        kwargs.get(
+            "global_batch_size",
+            kwargs.get("batch_size", default_global_batch),
+        )
+    )
     hidden_dim                   = int(kwargs.get('hidden_dim', exp_model_config.model_config.hidden_dim))
     vocab_size                   = int(kwargs.get('vocab_size', exp_model_config.model_config.vocab_size))
     n_layers                   = int(kwargs.get('num_layer', exp_model_config.model_config.num_layers))

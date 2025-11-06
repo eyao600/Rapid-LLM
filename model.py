@@ -20,7 +20,8 @@ class Model_GEMM:
       
 class Model_LLM:
   def __init__(self, exp_config):
-      self.batch_size       = exp_config.model_config.batch_size
+      self.global_batch_size = exp_config.model_config.global_batch_size
+      self.gradient_accumulation_steps = exp_config.model_config.gradient_accumulation_steps
       self.vocab_size       = exp_config.model_config.vocab_size
       self.num_layers      = exp_config.model_config.num_layers
       self.hidden_dim       = exp_config.model_config.hidden_dim

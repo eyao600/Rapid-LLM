@@ -2452,9 +2452,9 @@ class TimeCalculationLLM(TimeCalculation):
                 print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.4f}s")
                 print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.4f}s")
 
-        self.tot_time = time_fw_bw
+        self.tot_time = time_fw_bw * self.gradient_accumulation_steps
 
-        return time_fw_bw
+        return self.tot_time
         
     def _simulate_with_memory( 
         self,
