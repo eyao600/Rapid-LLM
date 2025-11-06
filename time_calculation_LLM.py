@@ -2337,6 +2337,8 @@ class TimeCalculationLLM(TimeCalculation):
             LLM_util.get_transformer_mem_layer(
                 dp=self.dp,
                 tp=self.tp,
+                lp=self.lp,
+                mb=self.mb,
                 batch_size=batch_size,
                 hidden_dim=hidden_dim,
                 seq_len=seq_len / self.cp,
