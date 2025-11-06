@@ -774,11 +774,11 @@ class LLMExecutionDispatcher:
             timed_root = self.pipeline_root
         else: # must be "ANALYTICAL"
             filename = "/analytical_graph"
-            timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
-                self.pipeline_root,
-                self.time_calc.network_model,
-                self.interconnect_params,
-            )
+        timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
+            self.pipeline_root,
+            self.time_calc.network_model,
+            self.interconnect_params,
+        )
             
         generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
         if generate_graphs:
