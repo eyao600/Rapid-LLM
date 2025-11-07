@@ -11,6 +11,7 @@ import pandas as pd
 import yaml
 import shutil
 import util
+from util import log_message, flush_log_queue, extend_log
 
 import graphviz_async
 from tile import TiledGEMM, formatBytes
@@ -49,6 +50,7 @@ def _report_total_wall_time() -> None:
         # Best-effort only
         pass
 
+atexit.register(flush_log_queue)
 atexit.register(_report_total_wall_time)
 
 def parse_arguments():
@@ -252,13 +254,12 @@ def _run_llm_training(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("\n".join(topology_lines))
         handle.write("\n")
 
-    print("Training time for batch: {:.2f}s".format(tc_llm.get_time()))
-    for line in topology_lines:
-        print(line)
-    print("LLM training results written to {}".format(output_file))
+    log_message("Training time for batch: {:.2f}s".format(tc_llm.get_time()), category="results")
+    extend_log(topology_lines, category="network")
+    log_message("LLM training results written to {}".format(output_file), category="results")
     warning_message = tc_llm.memory_capacity_warning()
     if warning_message:
-        print(warning_message)
+        log_message(warning_message)
 
 
 def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
@@ -270,20 +271,22 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
     total_time = inference_timing["total_inference_time"]
     decode_rates = inference_timing.get("decode_tokens_per_s") or {}
 
-    print(
+    log_message(
         "LLM inference time: {:.2f}s (mode={})".format(
             total_time, tc_inf.execution_mode.value
-        )
+        ),
+        category="results",
     )
-    print(
+    log_message(
         "LLM time to first token: {:.2f}s".format(
             inference_timing["time_to_first_token"],
-        )
+        ),
+        category="results",
     )
     dp_replicas = max(1, getattr(tc_inf, "dp", 1))
     batch_size = getattr(tc_inf, "batch_size", 1)
     if dp_replicas > 1:
-        print(f"Data parallel replicas: {dp_replicas}")
+        log_message(f"Data parallel replicas: {dp_replicas}", category="results")
     if decode_rates:
         # decode_rates are per-generation rates (tokens per second per generation)
         start_gen_rate = decode_rates.get("start", 0.0)
@@ -292,17 +295,18 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         mid_step = int(decode_rates.get("midpoint_step", 0.0))
         
         # Print per-generation rates
-        print(
+        log_message(
             "Decode sequences/s: start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
                 start_gen_rate,
                 mid_step,
                 mid_gen_rate,
                 end_gen_rate,
-            )
+            ),
+            category="results",
         )
 
         # Print aggregate decode throughput (with batch_size and dp multipliers)
-        print(
+        log_message(
             "Aggregate decode throughput tok/s (batch={}, dp={}): start={:.2f}, mid(token {})={:.2f}, end={:.2f}".format(
                 batch_size,
                 dp_replicas,
@@ -310,7 +314,8 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
                 mid_step,
                 mid_gen_rate * batch_size * dp_replicas,
                 end_gen_rate * batch_size * dp_replicas,
-            )
+            ),
+            category="results",
         )
 
     topology_lines = util.network_topology_summary_inference(exp_hw_config)
@@ -341,12 +346,11 @@ def _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode):
         handle.write("\n".join(topology_lines))
         handle.write("\n")
 
-    for line in topology_lines:
-        print(line)
-    print("LLM inference results written to {}".format(output_path))
+    extend_log(topology_lines, category="network")
+    log_message("LLM inference results written to {}".format(output_path), category="results")
     warning_message = tc_inf.memory_capacity_warning()
     if warning_message:
-        print(warning_message)
+        log_message(warning_message)
 
 if __name__ == "__main__":
     args = parse_arguments()
@@ -364,7 +368,6 @@ if __name__ == "__main__":
     os.makedirs(exp_dir, exist_ok=True)
     
     if mode == "LLM":
-        print("Using LLM parameters for computation...")
         run_LLM(
             exp_hw_config_path=config_hardware_path,
             exp_model_config_path=config_model_path,
@@ -373,7 +376,7 @@ if __name__ == "__main__":
         )
     
     elif mode == "LSTM":
-        print("Using LSTM parameters for computation...")
+        log_message("Using LSTM parameters for computation...")
         run_LSTM(
             exp_hw_config_path=config_hardware_path,
             exp_model_config_path=config_model_path,
@@ -382,7 +385,7 @@ if __name__ == "__main__":
         
         )
     elif mode == "GEMM":
-        print("Using GEMM parameters for computation...")
+        log_message("Using GEMM parameters for computation...")
         run_GEMM(
             exp_hw_config_path=config_hardware_path,
             exp_model_config_path=config_model_path,
@@ -391,3 +394,7 @@ if __name__ == "__main__":
         )
     else:
         print("Invalid mode selected. Please choose 'LLM', 'LSTM', or 'GEMM'.")
+        flush_log_queue()
+        sys.exit(1)
+
+    flush_log_queue()

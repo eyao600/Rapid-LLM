@@ -7,6 +7,7 @@ from graphviz import Digraph
 import os
 
 import graphviz_async
+import util
 debug = False
 BYTES_PER_GIB = 1024 ** 3
 
@@ -1498,10 +1499,13 @@ class Graph:
     def save_graph(self, roots, output_folder = "output/LLM/", filename="graph"):
         os.makedirs(output_folder, exist_ok=True)
 
-        printstr = " | Graph saved to    %s%s.svg" % (output_folder, filename)
+        base_path = os.path.normpath(f"{output_folder}{filename}")
+        svg_path = f"{base_path}.svg"
+        display_path = util.relpath_display(svg_path)
+        printstr = f" | Graph saved to    {display_path}"
         def _render_graph() -> None:
-            dot_fw = visualize_graph(roots, filename=output_folder + filename)
-            dot_fw.render(output_folder + filename, format="svg", cleanup=True)
+            dot_fw = visualize_graph(roots, filename=base_path)
+            dot_fw.render(base_path, format="svg", cleanup=True)
 
         graphviz_async.submit(f"{filename}.svg", _render_graph, print_message=printstr)
 

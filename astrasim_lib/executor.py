@@ -42,6 +42,7 @@ from .et_utils import (
 from .integration import get_remote_memory_path, run_astrasim_analytical, run_cache_astrasim
 from .layout_utils import derive_axes_filter
 from simulate_LLM import visualize_graph
+from util import relpath_display
 
 
 def _env_truthy(name: str) -> bool:
@@ -428,13 +429,36 @@ def _visualize_et_files(et_paths: List[str]) -> None:
         except Exception as exc:
             print(f"[WARN] Failed to render Graphviz graph for {et_path}: {exc}")
 
-    for et_path in et_paths:
-        message = f" | ET Graph saved to {et_path}.svg"
+    if not et_paths:
+        return
+
+    if len(et_paths) == 1:
+        et_path = et_paths[0]
+        display_path = relpath_display(f"{et_path}.svg")
+        message = f" | ET Graph saved to {display_path}"
         graphviz_async.submit(
             f"et:{os.path.basename(et_path)}",
             _render_et_file,
             et_path,
             print_message=message,
+        )
+        return
+
+    first_path = et_paths[0]
+    display_first = relpath_display(f"{first_path}.svg")
+    summary_message = f" | {len(et_paths)} ET graphs saved to {display_first} (..)"
+    graphviz_async.submit(
+        f"et:{os.path.basename(first_path)}",
+        _render_et_file,
+        first_path,
+        print_message=summary_message,
+    )
+    for et_path in et_paths[1:]:
+        graphviz_async.submit(
+            f"et:{os.path.basename(et_path)}",
+            _render_et_file,
+            et_path,
+            print_message=None,
         )
 
 
