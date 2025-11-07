@@ -632,6 +632,7 @@ class LLMExecutionDispatcher:
         transformer_graph: Optional[Graph] = None,
         transformer_forward_root: Optional[Any] = None,
         transformer_backward_root: Optional[Any] = None,
+        no_data_parallel: bool = False,
     ) -> None:
         self.time_calc = time_calc
         self.pipeline_graph = pipeline_graph
@@ -648,6 +649,7 @@ class LLMExecutionDispatcher:
         self._transformer_stage_faults: Dict[int, Tuple[Tuple[int, int, float], ...]] = {}
         self._transformer_stage_timings: Dict[int, TransformerTimings] = {}
         self._transformer_baseline_timings: Optional[TransformerTimings] = None
+        self.no_data_parallel = bool(no_data_parallel)
         self._rank_layout = self._build_rank_layout_descriptor()
         self._fault_space: Optional[FaultSpace] = None
         self._fault_projections: Dict[str, FaultProjectionResult] = {}
@@ -962,10 +964,16 @@ class LLMExecutionDispatcher:
 
     def _run_pipeline_with_analytical_comm(self, declared_mode: ExecutionMode) -> ExecutionResult:
         if declared_mode == ExecutionMode.HYBRID:
-            filename = "/hybrid_graph"
+            if self.no_data_parallel:
+                filename = "/hybrid_graph_no_dp"
+            else:
+                filename = "/hybrid_graph"
             timed_root = self.pipeline_root
         else: # must be "ANALYTICAL"
-            filename = "/analytical_graph"
+            if self.no_data_parallel:
+                filename = "/analytical_graph_no_dp"
+            else:
+                filename = "/analytical_graph"
         timed_root = self.pipeline_graph.convert_comm_sizes_to_times(
             self.pipeline_root,
             self.time_calc.network_model,
@@ -987,12 +995,7 @@ class LLMExecutionDispatcher:
 
     def _run_hybrid(self) -> ExecutionResult:
         generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
-        if generate_graphs:
-            self.transformer_graph.save_graph(
-                self.transformer_forward_root,
-                self.time_calc.output_dir,
-                "/hybrid_graph_transformer",
-            )
+
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
         if generate_graphs:
             self.transformer_graph.save_graph(
@@ -1030,10 +1033,11 @@ class LLMExecutionDispatcher:
             run_kwargs["dp_override"] = 1
 
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+            filename = "/pipeline_graph_hierarchical_no_dp" if self.no_data_parallel else "/pipeline_graph_hierarchical"
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
                 self.time_calc.output_dir,
-                "/pipeline_graph_hierarchical",
+                filename,
             )
 
         pipeline_layout = getattr(self, "_pipeline_rank_layout", None)
@@ -1065,11 +1069,12 @@ class LLMExecutionDispatcher:
             rank_layout=self._rank_layout,
         )
 
-        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None :
+            filename = "/pipeline_graph_pre_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_pre_flatten"
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
                 self.time_calc.output_dir,
-                "/pipeline_graph_pre_flatten",
+                filename,
             )
         flattened_root = flattener.build(self.pipeline_root)
         if flattened_root is None:
@@ -1079,10 +1084,11 @@ class LLMExecutionDispatcher:
         setattr(flattened_root, "_astrasim_rank_layout", self._rank_layout)
         self.time_calc.flattened_pipeline_root = flattened_root
         if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+            filename = "/pipeline_graph_post_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_post_flatten"
             self.pipeline_graph.save_graph(
                 flattened_root,
                 self.time_calc.output_dir,
-                "/pipeline_graph_post_flatten",
+                filename,
             )
         self.pipeline_root = flattened_root
         # output_dir = "./astra_flattened_graph"
@@ -1122,6 +1128,7 @@ class LLMExecutionDispatcher:
             raise RuntimeError("AstraSim flattened execution returned no per-rank timings")
 
         expected_rank_count = effective_dp * len(unique_hw_ids)
+
         # Special case: If expected rank count is 1, then 2 is fine, but we prune the extra result
         # this is done, since astrasim backend only supports >1 ranks, so we generate extra fake result for that case.
         if expected_rank_count == 1:
@@ -1131,7 +1138,6 @@ class LLMExecutionDispatcher:
                     f"expected {expected_rank_count}, got {len(per_rank_sec)}"
                 )
             per_rank_sec = per_rank_sec[:1]
-
         if len(per_rank_sec) != expected_rank_count:
             raise RuntimeError(
                 "AstraSim rank count mismatch for flattened execution: "

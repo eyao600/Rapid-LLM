@@ -165,6 +165,8 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_astrasim_per_rank_backward: Optional[List[float]] = None
         self.pipeline_astrasim_time: Optional[float] = None
         self.pipeline_astrasim_per_rank: Optional[List[float]] = None
+        self.pipeline_graph_no_dp: Optional[Graph] = None
+        self.pipeline_root_no_dp: Optional[Any] = None
 
     def _sequence_parallel_degree(self) -> int:
         """Return tensor-parallel degree used for sequence-parallel collectives.
@@ -2026,7 +2028,16 @@ class TimeCalculationLLM(TimeCalculation):
         zero3_embedding_gather_bytes: float = 0.0,
         zero3_transformer_gather_bytes: float = 0.0,
         zero3_softmax_gather_bytes: float = 0.0,
-    ) -> Tuple[Graph, Any, Optional[Graph], Optional[Any], Optional[Any], Dict[str, Tuple[float, float]]]:
+    ) -> Tuple[
+        Graph,
+        Any,
+        Optional[Graph],
+        Optional[Any],
+        Optional[Any],
+        Dict[str, Tuple[float, float]],
+        Optional[Graph],
+        Optional[Any],
+    ]:
         """Build pipeline/transformer graphs shared across training and inference."""
 
         if not include_pipeline_backward and not include_transformer_backward:
@@ -2260,12 +2271,33 @@ class TimeCalculationLLM(TimeCalculation):
             comm_metadata=comm_metadata,
             misc_metadata=misc_metadata,
         )
+        
         graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(include_backward=include_pipeline_backward)
+        pipeline_graph_obj_no_dp = None
+        graph_root_no_dp = None
+        need_no_dp_variant = getattr(self, "gradient_accumulation_steps", 1) > 1
+        if need_no_dp_variant:
+            pipeline_graph_obj_no_dp = simulate_LLM.Graph(
+                mode="pipeline",
+                dp=1,
+                lp=self.lp,
+                tp=self.tp,
+                cp=self.cp,
+                comp_times=comp_times,
+                comm_metadata=comm_metadata,
+                misc_metadata=misc_metadata,
+            )
+            
+            graph_root_no_dp = pipeline_graph_obj_no_dp.construct_fwd_bwd_graph(include_backward=include_pipeline_backward)
+
+        
         interconnect_params = self._build_interconnect_params()
 
         return (
             pipeline_graph_obj,
             graph_root,
+            pipeline_graph_obj_no_dp,
+            graph_root_no_dp,
             transformer_graph,
             transformer_forward_root,
             transformer_backward_root,
@@ -2384,6 +2416,8 @@ class TimeCalculationLLM(TimeCalculation):
         (
             pipeline_graph_obj,
             graph_root,
+            pipeline_graph_obj_no_dp,
+            graph_root_no_dp,
             transformer_graph,
             transformer_forward_root,
             transformer_backward_root,
@@ -2416,9 +2450,30 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
         self.pipeline_interconnect = interconnect_params
+        self.pipeline_graph_no_dp = pipeline_graph_obj_no_dp
+        self.pipeline_root_no_dp = graph_root_no_dp
 
         mode = self.execution_mode
-        
+        time_fw_bw_no_dp: Optional[float] = None
+        if self.gradient_accumulation_steps > 1:
+            if not (self.pipeline_graph_no_dp and self.pipeline_root_no_dp):
+                raise RuntimeError("Gradient accumulation steps > 1 requires a no-DP pipeline graph")
+            dispatcher_no_dp = LLMExecutionDispatcher(
+                time_calc=self,
+                pipeline_graph=self.pipeline_graph_no_dp,
+                pipeline_root=self.pipeline_root_no_dp,
+                interconnect_params=self.pipeline_interconnect,
+                transformer_graph=self.transformer_graph,
+                transformer_forward_root=self.transformer_forward_root,
+                transformer_backward_root=self.transformer_backward_root,
+                no_data_parallel=True,
+            )
+            try:
+                result_no_dp = dispatcher_no_dp.run(mode)
+            except NotImplementedError as exc:
+                raise NotImplementedError(f"{exc}. Selected execution mode '{mode.value}'.") from exc
+            time_fw_bw_no_dp = result_no_dp.total_time
+
         dispatcher = LLMExecutionDispatcher(
             time_calc=self,
             pipeline_graph=self.pipeline_graph,
@@ -2427,14 +2482,14 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_graph=self.transformer_graph,
             transformer_forward_root=self.transformer_forward_root,
             transformer_backward_root=self.transformer_backward_root,
+            no_data_parallel=False,
         )
-        mode = self.execution_mode
         try:
             result = dispatcher.run(mode)
         except NotImplementedError as exc:
             raise NotImplementedError(f"{exc}. Selected execution mode '{mode.value}'.") from exc
-
         time_fw_bw = result.total_time
+
 
         pipeline_root = result.graph_root
         self.pipeline_graph = dispatcher.pipeline_graph
@@ -2452,8 +2507,12 @@ class TimeCalculationLLM(TimeCalculation):
                 print(f"Actual transformer forward time: {self.transformer_astrasim_time_forward:.4f}s")
                 print(f"Actual transformer backward time: {self.transformer_astrasim_time_backward:.4f}s")
 
-        self.tot_time = time_fw_bw * self.gradient_accumulation_steps
-
+        if self.gradient_accumulation_steps > 1: #if gradient accumulation is enabled, non-last steps have no dp overhead, only last step has dp overhead
+            if time_fw_bw_no_dp is None:
+                raise RuntimeError("Missing no-DP timing for gradient accumulation computation")
+            self.tot_time = time_fw_bw_no_dp * (self.gradient_accumulation_steps - 1) + time_fw_bw 
+        else:
+            self.tot_time = time_fw_bw
         return self.tot_time
         
     def _simulate_with_memory( 

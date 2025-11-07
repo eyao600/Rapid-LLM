@@ -473,6 +473,8 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         (
             pipeline_graph,
             pipeline_root,
+            _,
+            _,
             transformer_graph,
             transformer_forward_root,
             _,
