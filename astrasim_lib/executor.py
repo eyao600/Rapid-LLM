@@ -674,6 +674,19 @@ def convert_deepflow_graph_to_chakra_et(
     def rank_for(stage: int, dp_idx: int) -> int:
         return stage_to_ranks[stage][dp_idx]
 
+    def _compute_duration_seconds(task: Any, dp_idx: int) -> float:
+        """Return the per-DP duration (in seconds) for ``task``."""
+        profile = getattr(task, "duration_profile", None)
+        if profile:
+            if len(profile) != dp_count:
+                raise ValueError(
+                    f"Duration profile for node '{getattr(task, 'name', '<unnamed>')}' "
+                    f"has length {len(profile)} but dp_count={dp_count}."
+                )
+            return float(profile[dp_idx])
+        duration_sec = getattr(task, "duration", 0.0) or 0.0
+        return float(duration_sec)
+
     # Step 3: Recover the multi-dimensional axis layout (tp/cp/lp, etc.) so that
     # communicator membership can be reconstructed deterministically later on.
     rank_layout = getattr(graph_root, "_astrasim_rank_layout", None)
@@ -1339,7 +1352,7 @@ def convert_deepflow_graph_to_chakra_et(
                         if dep not in unique_deps:
                             unique_deps.append(dep)
 
-                    duration_sec = getattr(task, "duration", 0.0) or 0.0
+                    duration_sec = _compute_duration_seconds(task, dp_idx)
                     duration_micros = int(round(duration_sec * 1e6)) if duration_sec else 0
                     node_id = trace.next_id
                     comp_node = new_comp_node(

@@ -646,8 +646,8 @@ class LLMExecutionDispatcher:
         self._pipeline_rank_layout: Dict[str, Any] = {}
         self._network_dimensions: Tuple[Any, ...] = tuple()
         self._axis_dimension_map: Dict[str, int] = {}
-        self._transformer_stage_faults: Dict[int, Tuple[Tuple[int, int, float], ...]] = {}
-        self._transformer_stage_timings: Dict[int, TransformerTimings] = {}
+        self._transformer_stage_dp_faults: Dict[Tuple[int, int], Tuple[Tuple[int, int, float], ...]] = {}
+        self._transformer_stage_timings: Dict[Tuple[int, int], TransformerTimings] = {}
         self._transformer_baseline_timings: Optional[TransformerTimings] = None
         self.no_data_parallel = bool(no_data_parallel)
         self._rank_layout = self._build_rank_layout_descriptor()
@@ -693,8 +693,9 @@ class LLMExecutionDispatcher:
             dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ())]
             declared = int(getattr(dim, "size", 1))
 
-            if enforce_layout and declared > 1 and not first_active_checked:
-                canon = sorted(dim_axes)
+            axes_without_dp = [axis for axis in dim_axes if axis != "dp"]
+            if enforce_layout and declared > 1 and not first_active_checked and axes_without_dp:
+                canon = sorted(axes_without_dp)
                 if canon != ["cp", "tp"] and canon != ["tp", "cp"] and (axis_sizes["tp"] > 1 or axis_sizes["cp"] > 1):
                     raise ValueError(
                         "For hierarchical/hybrid AstraSim modes, the first active network "
@@ -703,8 +704,6 @@ class LLMExecutionDispatcher:
                 first_active_checked = True
 
             for name in dim_axes:
-                if name == "dp":
-                    continue
                 if name not in axis_sizes:
                     raise ValueError(
                         f"Unsupported parallelism axis '{name}' in network layout. "
@@ -764,7 +763,7 @@ class LLMExecutionDispatcher:
         # (DP replicas are handled externally). Store these subsets so callers
         # can attach the appropriate layout before invoking AstraSim.
         self._transformer_rank_layout = _subset_layout(["tp", "cp"])
-        self._pipeline_rank_layout = _subset_layout(["lp"])
+        self._pipeline_rank_layout = _subset_layout(["lp", "dp"])
 
         return descriptor
 
@@ -847,7 +846,7 @@ class LLMExecutionDispatcher:
         )
         self._fault_projections = self._build_fault_projections_from_space(self._fault_space)
         self._validate_fault_coverage()
-        self._transformer_stage_faults = self._build_transformer_stage_fault_map()
+        self._transformer_stage_dp_faults = self._build_transformer_stage_dp_fault_map()
         axis_order = self._rank_layout.get("axis_order", []) if isinstance(self._rank_layout, dict) else []
         axis_sizes = self._rank_layout.get("axis_sizes", {}) if isinstance(self._rank_layout, dict) else {}
         self._log_fault_summary(axis_order, axis_sizes)
@@ -917,16 +916,22 @@ class LLMExecutionDispatcher:
             if name == axis:
                 return int(value)
         layout = self._rank_layout or {}
-        axis_sizes = layout.get("axis_sizes", {}) if isinstance(layout, dict) else {}
+        if isinstance(layout, dict):
+            layout_axes = layout.get("axis_order", [])
+            if axis not in layout_axes:
+                return 0
+            axis_sizes = layout.get("axis_sizes", {})
+        else:
+            axis_sizes = {}
         if axis_sizes.get(axis, 1) <= 1:
             return 0
         raise ValueError(f"Axis '{axis}' not present in coordinate tuple for faulty link.")
 
-    def _build_transformer_stage_fault_map(self) -> Dict[int, Tuple[Tuple[int, int, float], ...]]:
+    def _build_transformer_stage_dp_fault_map(self) -> Dict[Tuple[int, int], Tuple[Tuple[int, int, float], ...]]:
         projection = self._fault_projection_for("transformer")
         if not projection:
             return {}
-        stage_faults: Dict[int, List[Tuple[int, int, float]]] = {}
+        stage_dp_faults: Dict[Tuple[int, int], List[Tuple[int, int, float]]] = {}
         for detail in projection.entries:
             src_stage = self._axis_value_from_coords(detail.src_coords, "lp")
             dst_stage = self._axis_value_from_coords(detail.dst_coords, "lp")
@@ -935,8 +940,12 @@ class LLMExecutionDispatcher:
                     "Transformer faulty link spans multiple pipeline stages; "
                     "hierarchical execution requires faults limited to a single stage."
                 )
-            stage_faults.setdefault(src_stage, []).append(detail.remapped)
-        return {stage: tuple(links) for stage, links in stage_faults.items()}
+            src_dp = self._axis_value_from_coords(detail.src_coords, "dp")
+            dst_dp = self._axis_value_from_coords(detail.dst_coords, "dp")
+            affected_dp = {src_dp, dst_dp}
+            for dp_idx in affected_dp:
+                stage_dp_faults.setdefault((dp_idx, src_stage), []).append(detail.remapped)
+        return {key: tuple(links) for key, links in stage_dp_faults.items()}
 
     def _fault_projection_for(self, label: str) -> Optional[FaultProjectionResult]:
         return self._fault_projections.get(label)
@@ -1194,7 +1203,7 @@ class LLMExecutionDispatcher:
         del mode  # mode currently unused but kept for signature consistency
 
         if not self.transformer_forward_root and not self.transformer_backward_root:
-            if getattr(self, "_transformer_stage_faults", {}):
+            if getattr(self, "_transformer_stage_dp_faults", {}):
                 raise ValueError("Transformer faults require transformer graph metadata, but none is available.")
             return None
 
@@ -1223,16 +1232,16 @@ class LLMExecutionDispatcher:
         self.time_calc.transformer_astrasim_time_backward = baseline_timings.backward
 
         # Per-stage fault runs
-        stage_faults = getattr(self, "_transformer_stage_faults", {})
-        for fault_index, (stage_id, fault_links) in enumerate(sorted(stage_faults.items())):
-            label = f"fault{fault_index}"
+        stage_dp_faults = getattr(self, "_transformer_stage_dp_faults", {})
+        for fault_index, ((dp_idx, stage_id), fault_links) in enumerate(sorted(stage_dp_faults.items())):
+            label = f"fault{fault_index}_dp{dp_idx}_stage{stage_id}"
             stage_fwd_dir, stage_bwd_dir = self._transformer_artifact_dirs(label=label, persist=persist)
             stage_timings, _, _ = self._execute_transformer_run(
                 stage_fwd_dir,
                 stage_bwd_dir,
                 faulty_links_override=fault_links,
             )
-            self._transformer_stage_timings[stage_id] = stage_timings
+            self._transformer_stage_timings[(dp_idx, stage_id)] = stage_timings
 
         return baseline_timings
 
@@ -1312,6 +1321,8 @@ class LLMExecutionDispatcher:
         else:
             roots = [self.pipeline_root]
 
+        dp_count = max(1, getattr(self.time_calc, "dp", 1))
+
         for root in roots:
             self._assign_transformer_durations(
                 root,
@@ -1319,15 +1330,17 @@ class LLMExecutionDispatcher:
                 stage_timings,
                 baseline_timings.forward,
                 baseline_timings.backward,
+                dp_count,
             )
 
     def _assign_transformer_durations(
         self,
         node: Any,
         visited: Set[int],
-        stage_timings: Dict[int, TransformerTimings],
+        stage_timings: Dict[Tuple[int, int], TransformerTimings],
         forward_default: float,
         backward_default: float,
+        dp_count: int,
     ) -> None:
         if node is None:
             return
@@ -1344,11 +1357,26 @@ class LLMExecutionDispatcher:
                     hw_stage = int(getattr(node, "hw_id", None))
                 except (TypeError, ValueError):
                     hw_stage = None
-                timing_override = stage_timings.get(hw_stage) if hw_stage is not None else None
+                def _per_dp_durations(is_forward: bool) -> List[float]:
+                    values: List[float] = []
+                    for dp_idx in range(dp_count):
+                        timing_override = stage_timings.get((dp_idx, hw_stage)) if hw_stage is not None else None
+                        if timing_override:
+                            values.append(timing_override.forward if is_forward else timing_override.backward)
+                        else:
+                            default = forward_default if is_forward else backward_default
+                            values.append(default)
+                    return values
+
                 if getattr(node, "fwd", True):
-                    node.duration = timing_override.forward if timing_override else forward_default
+                    per_dp_values = _per_dp_durations(is_forward=True)
                 else:
-                    node.duration = timing_override.backward if timing_override else backward_default
+                    per_dp_values = _per_dp_durations(is_forward=False)
+
+                if dp_count > 1:
+                    node.duration = tuple(per_dp_values)
+                else:
+                    node.duration = per_dp_values[0]
 
         for child in getattr(node, "children", []):
-            self._assign_transformer_durations(child, visited, stage_timings, forward_default, backward_default)
+            self._assign_transformer_durations(child, visited, stage_timings, forward_default, backward_default, dp_count)

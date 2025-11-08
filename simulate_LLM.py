@@ -16,7 +16,7 @@ class Node:
         self.name = name
         self.op_id = op_id
         self.hw_id = hw_id
-        self.duration = duration
+        self._duration_data = self._normalize_duration(duration)
         self.done = False
         self.finish_time = -1
         self.parents = []
@@ -31,6 +31,39 @@ class Node:
 
     def __repr__(self):
         return f"Node({self.name},op={self.op_id},hw={self.hw_id},{round(self.duration, 2)})"
+
+    @staticmethod
+    def _normalize_duration(value):
+        if isinstance(value, (list, tuple)):
+            entries = tuple(float(v) for v in value)
+            if not entries:
+                raise ValueError("Duration tuple must contain at least one entry.")
+            return entries
+        return float(value)
+
+    @property
+    def duration(self):
+        data = self._duration_data
+        if isinstance(data, tuple):
+            return data[0]
+        return data
+
+    @duration.setter
+    def duration(self, value):
+        self._duration_data = self._normalize_duration(value)
+
+    @property
+    def duration_profile(self) -> Optional[Tuple[float, ...]]:
+        data = self._duration_data
+        if isinstance(data, tuple):
+            return data
+        return None
+
+    def duration_storage(self):
+        data = self._duration_data
+        if isinstance(data, tuple):
+            return tuple(data)
+        return data
     
 class Data_batch:
     def __init__(self, name, batch_id, duration):
@@ -204,7 +237,7 @@ class Graph:
                 return cached
 
             if isinstance(obj, Node):
-                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration, fwd=obj.fwd)
+                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration_storage(), fwd=obj.fwd)
                 clone.memory = getattr(obj, "memory", 0)
             elif isinstance(obj, Edge):
                 clone = Edge(
@@ -380,7 +413,7 @@ class Graph:
                 return cached
 
             if isinstance(obj, Node):
-                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration, fwd=obj.fwd)
+                clone = Node(obj.name, obj.op_id, obj.hw_id, obj.duration_storage(), fwd=obj.fwd)
                 clone.memory = getattr(obj, "memory", 0)
             elif isinstance(obj, Edge):
                 clone = Edge(
@@ -1516,11 +1549,35 @@ def visualize_graph(roots, filename="graph"):
     dot = Digraph(comment="Computation Graph", format="svg")
     visited = set()
 
-    def _format_duration(value: float) -> str:
-        ms = value * 1e3
-        if abs(ms) > 1000:
-            return f"{value:.2f}s"
-        return f"{ms:.2f}ms"
+    def _format_duration(value: float, profile: Optional[Tuple[float, ...]] = None) -> str:
+        def _format_single(entry: float) -> str:
+            ms = entry * 1e3
+            if abs(ms) > 1000:
+                return f"{entry:.2f}s"
+            return f"{ms:.2f}ms"
+
+        if not profile:
+            return _format_single(value)
+
+        groups: List[Dict[str, Any]] = []
+        for idx, entry in enumerate(profile):
+            matched = False
+            for group in groups:
+                if math.isclose(entry, group["value"], rel_tol=1e-9, abs_tol=1e-12):
+                    group["indices"].append(idx)
+                    matched = True
+                    break
+            if not matched:
+                groups.append({"value": entry, "indices": [idx]})
+
+        if len(groups) == 1:
+            return _format_single(groups[0]["value"])
+
+        parts = []
+        for group in groups:
+            indices = ",".join(str(i) for i in group["indices"])
+            parts.append(f"{{{indices}}}: {_format_single(group['value'])}")
+        return ", ".join(parts)
 
     def _node_color(node) -> str:
         if isinstance(node, Node):
@@ -1541,17 +1598,19 @@ def visualize_graph(roots, filename="graph"):
         if isinstance(node, Data_batch):
             return f"{node.name}\n(batch_id={node.batch_id}, dur={_format_duration(node.duration)})"
         if isinstance(node, Node):
+            duration_display = _format_duration(node.duration, node.duration_profile)
             return (
                 f"{node.name}\n(op_id={node.op_id}, hw_id={node.hw_id}, "
-                f"dur={_format_duration(node.duration)})"
+                f"dur={duration_display})"
             )
         if isinstance(node, Edge):
+            duration_display = _format_duration(node.duration)
             if getattr(node, "local_hw_id", None) is not None:
                 return (
                     f"{node.name}\n(op_id={node.op_id}, local_hw_id={node.local_hw_id}, "
-                    f"dur={_format_duration(node.duration)})"
+                    f"dur={duration_display})"
                 )
-            return f"{node.name}\n(op_id={node.op_id}, dur={_format_duration(node.duration)})"
+            return f"{node.name}\n(op_id={node.op_id}, dur={duration_display})"
         return str(node)
 
     def _visit(node):
