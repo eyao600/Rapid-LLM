@@ -36,6 +36,8 @@ from .et_utils import (
 
 ensure_chakra_available()
 
+_DEFAULT_ASTRA_CACHE_DIR = os.path.abspath("./astra_cache")
+
 _CACHE_MODES = {
     "NO_CACHE",
     "CACHE_READONLY",
@@ -133,6 +135,19 @@ def _hash_file_bundle(paths: Iterable[str]) -> str:
                     break
                 h.update(chunk)
     return h.hexdigest()
+
+
+def _path_within_dir(path: Optional[str], directory: str) -> bool:
+    """Return True when ``path`` is within ``directory``."""
+
+    if not path:
+        return False
+    try:
+        path_abs = os.path.abspath(path)
+        dir_abs = os.path.abspath(directory)
+        return os.path.commonpath([path_abs, dir_abs]) == dir_abs
+    except (OSError, ValueError):
+        return False
 
 
 def _load_cache(cache_path: str) -> Dict[str, Any]:
@@ -326,6 +341,8 @@ def run_cache_astrasim(
     if isinstance(hw_obj, str):
         raise TypeError("run_cache_astrasim expects a parsed HWConfig object, not a path")
 
+    comm_lower = str(comm).lower()
+
     cache_mode = _cache_mode()
     allow_read = cache_mode in {"CACHE_READONLY", "CACHE_READWRITE"}
     allow_write = cache_mode == "CACHE_READWRITE"
@@ -343,6 +360,8 @@ def run_cache_astrasim(
         if allow_read or allow_write:
             ensure_cache_file_exists(cache_path)
 
+    ephemeral_paths: List[str] = []
+
     try:
         (intra_ib_bps, intra_ll_s), _ = compute_intra_inter_ib_ll_from_hw(hw_obj)
         if not intra_ib_bps or intra_ib_bps <= 0 or not intra_ll_s or intra_ll_s <= 0:
@@ -354,8 +373,15 @@ def run_cache_astrasim(
         sys_opts_sig = _sys_options_from_hw(hw_obj)
         axes_filter_tuple: Optional[Tuple[str, ...]] = tuple(axes_filter) if axes_filter else None
 
+        cache_dir_abs = os.path.abspath(astra_config_dir)
+        ephemeral_configs = (
+            files is None
+            and comm_lower != "graph"
+            and cache_dir_abs == _DEFAULT_ASTRA_CACHE_DIR
+        )
+
         sig: Dict[str, Any] = {
-            "comm": comm.lower(),
+            "comm": comm_lower,
             "npus": int(npus_count),
             "size_bytes": int(size_bytes),
             "topology": topo,
@@ -378,7 +404,15 @@ def run_cache_astrasim(
                 npus_count=npus_count,
                 axes_filter=axes_filter_tuple,
                 transform_2d_to_1d=transform_2d_to_1d,
+                ephemeral_outputs=ephemeral_configs,
             )
+            if ephemeral_configs:
+                ephemeral_paths.extend(
+                    [
+                        files.get("system_json"),
+                        files.get("network_yaml"),
+                    ]
+                )
         topo_list = files.get("topology_list")
         npus_per_dim = files.get("npus_per_dim")
         if topo_list:
@@ -393,8 +427,8 @@ def run_cache_astrasim(
             pass
         elif not manifest_json_path:
             label = size_label(size_bytes)
-            base_dir = os.path.join(astra_config_dir, "workload", comm.lower(), f"{npus_count}npus_{label}")
-            workload_prefix = os.path.join(base_dir, f"{comm.lower()}_{label}")
+            base_dir = os.path.join(astra_config_dir, "workload", comm_lower, f"{npus_count}npus_{label}")
+            workload_prefix = os.path.join(base_dir, f"{comm_lower}_{label}")
             expected = [f"{workload_prefix}.{r}.et" for r in range(npus_count)]
             if not all(os.path.exists(p) for p in expected):
                 generate_workload_et(comm, npus_count, size_bytes, astra_config_dir=astra_config_dir)
@@ -423,7 +457,7 @@ def run_cache_astrasim(
                 cached_per = entry.get("per_node_sec", [])
                 cached_max = float(entry.get("max_sec", 0.0))
                 if cached_per and cached_max > 0 and len(cached_per) == int(npus_count) and all((t > 0 for t in cached_per)):
-                    if str(comm).lower() == "graph":
+                    if comm_lower == "graph":
                         try:
                             print(
                                 f"[AstraSim] Cache HIT: comm={comm}, npus={npus_count}, size={size_bytes}, total={cached_max:.6f}s"
@@ -497,6 +531,15 @@ def run_cache_astrasim(
 
         return per_node_sec, max_sec
     finally:
+        if ephemeral_paths:
+            for cleanup_path in {p for p in ephemeral_paths if p}:
+                if _path_within_dir(cleanup_path, astra_config_dir):
+                    try:
+                        os.remove(cleanup_path)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        pass
         if temp_cache_dir is not None:
             shutil.rmtree(temp_cache_dir, ignore_errors=True)
 

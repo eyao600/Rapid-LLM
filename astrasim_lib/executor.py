@@ -1738,7 +1738,6 @@ def run_astra_simulation_only_onepath(
             rank_count,
             axes_filter=axes_filter,
             faulty_links_override=faulty_links_override,
-            reuse_cached_network=not persist,
         )
 
         # Run AstraSim simulation on forward graph (cached via manifest)

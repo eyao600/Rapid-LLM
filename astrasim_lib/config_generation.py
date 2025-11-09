@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from types import SimpleNamespace
 
@@ -17,15 +18,9 @@ ensure_chakra_available()
 
 ASTRA_DEBUG = False
 
-_NET_YAML_CACHE: Dict[tuple, str] = {}
-_JSON_WRITTEN_BY_NPUS: set[object] = set()
 
-
-def _save_json(path: str, data: Dict[str, Any], npus_key: Optional[int] = None) -> None:
-    """Write ``data`` to ``path`` once per ``npus_key`` per process."""
-    key = npus_key if npus_key is not None else path
-    if key in _JSON_WRITTEN_BY_NPUS and os.path.exists(path):
-        return
+def _save_json(path: str, data: Dict[str, Any]) -> None:
+    """Write ``data`` to ``path``."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp_path = path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -33,7 +28,6 @@ def _save_json(path: str, data: Dict[str, Any], npus_key: Optional[int] = None) 
 
         _json.dump(data, handle, indent=2)
     os.replace(tmp_path, path)
-    _JSON_WRITTEN_BY_NPUS.add(key)
 
 
 def _gbps_from_bps(bps: float) -> float:
@@ -114,7 +108,7 @@ def generate_astrasim_configs_from_hw(
     axes_filter: Optional[Sequence[str]] = None,
     transform_2d_to_1d: bool = False,
     faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
-    reuse_cached_network: bool = True,
+    ephemeral_outputs: bool = False,
 ) -> Dict[str, str]:
     """Write AstraSim network/system configs derived from ``hw_obj``."""
     if npus_count is None:
@@ -311,8 +305,9 @@ def generate_astrasim_configs_from_hw(
     signature_parts = [str(size) for _dim, _axes, size, _ in selected_dims]
     dim_signature = "_".join(signature_parts) if signature_parts else f"{target}"
 
-    net_yaml = os.path.join(out_dir, f"network_analytical_{dim_signature}.yml")
-    sys_json = os.path.join(out_dir, f"system_native_collectives_{dim_signature}.json")
+    unique_suffix = f"_{uuid.uuid4().hex}" if ephemeral_outputs else ""
+    net_yaml = os.path.join(out_dir, f"network_analytical_{dim_signature}{unique_suffix}.yml")
+    sys_json = os.path.join(out_dir, f"system_native_collectives_{dim_signature}{unique_suffix}.json")
 
     topo_str = ", ".join(topo_list)
     npus_str = ", ".join(str(v) for v in npus_list)
@@ -336,31 +331,10 @@ def generate_astrasim_configs_from_hw(
         net_content += f"faulty_links: {faulty_links_str}\n"
 
     os.makedirs(os.path.dirname(net_yaml), exist_ok=True)
-    cache_key = (
-        tuple(topo_list),
-        tuple(npus_list),
-        tuple(bw_list),
-        tuple(lat_list),
-        faulty_links_tuple,
-    )
-    cached_path = _NET_YAML_CACHE.get(cache_key) if reuse_cached_network else None
-    need_write = True
-    if cached_path and os.path.exists(cached_path):
-        try:
-            with open(cached_path, "r", encoding="utf-8") as handle:
-                existing = handle.read()
-            if existing == net_content:
-                net_yaml = cached_path
-                need_write = False
-        except Exception:
-            need_write = True
-    if need_write:
-        tmp_path = net_yaml + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            handle.write(net_content)
-        os.replace(tmp_path, net_yaml)
-    if reuse_cached_network:
-        _NET_YAML_CACHE[cache_key] = net_yaml
+    tmp_path = net_yaml + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write(net_content)
+    os.replace(tmp_path, net_yaml)
 
     if astra_cfg:
         coll = astra_cfg.collectives
@@ -426,18 +400,7 @@ def generate_astrasim_configs_from_hw(
                 pds = pds[0] if pds else 1
             system["preferred-dataset-splits"] = int(pds)
 
-    _save_json(
-        sys_json,
-        system,
-        npus_key=(
-            int(npus_count),
-            dim_signature,
-            tuple(ar_impl),
-            tuple(ag_impl),
-            tuple(rs_impl),
-            tuple(a2a_impl),
-        ),
-    )
+    _save_json(sys_json, system)
 
     return {
         "network_yaml": net_yaml,
