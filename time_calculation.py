@@ -364,8 +364,6 @@ class TimeCalculation:
             raw_top_k = getattr(self.model, "moe_top_k", 1)
             self.moe_num_experts = max(1, int(raw_num_experts))
             self.moe_top_k = max(1, int(raw_top_k))
-            if self.moe_top_k > self.moe_num_experts:
-                raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
             self.use_moe = self.moe_num_experts > 1
 
 

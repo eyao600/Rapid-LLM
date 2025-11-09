@@ -1299,8 +1299,7 @@ def parse_config(filename, config_type):
                 ) from exc
             if top_k <= 0:
                 raise ValueError("model_param.top_k must be a positive integer when provided")
-        if top_k > num_experts:
-            raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
+
 
         if "run_type" not in mp:
             raise ValueError("model_param.run_type must be specified")

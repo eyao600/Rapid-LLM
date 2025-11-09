@@ -42,7 +42,7 @@ class Model_LLM:
 
       self.moe_num_experts = int(getattr(exp_config.model_config, "num_experts", 1))
       self.moe_top_k = int(getattr(exp_config.model_config, "top_k", 1))
-      if self.moe_top_k > self.moe_num_experts:
+      if self.moe_top_k > self.moe_num_experts and self.moe_num_experts > 1:
           raise ValueError("model_param.top_k cannot exceed model_param.num_experts")
       self.use_moe = self.moe_num_experts > 1
       

@@ -1036,11 +1036,28 @@ class LLMExecutionDispatcher:
         generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
 
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
+
+        
         if generate_graphs:
-            self.transformer_graph.save_graph(
+            transformer_timed_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
                 self.transformer_forward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            transformer_timed_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
+                self.transformer_backward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            self.transformer_graph.save_graph(
+                transformer_timed_forward_root,
                 self.time_calc.output_dir,
-                "/hybrid_graph_transformer",
+                "/hybrid_graph_transformer_forward",
+            )
+            self.transformer_graph.save_graph(
+                transformer_timed_backward_root,
+                self.time_calc.output_dir,
+                "/hybrid_graph_transformer_backward",
             )
 
         if transformer_time is not None:

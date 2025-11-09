@@ -77,12 +77,13 @@ def multihead_decoder_gemm(self, batch_size, seq_len, d_model, num_heads, kv_hea
         # assuming equal load balancing here
         num_experts = max(1, int(getattr(self, "moe_num_experts", 1)))
         top_k = max(1, int(getattr(self, "moe_top_k", 1)))
-        gemms["ffn1"] = (batch_size, seq_len * top_k / num_experts, d_model, projected_dim ) #gemm shape per expert
+        gemms["ffn1"] = (batch_size, seq_len * top_k / num_experts, d_model, projected_dim ) #gemm shape per expert assuming each dp group has all experts
         gemms["ffn2"] = (batch_size, seq_len * top_k / num_experts, intermediate_size, d_model)
     else:
         gemms["ffn1"] = (batch_size, seq_len, d_model, projected_dim)
         gemms["ffn2"] = (batch_size, seq_len, intermediate_size, d_model) 
     gemms["linear"] = (batch_size, seq_len, d_model, vocab_size)
+    gemms["gate"] = (batch_size, seq_len, d_model, self.moe_num_experts) 
 
     return gemms
 
@@ -135,7 +136,6 @@ def get_transformer_mem_layer( dp, tp, lp, mb, batch_size, hidden_dim, seq_len, 
     act_memory_layer *= lp / mb #pipedream style pipelining activation memory
     act_memory_layer_inf = seq_len * batch_size * intermediate_size / tp * precision.activations  #inference max activation memory, no need to store for backpropagation
     ffn_proj_factor = 3 if str(model_type).lower() == "llama" else 2
-    
     
     transformer_param_layer = 4* hidden_dim * hidden_dim + intermediate_size * ffn_proj_factor * hidden_dim  # weights Wq,Wk,Wv,Wo,ffn
 

@@ -1,6 +1,7 @@
 import math
 import os
 import json
+import warnings
 from enum import Enum
 from typing import Any, Dict, Tuple, Optional, List, Mapping, Sequence, Set
 from collections.abc import Mapping as MappingABC, Sequence as SequenceABC
@@ -110,6 +111,53 @@ COMMUNICATION_RULES: Dict[
         COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
     },
 }
+
+_MOE_GATE_RULE = {
+    'forward': {
+        'kind': 'all_to_all',
+        'participants': 'moe',
+        'interconnect': 'tp',
+        'suffix': 'all_to_all',
+    },
+    'backward': {
+        'kind': 'reduce_scatter',
+        'participants': 'moe',
+        'interconnect': 'tp',
+        'suffix': 'reduce_scatter',
+    },
+}
+_MOE_MLP_RULE = {
+    'forward': {
+        'kind': 'all_to_all',
+        'participants': 'moe',
+        'interconnect': 'tp',
+        'suffix': 'all_to_all',
+    },
+    'backward': {
+        'kind': 'all_to_all',
+        'participants': 'moe',
+        'interconnect': 'tp',
+        'suffix': 'all_to_all',
+    },
+}
+_MOE_LAYER_NORM1_RULE = {
+    'backward': {
+        'kind': 'all_to_all',
+        'participants': 'moe',
+        'interconnect': 'tp',
+        'suffix': 'all_to_all',
+    },
+}
+MOE_COMMUNICATION_RULES: Dict[
+    ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, str]]]]
+] = {
+    mode: {
+        'gate': _MOE_GATE_RULE,
+        'MLP': _MOE_MLP_RULE,
+        'layernorm1': _MOE_LAYER_NORM1_RULE,
+    }
+    for mode in ParallelismMode
+}
 class GemmType(Enum):
     ATTENTION_SCORE = "attention_score"
     ATTENTION_OUTPUT = "attention_output"
@@ -118,6 +166,7 @@ class GemmType(Enum):
     FFN1 = "ffn1"
     FFN2 = "ffn2"
     LINEAR_SOFTMAX = "linear_softmax"
+    LAYER_NORM_1 = "layer_norm1"
 
 
 class TimeCalculationLLM(TimeCalculation):
@@ -132,8 +181,7 @@ class TimeCalculationLLM(TimeCalculation):
             mode,
             astra_policy_override=astra_policy,
         )
-        if self.num_workers > 1 and model_config.model_config.num_experts > 1:
-            raise ValueError("MoE is only supported for single-worker runs (total worker count must be 1).")
+
           
         self.output_dir = os.path.abspath(output_dir) if output_dir else os.getcwd()
         os.makedirs(self.output_dir, exist_ok=True)
@@ -192,6 +240,31 @@ class TimeCalculationLLM(TimeCalculation):
             return ParallelismMode.TENSOR_CONTEXT_HYBRID
         else:
             return ParallelismMode.SINGLE
+
+    @property
+    def experts_per_gpu(self) -> int:
+        """
+        Return the number of MoE experts assigned to each GPU assuming each dp group has all experts.
+        """
+        if not self.use_moe or self.moe_num_experts <= 1:
+            return 0
+        moe_ranks = max(1, self.tp * self.cp)
+        if moe_ranks > self.moe_num_experts:
+            warnings.warn(
+                "MoE configuration has fewer experts than tp * cp; DeepFlow only supports at least one expert per GPU (no expert slicing).",
+                RuntimeWarning,
+            )
+            raise ValueError("Number of MoE experts must be at least equal to the number of parallel ranks.")
+        if self.moe_num_experts % moe_ranks != 0:
+            raise ValueError("Number of MoE experts must be divisible by the total number of parallel ranks (tp * cp ).")
+        return max(1, math.ceil(self.moe_num_experts / moe_ranks))
+
+    @experts_per_gpu.setter
+    def experts_per_gpu(self, value: int) -> None:
+        # Preserve the base class assignment for debugging, but the getter drives usage.
+        self._experts_per_gpu_base_value = value
+
+
 
     def _param_stats_per_rank(
         self,
@@ -371,12 +444,11 @@ class TimeCalculationLLM(TimeCalculation):
         #TODO load 3 tiled gemm inputs and 1 output from HBM to SRAM
         
         #TODO disable HBM access
-        attention_forward_reduction_time = 0
+        attention_forward_reduction_time = 1
         attention_size_f = 0
         
         attn_score_time = self.getGEMMTime(Br, d, Bc, "attention_score_f")[0] * Tc * Tr #attention score gemm time for one head
         number_flops =  Br * Bc * d * Tc * Tr * batch_size * num_heads
-        print(f"Flash Attention: attention score gemm flops={number_flops/1e9} GFLOPS")
          
         # Softmax time
         elements = Br * Bc
@@ -437,9 +509,6 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_type = self._normalize_gemm_type(gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch + self.O
-        elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
-            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name)
-            gemm_time *= self.moe_num_experts
         else :
             gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name)
         return gemm_time, 0, 0, total_flops, mem_accesses
@@ -450,9 +519,6 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             grad_time_act = self.getGEMMTime(m, k, n, name, disable_overhead=True)[0] * batch + self.O
             grad_time_wt = self.getGEMMTime(k, m, n, name, disable_overhead=True)[0] * batch + self.O
-        elif (gemm_type == GemmType.FFN1 or gemm_type == GemmType.FFN2) and self.use_moe:
-            grad_time_act = self.getGEMMTime(m, n, k, name)[0] * self.moe_num_experts
-            grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * self.moe_num_experts
         else :
             grad_time_act = self.getGEMMTime(m, n, k, name)[0]
             grad_time_wt = self.getGEMMTime(k, m, n, name)[0]
@@ -675,10 +741,6 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
             gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name, disable_overhead=True)
             gemm_time = gemm_time * batch / max(1, self.tp) + self.O
-        elif gemm_type in (GemmType.FFN1, GemmType.FFN2) and self.use_moe:
-            # MoE FFN layers replicate experts across all TP ranks, so no TP sharding here.
-            gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, n, name)
-            gemm_time *= self.moe_num_experts
         elif gemm_type in (GemmType.QKV, GemmType.FFN1):  # column wise
             shard_n = math.ceil(n / max(1, self.tp))
             gemm_time,_,_, mem_accesses = self.getGEMMTime(m, k, shard_n, name)
@@ -837,7 +899,7 @@ class TimeCalculationLLM(TimeCalculation):
         if gemm_type == GemmType.ATTENTION_SCORE:
             grad_time_act = self.getGEMMTime(shard_m, n, k, name, disable_overhead=True)[0] * batch + self.O
             grad_time_wt = self.getGEMMTime(k, shard_m, n, name, disable_overhead=True)[0] * batch + self.O
-            total_bytes = self.precision.grad_communication * k * n * batch * 2 # account for both Q and K
+            total_bytes = self.precision.grad_communication * k * n * batch * 2 # account for both K and V
             kind = "reduce_scatter"
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             grad_time_act = self.getGEMMTime(shard_m, n, k, name, disable_overhead=True)[0] * batch + self.O
@@ -865,7 +927,53 @@ class TimeCalculationLLM(TimeCalculation):
                 axis="cp",
             )
         return gemm_time, reduction_time, total_bytes
-    
+    def get_moe_ffn_f(self, gemm, name, gemm_type: Optional[GemmType] = None):
+        batch, m, k, n = self._expand_gemm_descriptor(gemm)
+        reduction_time = 0
+        total_bytes = 0
+        total_flops = 2 * batch * m * k * n * self.experts_per_gpu
+        gemm_time, _, _ ,mem_accesses= self.getGEMMTime(m, k, n, name)
+        gemm_time *= self.experts_per_gpu
+
+        if gemm_type == GemmType.FFN2:
+            per_rank_bytes = math.ceil(self.precision.activations * m * n * self.experts_per_gpu)
+            total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp )) 
+            reduction_time = self.network_model.collective(
+                kind="all_to_all",
+                size_bytes=total_bytes,
+                participants=self.cp * self.tp,
+                ib=self.IBTP,
+                ll=self.LLTP,
+                local_bytes=0,
+                debug_label="moe_ffn_f_all_to_all",
+            )
+        return gemm_time, reduction_time, total_bytes, total_flops, mem_accesses
+
+    def get_moe_ffn_b(self, gemm, name, gemm_type):
+        
+        batch, m, k, n = self._expand_gemm_descriptor(gemm)
+        reduction_time = 0
+        total_bytes = 0
+        grad_time_act = self.getGEMMTime(m, n, k, name)[0] * self.experts_per_gpu
+        grad_time_wt = self.getGEMMTime(k, m, n, name)[0] * self.experts_per_gpu
+        gemm_time = grad_time_act + grad_time_wt
+
+        if gemm_type == GemmType.FFN1:
+            per_rank_bytes = math.ceil(self.precision.activations * m * k * self.experts_per_gpu)
+            total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp ))
+            reduction_time = self.network_model.collective(
+                kind="all_to_all",
+                size_bytes=total_bytes,
+                participants=self.tp * self.cp,
+                ib=self.IBTP,
+                ll=self.LLTP,
+                local_bytes=0,
+                debug_label="moe_ffn_b_all_to_all",
+                
+            )
+        
+        return gemm_time, reduction_time, total_bytes
+        
 
                 
     def get_embedding_f(self, vocab_size, seq_len, hidden_dim):
@@ -1156,7 +1264,7 @@ class TimeCalculationLLM(TimeCalculation):
     
     
 
-    def get_layernorm_b(self, batch, seq_len, d_model, comm_after=False):
+    def get_layernorm_b(self, batch, seq_len, d_model, type = Optional):
         tp_mode = self.get_parallelism_mode()
         seq_degree = self._sequence_parallel_degree()
         if tp_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
@@ -1172,7 +1280,21 @@ class TimeCalculationLLM(TimeCalculation):
             name="pointwise-layernorm-b",
             mem_level=self.num_levels - 1,
         ) + 4 * self.O
-        if tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID):  # communication after layernorm
+        if self.use_moe and type == GemmType.LAYER_NORM_1:  # communication after layernorm
+            per_rank_bytes = self.precision.grad_communication * elements * self.moe_top_k
+            total_bytes = int(math.ceil(per_rank_bytes * self.tp * self.cp))
+            
+            reduction_time = self.network_model.collective(
+                kind="all_to_all",
+                size_bytes=total_bytes,
+                participants=self.tp * self.cp,
+                ib=self.IBTP,
+                ll=self.LLTP,
+                local_bytes=0,
+                debug_label="layernorm_b_all_to_all",
+            )
+
+        elif tp_mode in (ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.TENSOR_CONTEXT_HYBRID) :
             per_rank_bytes = self.precision.grad_communication * elements
             total_bytes = int(math.ceil(per_rank_bytes * self.tp))
             reduction_time = self.network_model.collective(
@@ -1192,7 +1314,57 @@ class TimeCalculationLLM(TimeCalculation):
 
 
         return compute_time, reduction_time, total_bytes
+    def get_gate_f(self, gemm_gate, gemm_ffn1):
+        #TODO gate overhead for moe is very minimal, can be ignored, implemented for completeness
+        _, effective_m, k, n = self._effective_dims(gemm_gate)
+        effective_m = effective_m / (self.cp)
+        gemm_time = self.single_gpu_gemm_forward(gemm_gate, "gate_f")[0]
+        elements = effective_m * n
+        flops = elements * SOFTMAX_FORWARD_FLOPS_PER_ELEMENT
+        mem_bytes = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES  
 
+        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-gate-f", mem_level=self.num_levels - 1) + self.O
+
+        per_rank_bytes = math.ceil(self.precision.activations * gemm_ffn1[0] * gemm_ffn1[1] * self.experts_per_gpu)
+        total_bytes = int(math.ceil(per_rank_bytes * self.cp * self.tp )) 
+        reduction_time = self.network_model.collective(
+            kind="all_to_all",
+            size_bytes=total_bytes,
+            participants = self.tp * self.cp,
+            ib=self.IBTP,
+            ll=self.LLTP,
+            local_bytes=0,
+            debug_label="gate_f_all_to_all",
+        )
+
+
+        return compute_time, reduction_time, total_bytes
+    def get_gate_b(self, gemm_gate, gemm_ffn1):
+        #TODO gate overhead for moe is very minimal, can be ignored, implemented for completeness
+        _, effective_m, k, n = self._effective_dims(gemm_gate)
+        elements = effective_m * k / (self.tp * self.cp)
+
+        gemm_time = self.single_gpu_gemm_backward(gemm_gate, "gate_f")[0]
+
+        flops = elements * SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT
+        mem_bytes = self.precision.activations * elements * SOFTMAX_BACKWARD_MEM_ACCESSES
+
+        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-gate-f", mem_level=self.num_levels - 1) + self.O
+        bytes_per_rank = math.ceil(self.precision.activations * elements)
+
+        total_bytes = int(math.ceil(bytes_per_rank * self.tp))
+        reduction_time = self.network_model.collective(
+            kind="reduce_scatter",
+            size_bytes=total_bytes,
+            participants=self.tp ,
+            ib=self.IBTP,
+            ll=self.LLTP,
+            local_bytes=0,
+            debug_label="gate_b_reduce_scatter",
+        )
+
+
+        return compute_time, reduction_time, total_bytes
     
     def get_embedding_b(self, vocab_size, seq_len, hidden_dim):
         batch = self._effective_transformer_batch()
@@ -1447,6 +1619,7 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_ffn1 = gemm_shapes["ffn1"]
         gemm_ffn2 = gemm_shapes["ffn2"]
         gemm_linear = gemm_shapes["linear"]
+        gemm_gate = gemm_shapes["gate"]
 
         transformer_timings: Dict[str, OperationTiming] = {}
 
@@ -1672,13 +1845,52 @@ class TimeCalculationLLM(TimeCalculation):
                 comm_bytes=out_proj_size_b,
             ),
         )
-
-        ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
-            self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
-        )
-        ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(
-            gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1
-        )
+        if not self.use_moe:
+            ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_ffn1, "ffn_f", gemm_type=GemmType.FFN1)
+            )
+            ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self.parallelism_gemm_backward(
+                gemm_ffn1, "ffn_b", gemm_type=GemmType.FFN1
+            )
+            ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
+                self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
+            )
+            ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(
+                gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2
+            )
+            
+            
+            
+        else:
+            gate_gemm_time_f , gate_reduction_f, gate_size_f, _, _ = _extract_forward(self.get_gate_f(gemm_gate, gemm_ffn1))
+            gate_gemm_time_b , gate_reduction_b, gate_size_b= self.get_gate_b(gemm_gate, gemm_ffn1)
+            ffn1_gemm_f, ffn1_reduction_f, ffn1_size_f, ffn1_flops_f, ffn1_mem_f = _extract_forward(
+                self.get_moe_ffn_f(gemm_ffn1, "ffn1_f", gemm_type=GemmType.FFN1)
+            )
+            ffn1_gemm_b, ffn1_reduction_b, ffn1_size_b = self.get_moe_ffn_b(gemm_ffn1, "ffn1_b", gemm_type=GemmType.FFN1)
+            ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
+                self.get_moe_ffn_f(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
+            )
+            ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.get_moe_ffn_b(gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2)
+        if self.use_moe:
+            transformer_timings["gate"] = OperationTiming(
+                "gate",
+                forward=_make_direction(
+                    "gate",
+                    "forward",
+                    compute_time=gate_gemm_time_f,
+                    comm_time=gate_reduction_f,
+                    comm_bytes=gate_size_f,
+                ),
+                backward=_make_direction(
+                    "gate",
+                    "backward",
+                    compute_time=gate_gemm_time_b,
+                    comm_time=gate_reduction_b,
+                    comm_bytes=gate_size_b,
+                ),
+            )
+        
         transformer_timings["ffn1"] = OperationTiming(
             "ffn1",
             forward=_make_direction(
@@ -1699,12 +1911,7 @@ class TimeCalculationLLM(TimeCalculation):
             ),
         )
 
-        ffn2_gemm_f, ffn2_reduction_f, ffn2_size_f, ffn2_flops_f, ffn2_mem_f = _extract_forward(
-            self.parallelism_gemm_forward(gemm_ffn2, "ffn2_f", gemm_type=GemmType.FFN2)
-        )
-        ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(
-            gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2
-        )
+
         transformer_timings["ffn2"] = OperationTiming(
             "ffn2",
             forward=_make_direction(
@@ -1757,6 +1964,7 @@ class TimeCalculationLLM(TimeCalculation):
             batch=batch_size,
             seq_len=seq_len,
             d_model=hidden_dim,
+            type=GemmType.LAYER_NORM_1,
         )
         transformer_timings["layernorm1"] = OperationTiming(
             "layernorm1",
@@ -2080,13 +2288,36 @@ class TimeCalculationLLM(TimeCalculation):
         transformer_operation_entries: List[Dict[str, Any]] = []
         transformer_comm_metadata: Dict[str, Dict[str, Any]] = {}
         parallelism_mode = self.get_parallelism_mode()
-        rules_by_mode = COMMUNICATION_RULES.get(parallelism_mode) or {}
+        def _clone_comm_rules(rules: Dict[str, Dict[str, Optional[Dict[str, str]]]]) -> Dict[str, Dict[str, Optional[Dict[str, str]]]]:
+            cloned: Dict[str, Dict[str, Optional[Dict[str, str]]]] = {}
+            for op_name, directions in rules.items():
+                cloned[op_name] = {}
+                for direction, spec in directions.items():
+                    cloned[op_name][direction] = dict(spec) if spec else None
+            return cloned
+
+        def _resolve_comm_rules(mode: ParallelismMode) -> Dict[str, Dict[str, Optional[Dict[str, str]]]]:
+            base_rules = COMMUNICATION_RULES.get(mode) or {}
+            if not self.use_moe:
+                return base_rules
+            overrides = MOE_COMMUNICATION_RULES.get(mode)
+            if not overrides:
+                return base_rules
+            merged = _clone_comm_rules(base_rules)
+            for op_name, directions in overrides.items():
+                merged.setdefault(op_name, {})
+                for direction, spec in directions.items():
+                    merged[op_name][direction] = dict(spec) if spec else None
+            return merged
+
+        rules_by_mode = _resolve_comm_rules(parallelism_mode)
         participants_lookup = {
             'tp': int(getattr(self, 'tp', 0) or 0),
             'cp': int(getattr(self, 'cp', 0) or 0),
             'dp': int(getattr(self, 'dp', 0) or 0),
             'lp': int(getattr(self, 'lp', 0) or 0),
         }
+        participants_lookup['moe'] = max(1, participants_lookup['tp'] * participants_lookup['cp'])
         group_members = {
             "MHA": ("qkv_proj", "attention", "output_proj"),
             "MLP": ("ffn1", "gelu", "ffn2"),
@@ -2197,11 +2428,15 @@ class TimeCalculationLLM(TimeCalculation):
             return transformer_timings[name]
 
         if parallelism_mode in (ParallelismMode.CONTEXT, ParallelismMode.TENSOR_CONTEXT_HYBRID):
-            op_names = ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP")
+            op_names: Sequence[str] = ("layernorm1", "qkv_proj", "attention", "output_proj", "layernorm2", "MLP")
         elif parallelism_mode in (ParallelismMode.TENSOR, ParallelismMode.TENSOR_SEQUENCE, ParallelismMode.SINGLE):
             op_names = ("layernorm1", "MHA", "layernorm2", "MLP")
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
+        op_names = list(op_names)
+        if self.use_moe and "MLP" in op_names and "gate" not in op_names:
+            mlp_index = op_names.index("MLP")
+            op_names.insert(mlp_index, "gate")
 
         for key in op_names:
             try:
