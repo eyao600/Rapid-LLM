@@ -2,7 +2,7 @@ sw_param:
   kernel_launch_overhead: 9e-6   # (s)
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1
-  dp_zero_stage: 2
+  dp_zero_stage: 1
   precision:
     # tensor_format accepts numeric byte counts or dtype strings (fp16, bf16, fp32).
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
@@ -13,7 +13,7 @@ sw_param:
     # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes.
     # -> true enables AMP-style FP32 accumulations/optimizer states depending on param_storage_mode.
     # if true, optimizer states and stats are always FP32.
-    mixed_precision: false
+    mixed_precision: true
     # param_storage_mode: as_tensor_format | tensor_plus_fp32_master | fp32_params.
     # -> as_tensor_format makes weights/gradients use tensor_format bytes.
     # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
@@ -33,10 +33,10 @@ tech_param:
     FMA_d1: 8                 # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
     FMA_d2: 4
     dataflow: best            # {wst | ast | ost | best}: wst: weight stationary, ast: activation stationary, ost: output stationary, best: best of all 3
-    util: 100.0
+    util: 1.0
   DRAM:
     size: 80 GB
-    bandwidth: 198600 GB     # (/s)
+    bandwidth: 1986 GB     # (/s)
     dynamic_energy_per_bit: 4.5e-12     # (J)
     latency: 100e-9     # (s)
     util: 1
@@ -75,52 +75,55 @@ memory_hierarchy:
 
 parallelism:
   dp: 2 # data parallelism. Acts as replica count during inference
-  tp: 4 # tensor parallelism
+  tp: 2 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
-  cp: 1 # context parallelism. Not supported for inference.
-  lp: 2 # pipeline parallelism. Number of pipeline stages
+  cp: 2 # context parallelism. Not supported for inference.
+  lp: 4 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 2 # micro-batches (for best results set to >= lp). 
+  mb: 4 # micro-batches (for best results set to >= lp). 
 
 network:
-  # currently only support astrasim integration with all devices in one node.
-  - id: dim0
-    label: intra_wafer_mesh_silicon
-    size: 4
-    topology:
-      type: Ring
-      bandwidth: 1000 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 1.0
-    collective_override: {} # overrides execution_backend.collectives when provided
-    parallelisms: [tp, cp]
-  - id: dim1
-    label: inter_wafer_ring_infiniband
-    size: 2
-    topology:
-      type: Ring
-      bandwidth: 200 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 1.0
-    collective_override: {} # overrides execution_backend.collectives when provided
-    parallelisms: [lp]
-  - id: dim2
-    label: wafer_dp_chains_ring_infiniband
-    size: 2
-    topology:
-      type: ring
-      bandwidth: 200 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 0.96
-    collective_override: {} # overrides execution_backend.collectives when provided
-    parallelisms: [dp]
-
+  # Global faulty links apply to the active AstraSim dimension: [[src, dst, weight]]
+  # faulty_links: [[0,1,0.6],[16,17,0.1]]
+  dimensions:
+    # currently only support astrasim integration with all devices in one node.
+    - id: dim0
+      label: torus2d_tp
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 1.0
+        optimize_2dmap: false
+      collective_override: {} # overrides execution_backend.collectives when provided
+      parallelisms: [tp, cp]
+    - id: dim1
+      label: inter_torus_infiniband
+      size: auto
+      topology:
+        type: Ring 
+        bandwidth: 25 GB
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 1.0
+      collective_override: {} # overrides execution_backend.collectives when provided
+      parallelisms: [lp,dp]
+    - id: dim2
+      label: inter_torus_infiniband_dp
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 25 GB
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 1.0
+      parallelisms: []
+      collective_override: {} # overrides execution_backend.collectives when provided
 
 execution_backend:
-  model: analytical # analytical | astra
+  model: astra # analytical | astra
   astra:
     backend: astra
     mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened

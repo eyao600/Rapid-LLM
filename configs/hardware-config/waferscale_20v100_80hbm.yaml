@@ -112,17 +112,18 @@ parallelism:
   cp: 1
 
 network:
-  - id: dim0
-    label: wafer_mesh
-    size: 20
-    topology:
-      type: Mesh
-      bandwidth: 5000 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 0.95
-    collective_override: {} # overrides execution_backend.collectives when provided
-    parallelisms: [tp, cp, lp, dp]
+  dimensions:
+    - id: dim0
+      label: wafer_mesh
+      size: 20
+      topology:
+        type: Mesh
+        bandwidth: 5000 Gb
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 0.95
+      collective_override: {} # overrides execution_backend.collectives when provided
+      parallelisms: [tp, cp, lp, dp]
 
 execution_backend:
   model: astra # analytical | astra

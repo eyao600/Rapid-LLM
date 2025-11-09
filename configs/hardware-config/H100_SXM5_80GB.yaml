@@ -91,17 +91,18 @@ parallelism:
   cp : 1 # context parallelism
 
 network:
-  - id: dim0
-    label: device_fabric
-    size: 1
-    topology:
-      type: Mesh
-      bandwidth: 400 Gb
-      latency: 5e-6
-      energy_per_bit: 8e-12 # (J/bit)
-      util: 1.0
-    collective_override: {} # overrides execution_backend.collectives when provided
-    parallelisms: [tp, cp, lp, dp, kp1, kp2]
+  dimensions:
+    - id: dim0
+      label: device_fabric
+      size: 1
+      topology:
+        type: Mesh
+        bandwidth: 400 Gb
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 1.0
+      collective_override: {} # overrides execution_backend.collectives when provided
+      parallelisms: [tp, cp, lp, dp]
 
 execution_backend:
   model: astra # analytical | astra
