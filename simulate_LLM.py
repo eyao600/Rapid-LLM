@@ -133,17 +133,43 @@ class Graph:
         self.num_batch = self.misc_metadata.get("num_batch", 0)
         self.num_layer = self.misc_metadata.get("num_layer", 0)
         self.layer_per_device = self.num_layer / self.lp if self.lp else self.num_layer
-        # if self layers per device is not an integer, raise Exception complaining about divisors!
-        if self.layer_per_device != int(self.layer_per_device):
-            raise Exception(f"The number of layers {self.num_layer} is not divisible by the degree of pipeline parallelism {self.lp}")
         self.all_reduce = self.misc_metadata.get("all_reduce", "every layer")
 
         self.transformer_cfg = self.comp_times.get("transformer", {})
         self.T_grad_transformer = self.comp_times.get("grad_transformer", 0.0)
+        self.layers_per_stage = self._compute_layers_per_stage()
+        self.layer_to_stage = self._build_layer_to_stage()
 
     def _time(self, key: str, default: float = 0.0) -> float:
         value = self.comp_times.get(key)
         return float(value) if value is not None else default
+
+    def _compute_layers_per_stage(self) -> List[int]:
+        stage_count = max(1, int(self.lp) if self.lp else 1)
+        if self.num_layer <= 0:
+            return [0 for _ in range(stage_count)]
+        base = self.num_layer // stage_count
+        remainder = self.num_layer % stage_count
+        layers_per_stage: List[int] = []
+        for stage_idx in range(stage_count):
+            count = base + (1 if stage_idx < remainder else 0)
+            layers_per_stage.append(count)
+        return layers_per_stage
+
+    def _build_layer_to_stage(self) -> List[int]:
+        mapping: List[int] = []
+        for stage_idx, count in enumerate(self.layers_per_stage):
+            if count <= 0:
+                continue
+            mapping.extend([stage_idx] * count)
+        return mapping
+
+    def _stage_for_layer(self, layer_idx: int) -> int:
+        if layer_idx < 0 or layer_idx >= self.num_layer:
+            raise IndexError(f"Layer index {layer_idx} is out of bounds for {self.num_layer} layers.")
+        if self.layer_to_stage:
+            return self.layer_to_stage[layer_idx]
+        return 0
 
     def create_comm_edge(self, name, op_id, comm_key, is_dp=False, local_hw_id=None):
         """Create a communication edge with optional local computation node.
@@ -622,7 +648,7 @@ class Graph:
             layer_exit_nodes[b] = []
 
             for l in range(self.num_layer):
-                hw_id = min(l // self.layer_per_device , self.lp - 1)#assign hw_id for transformer
+                hw_id = self._stage_for_layer(l)
                 transformer_node = Node(f"transformer_layer{l}", op_id, hw_id, transformer_f_time)
                 transformer_node.micro_batch_index = b
                 transformer_node.layer_index = l
@@ -711,7 +737,7 @@ class Graph:
 
 
             for l in reversed(range(self.num_layer)):
-                hw_id = min(l // self.layer_per_device , self.lp - 1)
+                hw_id = self._stage_for_layer(l)
                 transformer_node_b = Node(f"transformer_layer{l}_b", op_id, hw_id, transformer_b_time, fwd=False)
                 transformer_node_b.micro_batch_index = b
                 transformer_node_b.layer_index = l
