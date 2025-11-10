@@ -394,7 +394,7 @@ class TimeCalculationLLM(TimeCalculation):
         # assuming key and value are preloaded into shared memory before attention computation
         load_kv_bytes = Bc * d * 2 * num_SMs * self.precision.activations #load key and value for one tile from HBM to SRAM
         initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
-        initial_load_time_per_head = initial_load_time * math.ceil(Tc/ num_SMs)
+
         
         # attention score gemm
         load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
@@ -411,12 +411,13 @@ class TimeCalculationLLM(TimeCalculation):
         attn_output_time_per_tile = self.getGEMMTime(Br, Bc, d, "attention_output", read_bytes_l2=output_bytes, write_bytes_l2=output_bytes, flashattn_enable=True)[0] 
         attn_output_time = attn_output_time_per_tile * Tc * Tr #attention output gemm time for one head
         
-        load_time = initial_load_time_per_head * batch_size * kv_heads / max(1, self.tp) #load time for key and value are needed once per kv head
+        
         attn_score_time *= batch_size * num_heads / max(1, self.tp) + self.O
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
         attn_output_time *= batch_size * num_heads / max(1, self.tp) + self.O
-        
-        attention_forward_gemm_time = load_time + attn_score_time + attn_scale_softmax_time + attn_output_time
+
+
+        attention_forward_gemm_time = initial_load_time + attn_score_time + attn_scale_softmax_time + attn_output_time
         attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
 
         # HBM traffic consists of only reading Q, K, V once and writing output once
@@ -425,47 +426,81 @@ class TimeCalculationLLM(TimeCalculation):
         return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f, attention_mem
     
     
-    def flash_attention_kernel_backward(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
-        #TODO: should be repleced with a modified version of getgemmtime that considers flash attention tiling
-        """Return time for flash attention kernel."""
-        #FIXME not finished
-        #TODO gqa support
-        batch_size = self.microB
-        seq_len = self.seq_len
-        hidden_dim = self.hidden_dim
-        num_heads = self.num_heads
+    def flash_attention_kernel_backward(self, batch_size, hidden_dim, seq_len, num_heads, kv_heads, num_SMs) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+        """Return time for flash attention backward kernel."""
+        
         shard_seq = math.ceil(seq_len / max(1, self.cp)) 
-        d = hidden_dim // num_heads #gemm shape for one head is (seq_len, d) x (d, seq_len)
-        Bc = self.attention_tile_size
-        Br = min(Bc, d)
-        Tr = math.ceil(shard_seq / Br) #number of row tiles
-        Tc =  math.ceil(shard_seq / Bc) #number of column tiles
-        print(f"Flash Attention: Br={Br}, Tr={Tr}, d={d}, Bc={Bc}, Tc={Tc}")
-        #TODO load 3 tiled gemm inputs and 1 output from HBM to SRAM
+        d = hidden_dim // num_heads # gemm shape for one head is (seq_len, d) x (d, seq_len)
+        Bc = self.attention_tile_size # kv tile size
+        Br = min(Bc, d) # q tile size
+        Tr = math.ceil(shard_seq / Br) #number of q tiles
+        Tc =  math.ceil(shard_seq / Bc) #number of kv tiles
         
-        #TODO disable HBM access
-        attention_forward_reduction_time = 1
-        attention_size_f = 0
+        attention_backward_reduction_time = 0
+        attention_size_b = 0
+        # assuming key and value are preloaded into shared memory before attention backward computation
+        load_kv_bytes = Bc * d * 2 * num_SMs * self.precision.activations #load key and value for one tile from HBM to SRAM
+        initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load_b", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
+
         
-        attn_score_time = self.getGEMMTime(Br, d, Bc, "attention_score_f")[0] * Tc * Tr #attention score gemm time for one head
-        number_flops =  Br * Bc * d * Tc * Tr * batch_size * num_heads
-         
-        # Softmax time
+        # attention score recompute
+        load_q_bytes = Br * d * self.precision.activations #load query for one tile assuming k is already in shared memory
+        attn_score_time_per_tile = self.getGEMMTime(Br, d, Bc, "attention_score_b",read_bytes_l2=load_q_bytes, flashattn_enable=True)[0] #recompute S = QK^T for backward [Br, Bc]
+        attn_score_time = attn_score_time_per_tile * Tc * Tr #attention score gemm time for one head
+        
+        # Softmax recompute time 
         elements = Br * Bc
-        flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  # exponentiation + subtract max + dropout
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
-        attn_output_time = self.getGEMMTime(Br, Bc, d, "attention_output")[0] * Tc * Tr #attention output gemm time for one head
-        attn_score_time *= batch_size * num_heads / max(1, self.tp)
+        flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  
+        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax_recompute", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        
+        # dV dP
+        load_o_bytes = Br * d * self.precision.activations #load output for one tile assuming v is already in shared memory
+        act_dO_time_per_tile = self.getGEMMTime(Bc, Br, d, "attention_output_b", read_bytes_l2=load_o_bytes, flashattn_enable=True)[0] #dV = P^T * dO  [Bc, d]
+        act_dP_time_per_tile = self.getGEMMTime(Br, d, Bc, "attention_score_b", read_bytes_l2=0, flashattn_enable=True)[0] #dP = dO * V^T [Br, Bc]
+        act_dO_time = act_dO_time_per_tile * Tc * Tr #dV time for one head
+        act_dP_time = act_dP_time_per_tile * Tc * Tr #dP time for one head
+        
+        # compute dS
+        elements = Br * Bc
+        flops = (SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT ) * elements 
+        softmax_time_backward = self.roofline(flops, 1, "attention_scale_softmax_b", mem_level=self.num_levels - 1) * Tc * Tr #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        
+        # dQ
+        act_dQ_time_per_tile = self.getGEMMTime(Br, Bc, d, "attention_score_b", read_bytes_l2=0, flashattn_enable=True)[0] #dQ = dS * K [Br, d]
+        act_dQ_time = act_dQ_time_per_tile * Tc * Tr #dQ time for one head
+        
+        
+        attn_score_time *= batch_size * num_heads / max(1, self.tp) + self.O
         attn_scale_softmax_time *= batch_size * num_heads / max(1, self.tp)
-        attn_output_time *= batch_size * num_heads / max(1, self.tp)
+        act_dO_time *= batch_size * num_heads / max(1, self.tp) + self.O
+        act_dP_time *= batch_size * num_heads / max(1, self.tp) + self.O
+        softmax_time_backward *= batch_size * num_heads / max(1, self.tp)
+        act_dQ_time *= batch_size * num_heads / max(1, self.tp) + self.O
         
-        attention_forward_gemm_time = attn_score_time + attn_scale_softmax_time + attn_output_time
+        attention_backward_gemm_time = initial_load_time + attn_score_time + attn_scale_softmax_time + act_dO_time + act_dP_time + softmax_time_backward + act_dQ_time
+        attention_backward_time = attention_backward_gemm_time + attention_backward_reduction_time
         
-        attention_forward_time = attention_forward_gemm_time + attention_forward_reduction_time
-        attention_size_f = 0
+        
+        attention_size_b = self.precision.grad_communication * batch_size * seq_len * hidden_dim * 2 / self.tp # weight gradient of K V need to be reduce scattered  *2 account for both attn key and value
+        kind = "reduce_scatter"
+        participants = self.cp
+        axis_hint = "cp"
+        if attention_size_b > 0:
+            attention_backward_reduction_time = self.network_model.collective(
+            kind=kind,
+            size_bytes=attention_size_b,
+            participants=participants,
+            ib=self.IBTP,
+            ll=self.LLTP,
+            local_bytes=0,
+            debug_label= "attention_backward_reduction",
+            axis=axis_hint,
+        )
+           
+        
         
     
-        return attention_forward_time, attention_forward_gemm_time, attention_forward_reduction_time, attention_size_f
+        return attention_backward_time, attention_backward_gemm_time, attention_backward_reduction_time, attention_size_b
         
         
     @staticmethod
@@ -1705,9 +1740,11 @@ class TimeCalculationLLM(TimeCalculation):
                 forward=attn_score_forward,
                 backward=attn_score_backward,
             )
-
+            
+            
             attention_scale_softmax_f = self.get_scale_softmax_f(gemm=gemm_attention_score)
             attention_scale_softmax_b = self.get_scale_softmax_b(gemm=gemm_attention_score)
+            
             transformer_timings["attention_scale_softmax"] = OperationTiming(
                 name="attention_scale_softmax",
                 forward=_make_direction(
@@ -1797,10 +1834,15 @@ class TimeCalculationLLM(TimeCalculation):
                 kv_heads,
                 num_SMs,
             )
-            attention_b = attention_f * 2
-            attention_gemm_b = attention_gemm_f * 2
-            attention_reduction_b = attention_reduction_f * 2
-            attention_size_b = attention_size_f * 2
+            attention_b, attention_gemm_b, attention_reduction_b, attention_size_b = self.flash_attention_kernel_backward(
+                batch_size,
+                hidden_dim,
+                seq_len,
+                num_heads,
+                kv_heads,
+                num_SMs,
+            )
+
             transformer_timings["attention"] = OperationTiming(
                 "attention",
                 forward=_make_direction(
@@ -1858,9 +1900,7 @@ class TimeCalculationLLM(TimeCalculation):
             ffn2_gemm_b, ffn2_reduction_b, ffn2_size_b = self.parallelism_gemm_backward(
                 gemm_ffn2, "ffn2_b", gemm_type=GemmType.FFN2
             )
-            
-            
-            
+
         else:
             gate_gemm_time_f , gate_reduction_f, gate_size_f, _, _ = _extract_forward(self.get_gate_f(gemm_gate, gemm_ffn1))
             gate_gemm_time_b , gate_reduction_b, gate_size_b= self.get_gate_b(gemm_gate, gemm_ffn1)
