@@ -6,7 +6,7 @@ import seaborn as sns
 
 import matplotlib.pyplot as plt
 
-from validation_scripts.validation_helpers import (
+from validation_helpers import (
   ValidationSpec,
   parse_decode_time,
   run_validation_suite,
