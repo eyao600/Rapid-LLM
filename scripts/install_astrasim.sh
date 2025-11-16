@@ -17,7 +17,6 @@ if [[ ! -d "${ASTRA_SIM_DIR}" ]]; then
 fi
 
 echo "[astrasim] Updating AstraSim nested submodules..."
-git -C "${ASTRA_SIM_DIR}" submodule update --init --recursive
 git -C "${ASTRA_SIM_DIR}" submodule update --remote -- extern/network_backend/analytical
 
 BUILD_SCRIPT="${ASTRA_SIM_DIR}/build/astra_analytical/build.sh"
