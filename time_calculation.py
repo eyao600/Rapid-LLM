@@ -13,7 +13,7 @@ import util
 from hw_component import Core, MemoryHierarchy, Network, DRAM
 from astrasim_lib import run_cache_astrasim
 from model import Model_LSTM, Model_GEMM, Model_LLM
-from tile import TiledGEMM, formatBytes
+from tile import AccessBytes, TiledGEMM, formatBytes
 
 algByte = False  # algorithmic ops false
 proj = False  # consider projection layer, turn off for end-2-end validation, as baeline model does not have projection layer
@@ -758,7 +758,7 @@ class TimeCalculation:
             num_level = len(mem_access)
             try:
                 if not flashattn_enable:
-                    assert mem_access[num_level - 1] > 0, "last_level_mem = 0"
+                    assert mem_access[num_level - 1] > 0, f"mem_access: {mem_access_}"
             except Exception as e:
                 print(
                     "{}: Number of accesses to the last level of memory hierarchy cannot be zero:\n {}".format(
@@ -788,12 +788,14 @@ class TimeCalculation:
 
         # print("Roofline: exited {}".format(name))
         return max_time
-    def getGEMMTime(self, dim1, dim2, dim3, name, 
+    
+    def getGEMMTime(self, dim1, dim2, dim3, name="", 
                     flashattn_enable=False, disable_overhead=False, read_bytes_l2=0, write_bytes_l2=0, original=False):
         # Streaming best selection to avoid building large dicts
         best_time = float("inf")
         best_choice = None  # type: Optional[tuple]
         best_mem_access = None  # type: Optional[tuple]
+        best_rw_access = None  # type: Optional[AccessBytes]
         best_gemm = None  # type: Optional[TiledGEMM]
         best_metric = float("inf")
 
@@ -805,8 +807,9 @@ class TimeCalculation:
                 print("===============================================================")
 
             GEMM_flop = gemm.GEMM_flop
-            mem_access = gemm.mem_accesses
+            rw_accesses = gemm.mem_accesses
 
+            mem_access = rw_accesses.totals() # (L0, L1, L2, DRAM)
             if flashattn_enable:
                 mem_access = list(mem_access)
                 mem_access[3] = 0 # no HBM accesses
@@ -837,12 +840,14 @@ class TimeCalculation:
             key = (gemm._inner_code, tile_dims)
 
             # Tie-breaker metric identical to previous selection: hypot(dram, l2)
+            
             metric = math.hypot(mem_access[3], mem_access[2])
 
             if (GEMM_time < best_time) or (GEMM_time == best_time and metric < best_metric):
                 best_time = GEMM_time
                 best_choice = key
                 best_mem_access = mem_access
+                best_rw_access = rw_accesses
                 best_gemm = gemm
                 best_metric = metric
 
@@ -861,7 +866,7 @@ class TimeCalculation:
         # 2 -> inner 'n' (activation stationary)
         best_inner_code = best_choice[0]  # type: ignore[index]
         best_tile_dims = best_choice[1]  # type: ignore[index]
-        return best_time, best_inner_code, best_tile_dims, mem_access
+        return best_time, best_inner_code, best_tile_dims, mem_access #, best_rw_access
     
     def generateTileSpace(self, dim1=None, dim2=None, dim3=None, original=False):
         tile_space = []
