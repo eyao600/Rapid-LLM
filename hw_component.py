@@ -60,6 +60,29 @@ class Memory(Base):
         return self.getPower2TileDims()
         # return self.getArbitraryTileDims(self):
 
+    def calc_waves_per_sm(self, M, K, N, m, k, n):
+        bytes_required = self.precision * (m * k + k * n)
+        grid_size = math.ceil(M / m) * math.ceil(N / n)
+
+        compute_time = 2 * (m * n * k) / 312e12
+        load_time = (self.precision * (m * k + k * n)) / (7050 * 1024 ** 3)
+
+        stages = 3 if load_time < compute_time else 5
+        smem_required = bytes_required * stages
+        if smem_required > self.size_per_bundle:
+            return -1
+        
+        reg_accum = m * n
+        reg_input = 16 * (m + n)
+        if reg_accum + reg_input > 65536:
+            return -1
+
+        smem_blocks = self.size_per_bundle // smem_required
+        reg_blocks = 65536 // (reg_accum + reg_input)
+
+        return grid_size / min(smem_blocks, reg_blocks) / 108
+
+
     def getGEMMBasedTileDims(self, M, K, N):
         m_dims = [ M >> i for i in range(M.bit_length()) if (M >> i) >= 1 ]
         k_dims = [ K >> i for i in range(K.bit_length()) if (K >> i) >= 1 ]

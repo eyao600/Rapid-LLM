@@ -734,7 +734,7 @@ class TimeCalculation:
                 self.memLayer[i].printStats(f)
 
             self.network.printStats(f)
-    def roofline(self, flop, mem_access_, name="", info=False, mem_level=None, flashattn_enable=False):
+    def roofline(self, flop, mem_access_, name="", util=1, info=False, mem_level=None, flashattn_enable=False):
         # print("Roofline: entered {}".format(name))
 
         # Parse mem_access_ into consistent format
@@ -748,6 +748,8 @@ class TimeCalculation:
             print(mem_access_)
             print("mem_access_ should be integer or list, wrong input", flush=True)
             sys.exit(0)
+
+        throughput = self.th * util
 
         # Determine which levels to compute
         if mem_level is not None:
@@ -774,13 +776,13 @@ class TimeCalculation:
         for level_idx, num_mem in levels_to_compute:
             mem_bw = self.memLayer[level_idx].getThroughput()
             mem_latency = self.memLayer[level_idx].getLatency()
-            inflection_point = float("inf") if mem_bw == 0 else self.th / mem_bw
+            inflection_point = float("inf") if mem_bw == 0 else throughput / mem_bw
             # print(f"Level {level_idx}: mem_bw={mem_bw}, mem_latency={mem_latency}, inflection_point={inflection_point}", flush=True)
             comp_int = float("inf") if num_mem == 0 else flop / num_mem
             if comp_int < inflection_point:  # mem-bound
                 level_time = (float("inf") if (mem_bw == 0 or num_mem == 0) else (num_mem / mem_bw)) + mem_latency
             else:  # compute-bound
-                level_time = float("inf") if (self.th == 0) else (flop / self.th)
+                level_time = float("inf") if (throughput == 0) else (flop / throughput)
 
             times.append(level_time)
 
@@ -826,7 +828,14 @@ class TimeCalculation:
             if eff_sm > 0:
                 mem_access_per_sm[1] = mem_access_per_sm[1] / eff_sm
 
-            GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name, flashattn_enable=flashattn_enable) 
+            sm_util = 1
+            gemm_waves = self.memLayer[1].calc_waves_per_sm(dim1, dim2, dim3, gemm.l2_M, gemm.l2_K, gemm.l2_N)
+            if gemm_waves != -1:
+                full_waves = math.floor(gemm_waves)
+                partial_wave = gemm_waves - full_waves
+                sm_util = (full_waves + partial_wave * partial_wave) / gemm_waves
+
+            GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name, util=sm_util, flashattn_enable=flashattn_enable) 
             if flashattn_enable or disable_overhead:
                 pass
             else:
