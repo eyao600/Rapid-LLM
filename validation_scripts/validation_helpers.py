@@ -73,6 +73,33 @@ def _worker_init(context: _WorkerContext) -> None:
   _WORKER_CONTEXT = context
   set_astrasim_cache_mode(context.cache_mode)
 
+def _is_list_of_dicts(value: Any) -> bool:
+  if not isinstance(value, list):
+    return False  
+  return all(isinstance(item, dict) for item in value)
+
+def _merge_list_of_dicts(orig: List[Dict[str, Any]], 
+                         overrides: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+  orig_index = {d["id"]: d for d in orig}
+  orig_order = [d["id"] for d in orig]
+  
+  # Apply deep updates (or add new items)
+  for d in overrides:
+    id = d["id"]
+    if id in orig_index:
+      orig_index[id] = _deep_update(copy.deepcopy(orig_index[id]), d)
+    else:
+      orig_index[id] = copy.deepcopy(d)
+
+  # Rebuild list preserving original order, appending new items at the end
+  result: List[Dict[str, Any]] = []
+  for orig_id in orig_order:
+    result.append(orig_index[orig_id])
+  for d in overrides:
+    id = d["id"]
+    if id not in orig_order:
+      result.append(orig_index[id])
+  return result
 
 def _deep_update(target: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
   for key, value in overrides.items():
@@ -81,6 +108,12 @@ def _deep_update(target: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[s
       if not isinstance(existing, dict):
         existing = {}
       target[key] = _deep_update(existing, value)
+    elif isinstance(value, list):
+      existing_list = target.get(key)
+      if isinstance(existing_list, list) and _is_list_of_dicts(existing_list) and _is_list_of_dicts(value):
+        target[key] = _merge_list_of_dicts(existing_list, value)
+      else:
+        target[key] = copy.deepcopy(value)
     else:
       target[key] = value
   return target
@@ -320,6 +353,9 @@ _DECODE_TIME_REGEX = re.compile(
   r"\[prefill\]\s*time:\s*[0-9.]+s,\s*\[decode\]\s*time:\s*([0-9.]+)s,\s*\[total\]\s*time:\s*[0-9.]+s"
 )
 
+_INF_TIME_REGEX = re.compile(
+  r"LLM inference time:\s*([0-9]+(?:\.[0-9]+)?)s"
+)
 
 def parse_decode_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
   match = _DECODE_TIME_REGEX.search(output)
@@ -327,10 +363,16 @@ def parse_decode_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
     raise ValueError(f"Failed to parse decode time for experiment '{spec.label}'.")
   return {"decode_time_s": float(match.group(1))}
 
+def parse_inference_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
+  match = _INF_TIME_REGEX.search(output)
+  if not match:
+    raise ValueError(f"Failed to parse inference time for experiment '{spec.label}'.")
+  return {"inference_time_s": float(match.group(1))}
 
 __all__ = [
   "ValidationSpec",
   "ValidationResult",
   "run_validation_suite",
   "parse_decode_time",
+  "parse_inference_time"
 ]

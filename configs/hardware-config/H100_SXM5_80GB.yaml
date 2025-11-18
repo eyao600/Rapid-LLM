@@ -8,7 +8,7 @@ sw_param:
   kernel_launch_overhead: 9e-6   # (s)
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1
-  dp_zero_stage: 0
+  dp_zero_stage: 1
   precision:
     # tensor_format accepts numeric byte counts or dtype strings (fp16, bf16, fp32).
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
@@ -19,7 +19,7 @@ sw_param:
     # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes.
     # -> true enables AMP-style FP32 accumulations/optimizer states depending on param_storage_mode.
     # if true, optimizer states and stats are always FP32.
-    mixed_precision: false
+    mixed_precision: true
     # param_storage_mode: as_tensor_format | tensor_plus_fp32_master | fp32_params.
     # -> as_tensor_format makes weights/gradients use tensor_format bytes.
     # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
@@ -28,8 +28,7 @@ sw_param:
     param_storage_mode: as_tensor_format
     # kv_cache precision may be set as bytes, dtype string, or "as_tensor_format".
     kv_cache: as_tensor_format
-  h2d_bandwidth: 13297674240    # Bytes/s; set -1 to disable H2D timing
-
+  h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
 tech_param:
   core:
     operating_frequency: 1.98e9     # (Hz) GPU boost clock frequency [TePU]
@@ -37,13 +36,13 @@ tech_param:
     nominal_flop_rate_per_mcu: 1024     # F16 FLOP / cycle / SM is 4096 [Semi]
     nominal_energy_per_flop: 1.8e-13
     num_mcu_per_bundle: 4     # number of tensorcores per SM [TePU]
-    FMA_d1: 8                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
-    FMA_d2: 4
-    dataflow: best              #{wst. ast, ost, best, none}: wst: weight stationary, ast: activation stationary, ost: output stationary
-    util: 0.75     #util should be 0.75 (12/16) for tensorcore
+    FMA_d1: 16                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
+    FMA_d2: 8
+    dataflow: best
+    util: 1.0
   DRAM:
     size: 80 GB     # [TePU]
-    bandwidth: 3440 GB     # (/s) [TePU]
+    bandwidth: 3430 GB     # (/s) [TePU]
     dynamic_energy_per_bit: 4.5e-12     # (J) [https://passlab.github.io/mchpc/mchpc2019/presentations/MCHPC_Pawlowski_keynote.pdf, slide 36]
     latency: 100e-9     # (s)
     util: 1
@@ -61,7 +60,7 @@ tech_param:
     util: 1
   SRAM-R:
     size: 33 MB     # register file memory per SM * number of SMs [NVIDIA]
-    bandwidth: 244 TB     # traffic for 2 reads and 1 write for GEMMs computed per clock
+    bandwidth: 122 TB     # traffic for 2 reads and 1 write for GEMMs computed per clock
     dynamic_energy_per_bit: 110e-15
     latency: 0
     util: 1
@@ -84,31 +83,55 @@ parallelism:
   auto: false
   ### LLM PARAMS ###
   dp: 1 # data parallelism. Acts as replica count during inference
+  tp: 8 # tensor parallelism
+  tp_sp: false # tensor-sequence parallelism
+  cp: 1 # context parallelism. Not supported for inference.
   lp: 1 # pipeline parallelism. Number of pipeline stages
-  mb: 1 # micro-batches (for best results set to >= lp)
-  tp: 1 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
-  cp : 1 # context parallelism
+  # mb is not a true parallelism parameter, does not affect num of GPUs.
+  mb: 1 # micro-batches (for best results set to >= lp). 
 
 network:
   dimensions:
     - id: dim0
-      label: device_fabric
-      size: 1
+      label: torus2d_tp
+      size: auto
       topology:
-        type: Mesh
-        bandwidth: 400 Gb
+        type: Ring
+        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 1.0
+        optimize_2dmap: false
+      collective_override: {} # overrides execution_backend.collectives when provided
+      parallelisms: [tp, cp]
+    - id: dim1
+      label: inter_torus_infiniband
+      size: auto
+      topology:
+        type: Ring 
+        bandwidth: 25 GB
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [tp, cp, lp, dp]
+      parallelisms: [lp,dp]
+    - id: dim2
+      label: inter_torus_infiniband_dp
+      size: auto
+      topology:
+        type: Ring
+        bandwidth: 25 GB
+        latency: 5e-6
+        energy_per_bit: 8e-12 # (J/bit)
+        util: 1.0
+      parallelisms: []
+      collective_override: {} # overrides execution_backend.collectives when provided
 
 execution_backend:
-  model: astra # analytical | astra
+  model: analytical # analytical | astra
   astra:
     backend: astra
-    mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
@@ -118,9 +141,9 @@ execution_backend:
       reduce_scatter: auto
       all_to_all: auto
     sys_options:
-      endpoint_delay: 10
+      endpoint_delay: 5
       active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
-      preferred_dataset_splits: 32 # Should be same as active_chunks_per_dimension
+      preferred_dataset_splits: 4 # Should be same as active_chunks_per_dimension
 
 inference:
   kvcache_type: hbm_only
