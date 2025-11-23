@@ -12,7 +12,7 @@ import LLM_util
 from time_calculation import TimeCalculation
 from itertools import zip_longest  # for element-wise aggregation of memory access lists
 from timing_model import CommSpec, DirectionTiming, OperationTiming, OperationGroup
-
+import yaml
 def _env_flag(name: str) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -44,67 +44,67 @@ SOFTMAX_BACKWARD_MEM_ACCESSES = 3
 
 # Map each parallelism mode to operation-level collective specs used across the
 # metadata pipeline. Each spec records the collective kind, the participant
-# scope (tp/cp/seq/etc.), the interconnect label, and an identifying suffix.
+# scope (tp/cp/seq/etc.), and the interconnect label.
 COMM_RULE_DEFAULT_KEY = "__default__"
 COMMUNICATION_RULES: Dict[
     ParallelismMode, Dict[str, Dict[str, Optional[Dict[str, str]]]]
 ] = {
     ParallelismMode.TENSOR: {
         COMM_RULE_DEFAULT_KEY: {
-            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_reduce'},
-            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_reduce'},
+            'forward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_reduce', 'participants': 'tp', 'interconnect': 'tp'},
         },
     },
     ParallelismMode.TENSOR_SEQUENCE: {
-        COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
+        COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None}, # <- dangerous
         'layernorm1': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
         },
         'layernorm2': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
         },
         'MHA': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
         },
         'MLP': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
         },
     },
     ParallelismMode.CONTEXT: {
         COMM_RULE_DEFAULT_KEY: {
-            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'},
+            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp'},
         },
-        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'}},
-        'output_proj': {'forward': None, 'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'}},
-        'qkv_proj': {'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'}, 'backward': None},
+        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp'}},
+        'output_proj': {'forward': None, 'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'}},
+        'qkv_proj': {'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'}, 'backward': None},
     },
     ParallelismMode.TENSOR_CONTEXT_HYBRID: {
         COMM_RULE_DEFAULT_KEY: {'forward': None, 'backward': None},
         'layernorm1': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
         },
         'layernorm2': {
-            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
-            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'all_gather'},
+            'forward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'all_gather', 'participants': 'tp', 'interconnect': 'tp'},
         },
         'MLP': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
         },
-        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'}},
+        'attention': {'forward': None, 'backward': {'kind': 'reduce_scatter', 'participants': 'cp', 'interconnect': 'cp'}},
         'output_proj': {
-            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'cp', 'suffix': 'reduce_scatter'},
-            'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp', 'suffix': 'all_gather'},
+            'forward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'cp'},
+            'backward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'cp'},
         },
         'qkv_proj': {
-            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'tp', 'suffix': 'all_gather'},
-            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp', 'suffix': 'reduce_scatter'},
+            'forward': {'kind': 'all_gather', 'participants': 'cp', 'interconnect': 'tp'},
+            'backward': {'kind': 'reduce_scatter', 'participants': 'tp', 'interconnect': 'tp'},
         },
     },
     ParallelismMode.SINGLE: {
@@ -117,13 +117,11 @@ _MOE_ROUTER_RULE = {
         'kind': 'all_to_all',
         'participants': 'moe',
         'interconnect': 'tp',
-        'suffix': 'all_to_all',
     },
     'backward': {
         'kind': 'reduce_scatter',
         'participants': 'moe',
         'interconnect': 'tp',
-        'suffix': 'reduce_scatter',
     },
 }
 _MOE_MLP_RULE = {
@@ -131,13 +129,11 @@ _MOE_MLP_RULE = {
         'kind': 'all_to_all',
         'participants': 'moe',
         'interconnect': 'tp',
-        'suffix': 'all_to_all',
     },
     'backward': {
         'kind': 'all_to_all',
         'participants': 'moe',
         'interconnect': 'tp',
-        'suffix': 'all_to_all',
     },
 }
 _MOE_LAYER_NORM1_RULE = {
@@ -145,7 +141,6 @@ _MOE_LAYER_NORM1_RULE = {
         'kind': 'all_to_all',
         'participants': 'moe',
         'interconnect': 'tp',
-        'suffix': 'all_to_all',
     },
 }
 MOE_COMMUNICATION_RULES: Dict[
@@ -1431,12 +1426,7 @@ class TimeCalculationLLM(TimeCalculation):
         """Calculate communication sizes for data parallel reductions (no timing)."""
         if not getattr(self, "dp", 1) or self.dp <= 1:
             # No communication needed for dp=1
-            return {
-                'qkv_size': 0,
-                'output_size': 0,
-                'ffn_size': 0,
-                'total_size': 0
-            }
+            return 0
 
         # Calculate sizes only
         qkv_size = math.ceil(self.precision.grad_communication * d * 3 * d)
@@ -1446,154 +1436,21 @@ class TimeCalculationLLM(TimeCalculation):
         ffn2_size = math.ceil(self.precision.grad_communication * intermediate_size * d)
         total_size = qkv_size + output_size + ffn1_size + ffn2_size
 
-        return {
-            'qkv_size': qkv_size,
-            'output_size': output_size,
-            'ffn_size': ffn1_size + ffn2_size,
-            'total_size': total_size
-        }
+        return total_size
 
-    def get_data_parallel_local_computation(self, d, intermediate_size):
-        """Calculate local computation times for apply_grad operations."""
-        qkv_local = self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
-        output_local = self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
+    def get_data_parallel_reduction_llm(self, d, intermediate_size):
+        """Return apply_grad compute time per rank (no communication), honoring ZeRO sharding."""
+        apply_grad_time = self.apply_grad(int(d * 3 * d)) # QKV
+        apply_grad_time += self.apply_grad(int(d * d)) # Output
         ffn1_dim = self._ffn1_output_dim(intermediate_size)
-        ffn_local = (
-            self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-            + self.apply_grad(Dim0=intermediate_size, Dim1=d, name="ffn2 reduction")
-        )
+        apply_grad_time += self.apply_grad(int(ffn1_dim * d)) # FFN1
+        apply_grad_time += self.apply_grad(int(intermediate_size * d)) # FFN2
 
-        return {
-            'qkv_local': qkv_local,
-            'output_local': output_local,
-            'ffn_local': ffn_local,
-            'total_local': qkv_local + output_local + ffn_local
-        }
-
-    def get_data_parallel_reduction_llm(self, d, intermediate_size): 
-        # If no data parallelism, still apply gradients locally but no cross-device reduction
-        if self.dp <= 1:
-            apply_grad_time = 0.0
-            apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
-            apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-            ffn1_dim = self._ffn1_output_dim(intermediate_size)
-            apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-            apply_grad_time += self.apply_grad(Dim0=intermediate_size, Dim1=d, name="ffn2 reduction")
-            if self.debug:
-                print(f"(dp=1) apply_grad_time: {apply_grad_time}")
-            return apply_grad_time
-
-        reduction_sizes = self.get_data_parallel_reduction_sizes(d, intermediate_size)
-        grad_bytes = int(reduction_sizes['total_size'])
-        (
-            total_params_per_rank,
-            _,
-            _,
-            _,
-            _,
-        ) = self._param_stats_per_rank(d, intermediate_size, self.vocab_size)
-        param_bytes = int(math.ceil(total_params_per_rank * self.precision.parameters))
-        grad_shard = self.dp if self.zero_stage >= 2 else 1
-
-        if grad_shard > 1: # ZeRO stages >= 2: gradients are sharded via reduce-scatter and parameters are gathered.
-            apply_grad_time = 0.0
-            apply_grad_time += self.apply_grad(Dim0=d, Dim1=3 * d, name="qkv_proj reduction")
-            apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-            ffn1_dim = self._ffn1_output_dim(intermediate_size)
-            apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-            apply_grad_time += self.apply_grad(Dim0=intermediate_size, Dim1=d, name="ffn2 reduction")
-            # divide by dp to get the time per device 
+        grad_shard = self.dp if (self.zero_stage >= 2 and self.dp > 1) else 1
+        if grad_shard > 1:
             apply_grad_time /= grad_shard
 
-            reduction_time = self.network_model.collective(
-                kind="reduce_scatter",
-                size_bytes=grad_bytes,
-                participants=int(self.dp),
-                ib=self.IBD,
-                ll=self.LLD,
-                local_bytes=0.0,
-                debug_label="dp_zero_gradients",
-                axis="dp",
-            )
-
-            gather_time = 0.0
-            if self.zero_stage == 2:
-                gather_bytes = int(math.ceil(param_bytes))
-                gather_time += self.network_model.collective(
-                    kind="all_gather",
-                    size_bytes=gather_bytes,
-                    participants=int(self.dp),
-                    ib=self.IBD,
-                    ll=self.LLD,
-                    local_bytes=0.0,
-                    debug_label="dp_zero_param_gather_zero2",
-                    axis="dp",
-                )
-            if self.debug:
-                print(f"apply_grad_time (ZeRO-{self.zero_stage}): {apply_grad_time}")
-            # TODO(ZeRO): revisit optimizer FLOPs once ZeRO-3 materialization is finalized.
-            return reduction_time + gather_time + apply_grad_time
-        else: # legacy path for zero stages <= 2.
-            reduction_time = 0.0
-            apply_grad_time = 0.0
-
-            total_bytes = math.ceil(self.precision.grad_communication * d * 3 * d)
-            reduction_time += self.network_model.collective(
-                kind="all_reduce",
-                size_bytes=total_bytes,
-                participants=int(self.dp),
-                ib=self.IBD,
-                ll=self.LLD,
-                local_bytes=0.0,
-                debug_label="qkv_proj reduction",
-                axis="dp",
-            )
-            apply_grad_time += self.apply_grad(Dim0=d, Dim1=3*d, name="qkv_proj reduction")
-
-            total_bytes = math.ceil(self.precision.grad_communication * d * d)
-            reduction_time += self.network_model.collective(
-                kind="all_reduce",
-                size_bytes=total_bytes,
-                participants=int(self.dp),
-                ib=self.IBD,
-                ll=self.LLD,
-                local_bytes=0.0,
-                debug_label="output_proj reduction",
-                axis="dp",
-            )
-            apply_grad_time += self.apply_grad(Dim0=d, Dim1=d, name="output_proj reduction")
-
-            ffn1_dim = self._ffn1_output_dim(intermediate_size)
-            total_bytes = math.ceil(self.precision.grad_communication * ffn1_dim * d)
-            reduction_time += self.network_model.collective(
-                kind="all_reduce",
-                size_bytes=total_bytes,
-                participants=int(self.dp),
-                ib=self.IBD,
-                ll=self.LLD,
-                local_bytes=0.0,
-                debug_label="ffn1 reduction",
-                axis="dp",
-            )
-            apply_grad_time += self.apply_grad(Dim0=ffn1_dim, Dim1=d, name="ffn1 reduction")
-
-            total_bytes = math.ceil(self.precision.grad_communication * intermediate_size * d)
-            reduction_time += self.network_model.collective(
-                kind="all_reduce",
-                size_bytes=total_bytes,
-                participants=int(self.dp),
-                ib=self.IBD,
-                ll=self.LLD,
-                local_bytes=0.0,
-                debug_label="ffn2 reduction",
-                axis="dp",
-            )
-            apply_grad_time += self.apply_grad(Dim0=intermediate_size, Dim1=d, name="ffn2 reduction")
-
-            if self.debug:
-                print(f"apply_grad_time: {apply_grad_time}")
-
-            return reduction_time + apply_grad_time
+        return apply_grad_time
     
     def _combine_mem(self, *args):
             combined = {}
@@ -1618,7 +1475,18 @@ class TimeCalculationLLM(TimeCalculation):
     # TODO TODO:
     # we need a significant refactor here. The comm sizes are ingested in a weird way and never used. Instead we use old precomputed sizes.
     # FIX at some point!
-    def compute_all_gemm_and_node_times(self, batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size, num_SMs):
+    def compute_all_gemm_and_node_times(
+        self,
+        batch_size,
+        vocab_size,
+        hidden_dim,
+        seq_len,
+        num_heads,
+        kv_heads,
+        intermediate_size,
+        num_SMs,
+        include_optimizer: bool = False,
+    ):
         """Compute latency for all GEMM operations and node breakdown times."""
 
         gemm_shapes = LLM_util.process_gemm_shapes(
@@ -1631,21 +1499,6 @@ class TimeCalculationLLM(TimeCalculation):
             intermediate_size,
             vocab_size,
         )
-        if self.debug:
-            print(
-                "generating gemm shapes for transformer batch size:",
-                batch_size,
-                "seq_len:",
-                seq_len,
-                "hidden_dim:",
-                hidden_dim,
-                "num_heads:",
-                num_heads,
-                "kv_heads:",
-                kv_heads,
-                "intermediate_size:",
-                intermediate_size,
-            )
 
         gemm_qkv_proj = gemm_shapes["qkv_proj"]
         gemm_attention_score = gemm_shapes["attention_score"]
@@ -1657,26 +1510,6 @@ class TimeCalculationLLM(TimeCalculation):
         gemm_router = gemm_shapes["router"]
 
         transformer_timings: Dict[str, OperationTiming] = {}
-
-        def _make_direction(
-            op_name: str,
-            direction: str,
-            compute_time: float,
-            comm_time: float,
-            comm_bytes: float,
-            *,
-            flops: float = 0.0,
-            memory: Optional[Mapping[str, float]] = None,
-        ) -> DirectionTiming:
-            mem_map = dict(memory) if memory else {}
-            bytes_int = int(math.ceil(float(comm_bytes or 0.0)))
-            return DirectionTiming(
-                compute_time=compute_time,
-                comm_time=comm_time,
-                comm_bytes=bytes_int,
-                flops=flops,
-                memory_accesses=mem_map,
-            )
 
         def _extract_forward(ret: Sequence[Any]) -> Tuple[float, float, float, float, Any]:
             if len(ret) == 5:
@@ -1694,21 +1527,17 @@ class TimeCalculationLLM(TimeCalculation):
         qkv_proj_gemm_b, qkv_proj_reduction_b, qkv_proj_size_b = self.parallelism_gemm_backward(
             gemm_qkv_proj, "qkv_projection_b", gemm_type=GemmType.QKV
         )
-        qkv_forward = _make_direction(
-            "qkv_proj",
-            "forward",
+        qkv_forward = DirectionTiming(
             compute_time=qkv_proj_gemm_f,
             comm_time=qkv_proj_reduction_f,
-            comm_bytes=qkv_proj_size_f,
+            comm_bytes=int(qkv_proj_size_f or 0),
             flops=qkv_proj_flops_f,
-            memory=self._mem_levels(qkv_proj_mem_f),
+            memory_accesses=dict(self._mem_levels(qkv_proj_mem_f)),
         )
-        qkv_backward = _make_direction(
-            "qkv_proj",
-            "backward",
+        qkv_backward = DirectionTiming(
             compute_time=qkv_proj_gemm_b,
             comm_time=qkv_proj_reduction_b,
-            comm_bytes=qkv_proj_size_b,
+            comm_bytes=int(qkv_proj_size_b or 0),
         )
         transformer_timings["qkv_proj"] = OperationTiming("qkv_proj", forward=qkv_forward, backward=qkv_backward)
 
@@ -1719,21 +1548,17 @@ class TimeCalculationLLM(TimeCalculation):
             attn_score_gemm_b, attn_score_reduction_b, attn_score_size_b = self.parallelism_gemm_backward(
                 gemm_attention_score, "attention_score_b", gemm_type=GemmType.ATTENTION_SCORE
             )
-            attn_score_forward = _make_direction(
-                "attention_score",
-                "forward",
+            attn_score_forward = DirectionTiming(
                 compute_time=attn_score_gemm_f,
                 comm_time=attn_score_reduction_f,
-                comm_bytes=attn_score_size_f,
+                comm_bytes=int(attn_score_size_f or 0),
                 flops=attn_score_flops_f,
-                memory=self._mem_levels(attn_score_mem_f),
+                memory_accesses=dict(self._mem_levels(attn_score_mem_f)),
             )
-            attn_score_backward = _make_direction(
-                "attention_score",
-                "backward",
+            attn_score_backward = DirectionTiming(
                 compute_time=attn_score_gemm_b,
                 comm_time=attn_score_reduction_b,
-                comm_bytes=attn_score_size_b,
+                comm_bytes=int(attn_score_size_b or 0),
             )
             transformer_timings["attention_score"] = OperationTiming(
                 "attention_score",
@@ -1747,19 +1572,15 @@ class TimeCalculationLLM(TimeCalculation):
             
             transformer_timings["attention_scale_softmax"] = OperationTiming(
                 name="attention_scale_softmax",
-                forward=_make_direction(
-                    "attention_scale_softmax",
-                    "forward",
+                forward=DirectionTiming(
                     compute_time=attention_scale_softmax_f,
                     comm_time=0.0,
-                    comm_bytes=0.0,
+                    comm_bytes=0,
                 ),
-                backward=_make_direction(
-                    "attention_scale_softmax",
-                    "backward",
+                backward=DirectionTiming(
                     compute_time=attention_scale_softmax_b,
                     comm_time=0.0,
-                    comm_bytes=0.0,
+                    comm_bytes=0,
                 ),
             )
 
@@ -1769,21 +1590,17 @@ class TimeCalculationLLM(TimeCalculation):
             attn_out_gemm_b, attn_out_reduction_b, attn_out_size_b = self.parallelism_gemm_backward(
                 gemm_attention_output, "attention_output_b", gemm_type=GemmType.ATTENTION_OUTPUT
             )
-            attn_out_forward = _make_direction(
-                "attention_output",
-                "forward",
+            attn_out_forward = DirectionTiming(
                 compute_time=attn_out_gemm_f,
                 comm_time=attn_out_reduction_f,
-                comm_bytes=attn_out_size_f,
+                comm_bytes=int(attn_out_size_f or 0),
                 flops=attn_out_flops_f,
-                memory=self._mem_levels(attn_out_mem_f),
+                memory_accesses=dict(self._mem_levels(attn_out_mem_f)),
             )
-            attn_out_backward = _make_direction(
-                "attention_output",
-                "backward",
+            attn_out_backward = DirectionTiming(
                 compute_time=attn_out_gemm_b,
                 comm_time=attn_out_reduction_b,
-                comm_bytes=attn_out_size_b,
+                comm_bytes=int(attn_out_size_b or 0),
             )
             transformer_timings["attention_output"] = OperationTiming(
                 "attention_output",
@@ -1808,21 +1625,17 @@ class TimeCalculationLLM(TimeCalculation):
             attention_mem = self._combine_mem(attn_score_mem_f, attn_out_mem_f)
             transformer_timings["attention"] = OperationTiming(
                 "attention",
-                forward=_make_direction(
-                    "attention",
-                    "forward",
+                forward=DirectionTiming(
                     compute_time=attention_forward_compute,
                     comm_time=attention_forward_comm,
-                    comm_bytes=attention_comm_bytes_f,
-                    memory=self._mem_levels(attention_mem),
+                    comm_bytes=int(attention_comm_bytes_f or 0),
+                    memory_accesses=dict(self._mem_levels(attention_mem)),
                     flops=(attn_score_flops_f + attn_out_flops_f),
                 ),
-                backward=_make_direction(
-                    "attention",
-                    "backward",
+                backward=DirectionTiming(
                     compute_time=attention_backward_compute,
                     comm_time=attention_backward_comm,
-                    comm_bytes=attention_comm_bytes_b,
+                    comm_bytes=int(attention_comm_bytes_b or 0),
                 ),
             )
         else:
@@ -1845,20 +1658,16 @@ class TimeCalculationLLM(TimeCalculation):
 
             transformer_timings["attention"] = OperationTiming(
                 "attention",
-                forward=_make_direction(
-                    "attention",
-                    "forward",
+                forward=DirectionTiming(
                     compute_time=attention_gemm_f,
                     comm_time=attention_reduction_f,
-                    comm_bytes=attention_size_f,
-                    memory=self._mem_levels(attention_mem),
+                    comm_bytes=int(attention_size_f or 0),
+                    memory_accesses=dict(self._mem_levels(attention_mem)),
                 ),
-                backward=_make_direction(
-                    "attention",
-                    "backward",
+                backward=DirectionTiming(
                     compute_time=attention_gemm_b,
                     comm_time=attention_reduction_b,
-                    comm_bytes=attention_size_b,
+                    comm_bytes=int(attention_size_b or 0),
                 ),
             )
 
@@ -1870,21 +1679,17 @@ class TimeCalculationLLM(TimeCalculation):
         )
         transformer_timings["output_proj"] = OperationTiming(
             "output_proj",
-            forward=_make_direction(
-                "output_proj",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=out_proj_gemm_f,
                 comm_time=out_proj_reduction_f,
-                comm_bytes=out_proj_size_f,
+                comm_bytes=int(out_proj_size_f or 0),
                 flops=out_proj_flops_f,
-                memory=self._mem_levels(out_proj_mem_f),
+                memory_accesses=dict(self._mem_levels(out_proj_mem_f)),
             ),
-            backward=_make_direction(
-                "output_proj",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=out_proj_gemm_b,
                 comm_time=out_proj_reduction_b,
-                comm_bytes=out_proj_size_b,
+                comm_bytes=int(out_proj_size_b or 0),
             ),
         )
         if not self.use_moe: 
@@ -1915,60 +1720,48 @@ class TimeCalculationLLM(TimeCalculation):
         if self.use_moe:
             transformer_timings["router"] = OperationTiming(
                 "router",
-                forward=_make_direction(
-                    "router",
-                    "forward",
+                forward=DirectionTiming(
                     compute_time=router_gemm_time_f,
                     comm_time=router_reduction_f,
-                    comm_bytes=router_size_f,
+                    comm_bytes=int(router_size_f or 0),
                 ),
-                backward=_make_direction(
-                    "router",
-                    "backward",
+                backward=DirectionTiming(
                     compute_time=router_gemm_time_b,
                     comm_time=router_reduction_b,
-                    comm_bytes=router_size_b,
+                    comm_bytes=int(router_size_b or 0),
                 ),
             )
         
         transformer_timings["ffn1"] = OperationTiming(
             "ffn1",
-            forward=_make_direction(
-                "ffn1",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=ffn1_gemm_f,
                 comm_time=ffn1_reduction_f,
-                comm_bytes=ffn1_size_f,
+                comm_bytes=int(ffn1_size_f or 0),
                 flops=ffn1_flops_f,
-                memory=self._mem_levels(ffn1_mem_f),
+                memory_accesses=dict(self._mem_levels(ffn1_mem_f)),
             ),
-            backward=_make_direction(
-                "ffn1",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=ffn1_gemm_b,
                 comm_time=ffn1_reduction_b,
-                comm_bytes=ffn1_size_b,
+                comm_bytes=int(ffn1_size_b or 0),
             ),
         )
 
 
         transformer_timings["ffn2"] = OperationTiming(
             "ffn2",
-            forward=_make_direction(
-                "ffn2",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=ffn2_gemm_f,
                 comm_time=ffn2_reduction_f,
-                comm_bytes=ffn2_size_f,
+                comm_bytes=int(ffn2_size_f or 0),
                 flops=ffn2_flops_f,
-                memory=self._mem_levels(ffn2_mem_f),
+                memory_accesses=dict(self._mem_levels(ffn2_mem_f)),
             ),
-            backward=_make_direction(
-                "ffn2",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=ffn2_gemm_b,
                 comm_time=ffn2_reduction_b,
-                comm_bytes=ffn2_size_b,
+                comm_bytes=int(ffn2_size_b or 0),
             ),
         )
 
@@ -1976,20 +1769,16 @@ class TimeCalculationLLM(TimeCalculation):
         embedding_b = self.get_embedding_b(vocab_size=vocab_size, seq_len=seq_len, hidden_dim=hidden_dim)
         transformer_timings["embedding"] = OperationTiming(
             "embedding",
-            forward=_make_direction(
-                "embedding",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=embedding_f,
                 comm_time=0.0,
-                comm_bytes=0.0,
-                memory=self._mem_levels(embedding_mem),
+                comm_bytes=0,
+                memory_accesses=dict(self._mem_levels(embedding_mem)),
             ),
-            backward=_make_direction(
-                "embedding",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=embedding_b,
                 comm_time=0.0,
-                comm_bytes=0.0,
+                comm_bytes=0,
             ),
         )
 
@@ -2008,19 +1797,15 @@ class TimeCalculationLLM(TimeCalculation):
         )
         transformer_timings["layernorm1"] = OperationTiming(
             "layernorm1",
-            forward=_make_direction(
-                "layernorm1",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=layernorm1_f + residual1_f,
                 comm_time=layernorm1_reduction_f,
-                comm_bytes=LN1_comm_bytes_f,
+                comm_bytes=int(LN1_comm_bytes_f or 0),
             ),
-            backward=_make_direction(
-                "layernorm1",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=layernorm1_b + residual1_b,
                 comm_time=layernorm1_reduction_b,
-                comm_bytes=LN1_comm_bytes_b,
+                comm_bytes=int(LN1_comm_bytes_b or 0),
             ),
         )
 
@@ -2038,19 +1823,15 @@ class TimeCalculationLLM(TimeCalculation):
         )
         transformer_timings["layernorm2"] = OperationTiming(
             "layernorm2",
-            forward=_make_direction(
-                "layernorm2",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=layernorm2_f + residual2_f,
                 comm_time=layernorm2_reduction_f,
-                comm_bytes=LN2_comm_bytes_f,
+                comm_bytes=int(LN2_comm_bytes_f or 0),
             ),
-            backward=_make_direction(
-                "layernorm2",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=layernorm2_b + residual2_b,
                 comm_time=layernorm2_reduction_b,
-                comm_bytes=LN2_comm_bytes_b,
+                comm_bytes=int(LN2_comm_bytes_b or 0),
             ),
         )
 
@@ -2062,28 +1843,24 @@ class TimeCalculationLLM(TimeCalculation):
             act_b = self.get_gelu_b(tensor_shape=gemm_ffn1)
         transformer_timings["gelu"] = OperationTiming(
             "gelu",
-            forward=_make_direction("gelu", "forward", compute_time=act_f, comm_time=0.0, comm_bytes=0.0),
-            backward=_make_direction("gelu", "backward", compute_time=act_b, comm_time=0.0, comm_bytes=0.0),
+            forward=DirectionTiming(compute_time=act_f, comm_time=0.0, comm_bytes=0),
+            backward=DirectionTiming(compute_time=act_b, comm_time=0.0, comm_bytes=0),
         )
 
         linear_softmax_f, linear_softmax_mem = self.get_linear_softmax_f(gemm=gemm_linear)
         linear_softmax_b = self.get_linear_softmax_b(gemm=gemm_linear)
         transformer_timings["linear_softmax"] = OperationTiming(
             "linear_softmax",
-            forward=_make_direction(
-                "linear_softmax",
-                "forward",
+            forward=DirectionTiming(
                 compute_time=linear_softmax_f,
                 comm_time=0.0,
-                comm_bytes=0.0,
-                memory=self._mem_levels(linear_softmax_mem),
+                comm_bytes=0,
+                memory_accesses=dict(self._mem_levels(linear_softmax_mem)),
             ),
-            backward=_make_direction(
-                "linear_softmax",
-                "backward",
+            backward=DirectionTiming(
                 compute_time=linear_softmax_b,
                 comm_time=0.0,
-                comm_bytes=0.0,
+                comm_bytes=0,
             ),
         )
 
@@ -2117,6 +1894,20 @@ class TimeCalculationLLM(TimeCalculation):
             + transformer_timings["layernorm2"].total_backward_time()
         )
 
+        if include_optimizer:
+            optimizer_time = self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size)
+            if optimizer_time > 0.0:
+                transformer_timings["optimizer"] = OperationTiming(
+                    "optimizer",
+                    forward=None,
+                    backward=DirectionTiming(
+                        compute_time=optimizer_time,
+                        comm_time=0.0,
+                        comm_bytes=0,
+                    ),
+                )
+                transformer_time_b += optimizer_time
+
         node_breakdown = {
             "transformer_time_f": transformer_time_f,
             "transformer_time_b": transformer_time_b,
@@ -2125,11 +1916,10 @@ class TimeCalculationLLM(TimeCalculation):
             "linear_softmax_f": transformer_timings["linear_softmax"].total_forward_time(),
             "linear_softmax_b": transformer_timings["linear_softmax"].total_backward_time(),
         }
-
         if self._generate_graphs:
-            results_path = os.path.join(self.output_dir, "transformer_results.txt")
+            results_path = os.path.join(self.output_dir, "transformer_timings.yaml")
             with open(results_path, "w", encoding="utf-8") as results_file:
-                json.dump(
+                yaml.dump(
                     {
                         "transformer_results": {
                             name: timing.to_dict() for name, timing in transformer_timings.items()
@@ -2137,7 +1927,6 @@ class TimeCalculationLLM(TimeCalculation):
                         "node_breakdown": node_breakdown,
                     },
                     results_file,
-                    indent=2,
                     sort_keys=True,
                 )
 
@@ -2170,11 +1959,11 @@ class TimeCalculationLLM(TimeCalculation):
         grad_collective = 'reduce_scatter' if (self.zero_stage >= 2 and self.dp > 1) else 'all_reduce'
         metadata = {
             'transformer': {
-                'size': reduction_sizes['total_size'],
+                'size': reduction_sizes,
                 'type': grad_collective,
                 'participants': self.dp,
                 'interconnect_type': 'dp',
-                'local_comp_time': local_comp['total_local']
+                'local_comp_time': local_comp
             },
             'embedding': {
                 'size': embedding_size,
@@ -2290,21 +2079,11 @@ class TimeCalculationLLM(TimeCalculation):
 
         if not include_pipeline_backward and not include_transformer_backward:
             # Forward-only inference: skip training all-reduce bookkeeping.
-            reduction_sizes = {
-                'qkv_size': 0,
-                'output_size': 0,
-                'ffn_size': 0,
-                'total_size': 0,
-            }
-            local_comp = {
-                'qkv_local': 0.0,
-                'output_local': 0.0,
-                'ffn_local': 0.0,
-                'total_local': 0.0,
-            }
+            reduction_sizes = 0.0
+            local_comp = 0.0
         else:
             reduction_sizes = self.get_data_parallel_reduction_sizes(hidden_dim, intermediate_size)
-            local_comp = self.get_data_parallel_local_computation(hidden_dim, intermediate_size)
+            local_comp = self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size)
 
         # these are used for dp all-reduce/reduce-scatter.
         embedding_size = math.ceil(self.precision.grad_communication * vocab_size * hidden_dim) + math.ceil(self.precision.grad_communication * seq_len * hidden_dim * batch_size)
@@ -2404,7 +2183,10 @@ class TimeCalculationLLM(TimeCalculation):
                 return ()
             rule_spec = rules_by_mode.get(op_name) or rules_by_mode.get(COMM_RULE_DEFAULT_KEY)
             if not rule_spec:
-                return ()
+                raise ValueError(
+                    f"Missing communication rule for op '{op_name}' in mode '{parallelism_mode.value}' "
+                    f"with non-zero comm_bytes ({bytes_int})"
+                )
             rule = rule_spec.get(direction)
             if not rule:
                 return ()
@@ -2416,8 +2198,7 @@ class TimeCalculationLLM(TimeCalculation):
             if participants <= 1:
                 return ()
             interconnect = rule.get("interconnect", scope)
-            suffix = rule.get("suffix", kind)
-            name = f"{op_name}_{direction}_{suffix}"
+            name = f"{op_name}_{direction}_{kind}"
             return (
                 CommSpec(
                     name=name,
@@ -2474,6 +2255,8 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported parallelism mode: {parallelism_mode}")
         op_names = list(op_names)
+        if "optimizer" in transformer_timings:
+            op_names.append("optimizer")
         if self.use_moe and "MLP" in op_names and "router" not in op_names: # if MOE is enabled, ensure router is included in the graph
             mlp_index = op_names.index("MLP")
             op_names.insert(mlp_index, "router")
@@ -2526,6 +2309,7 @@ class TimeCalculationLLM(TimeCalculation):
             "linear_softmax_b": node_breakdown.get('linear_softmax_b', 0.0) if include_pipeline_backward else 0.0,
             "transformer_f": node_breakdown.get('transformer_time_f', 0.0),
             "transformer_b": node_breakdown.get('transformer_time_b', 0.0) if include_pipeline_backward else 0.0,
+            "optimizer": self.get_data_parallel_reduction_llm(hidden_dim, intermediate_size),
             "cross_layer_f": 0.0,
             "cross_layer_b": 0.0,
         }
@@ -2547,7 +2331,10 @@ class TimeCalculationLLM(TimeCalculation):
             misc_metadata=misc_metadata,
         )
         
-        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(include_backward=include_pipeline_backward)
+        graph_root = pipeline_graph_obj.construct_fwd_bwd_graph(
+            include_backward=include_pipeline_backward,
+            include_optimizer=True
+        )
         pipeline_graph_obj_no_dp = None
         graph_root_no_dp = None
         need_no_dp_variant = getattr(self, "gradient_accumulation_steps", 1) > 1
@@ -2563,7 +2350,10 @@ class TimeCalculationLLM(TimeCalculation):
                 misc_metadata=misc_metadata,
             )
             
-            graph_root_no_dp = pipeline_graph_obj_no_dp.construct_fwd_bwd_graph(include_backward=include_pipeline_backward)
+            graph_root_no_dp = pipeline_graph_obj_no_dp.construct_fwd_bwd_graph(
+                include_backward=include_pipeline_backward,
+                include_optimizer=False
+            )
 
         
         interconnect_params = self._build_interconnect_params()
@@ -2636,7 +2426,15 @@ class TimeCalculationLLM(TimeCalculation):
 
         num_SMs = self.hw_config.tech_config.core.num_bundles
         transformer_timings, node_breakdown = self.compute_all_gemm_and_node_times(
-            batch_size, vocab_size, hidden_dim, seq_len, num_heads, kv_heads, intermediate_size, num_SMs
+            batch_size,
+            vocab_size,
+            hidden_dim,
+            seq_len,
+            num_heads,
+            kv_heads,
+            intermediate_size,
+            num_SMs,
+            include_optimizer=False,
         )
 
         # transformer mem layer considers zero stage internally

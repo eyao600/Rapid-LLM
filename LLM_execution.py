@@ -216,6 +216,35 @@ class PipelineGraphFlattener:
                     obj.duration,
                     fwd=obj.fwd,
                 )
+            elif "optimizer" in obj.name:
+                # Optimizer nodes need to be expanded per TP rank
+                cloned_nodes = []
+                for tp_rank in range(self._par_degree):
+                    hw_id = self._hw_id_for_rank(obj.hw_id, tp_rank)
+                    cloned_node = simulate_LLM.Node(
+                        name=f"{obj.name}_rank{tp_rank}",
+                        op_id=self._next_op_id(),
+                        hw_id=hw_id,
+                        duration=obj.duration,
+                        fwd=obj.fwd,
+                    )
+                    cloned_nodes.append(cloned_node)
+                
+                cloned_tuple = tuple(cloned_nodes)
+                self._clone_cache[obj_id] = cloned_tuple
+                
+                # We also need to copy metadata if any
+                for cloned_node in cloned_nodes:
+                    self._copy_metadata(obj, cloned_node)
+                    
+                # Attach children (if any) to all clones? 
+                # Let's follow the pattern:
+                for child in getattr(obj, "children", []):
+                    child_clone = self._clone(child)
+                    if child_clone is not None:
+                        self._attach(cloned_tuple, child_clone)
+                        
+                return cloned_tuple
             else:
                 cloned = simulate_LLM.Node(
                     obj.name,
@@ -224,6 +253,7 @@ class PipelineGraphFlattener:
                     obj.duration,
                     fwd=obj.fwd,
                 )
+
 
             # following _expand_transformer_node logic, we need to find siblings that are zero3 tp_shard=True.
             zero3_attachments: List[simulate_LLM.Edge] = []
@@ -513,6 +543,14 @@ class PipelineGraphFlattener:
             child_clone = self._clone(child)
             if child_clone is None:
                 continue
+            
+            # Special handling for optimizer nodes: 1-to-1 connection
+            if isinstance(child, simulate_LLM.Node) and "optimizer" in child.name and isinstance(child_clone, (list, tuple)):
+                if len(child_clone) == len(rank_tails):
+                    for r in range(len(rank_tails)):
+                        rank_tails[r].add_child(child_clone[r])
+                    continue
+            
             self._attach(downstream_parents, child_clone)
 
         for zero3_edge in zero3_attachments:
@@ -1068,6 +1106,28 @@ class LLMExecutionDispatcher:
         transformer_time = self._run_transformer_astrasim(ExecutionMode.FULL_ASTRASIM_HIERARCHICAL)
         if transformer_time is not None:
             self._apply_transformer_time(transformer_time)
+
+        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.transformer_graph:
+            transformer_timed_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
+                self.transformer_forward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            transformer_timed_backward_root = self.transformer_graph.convert_comm_sizes_to_times(
+                self.transformer_backward_root,
+                self.time_calc.network_model,
+                self.interconnect_params,
+            )
+            self.transformer_graph.save_graph(
+                transformer_timed_forward_root,
+                self.time_calc.output_dir,
+                "/hierarchical_graph_transformer_forward",
+            )
+            self.transformer_graph.save_graph(
+                transformer_timed_backward_root,
+                self.time_calc.output_dir,
+                "/hierarchical_graph_transformer_backward",
+            )
 
         dp_count = getattr(self.time_calc, "dp", 1) or 1
         if not self.pipeline_root:

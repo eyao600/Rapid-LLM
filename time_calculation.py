@@ -1470,86 +1470,38 @@ class TimeCalculation:
 
     # Reduction and all-gather time estimation
 
-    def gradClipping(self, Dim0=None, Dim1=None, name=None):
-        if Dim0 == None:
-            Dim0 = 2 * self.D
-        if Dim1 == None:
-            Dim1 = self.G * self.D
-        if name == None:
-            name = "Hidden"
-        # t_list[i] * clip_norm / max(global_norm, clip_norm)
-        # where:
-        # global_norm = sqrt(sum([l2norm(t)**2 for t in t_list]))
+    def grad_clipping(self, num_params: int) -> float:
+        """Gradient clipping (L2 norm + scale) cost."""
+        norm_comp = num_params * 2  # square + sum
+        clip_comp = num_params * 2  # scale + divide
+        clip_mem = num_params * 2 * self.precision.gradients  # read + write
 
-        norm_comp = Dim0 * Dim1 * 2
-        # 1: power 2
-        # 1: summ
-        norm_mem = (Dim0 * Dim1 * 1) * self.precision_bytes
-        # 1: one read per element and power it by 2 in local registers  anfd
-        # summing to local acc
-
-        clip_comp = Dim0 * Dim1 * 2
-        # 1: pointwise mul
-        # 1: pointwise div
-
-        clip_mem = (Dim0 * Dim1 * 2) * self.precision_bytes
-        # 1: one read for pointwise mul
-        # 1: one write for pointwise div
-
-        gradclip_mem = norm_mem + clip_mem
+        gradclip_mem = clip_mem
         gradclip_comp = norm_comp + clip_comp
 
-        gradclip_time = self.roofline(
-            gradclip_comp, gradclip_mem, name="pointwise-grad-clipping"
+        return self.roofline(gradclip_comp, gradclip_mem, name="pointwise-grad-clipping")
+
+    def apply_grad(self, num_params: int) -> float:
+        """Approximate optimizer update cost (Adam/AdamW-style) per parameter tensor."""
+        OPT_FLOPS_PER_PARAM = 14.0 # typical for Adam
+        bytes_per_param_read = (
+            self.precision.parameters
+            + self.precision.gradients
+            + 2 * self.precision.optimizer_states
+            + self.precision.master_parameters
+        )
+        bytes_per_param_write = (
+            self.precision.parameters
+            + 2 * self.precision.optimizer_states
+            + self.precision.master_parameters
         )
 
-        if self.debug:
-            print(
-                "({}) gradclip_flop: {:,}, gradclip_mem: {:,}".format(
-                    name, gradclip_comp, gradclip_mem
-                )
-            )
-            print("({}) gradclip_time: {:,}\n".format(name, gradclip_time))
+        apply_grad_comp = num_params * OPT_FLOPS_PER_PARAM
+        apply_grad_mem = num_params * (bytes_per_param_read + bytes_per_param_write)
 
-        return gradclip_time
-
-    def apply_grad(self, Dim0=None, Dim1=None, name=None):
-        if Dim0 == None:
-            Dim0 = 2 * self.D
-        if Dim1 == None:
-            Dim1 = self.G * self.D
-        if name == None:
-            name = "Hidden"
-
-        applyGrad_comp = Dim0 * Dim1 * 3
-        # 3: one pointwise division by  scalar after reducing all the gradients,
-        #   one final addition of gradients to the weights
-        #   one multiply by learning rate
-        applyGrad_mem = (
-            (1 * Dim0 * Dim1 * self.precision_bytes)
-            + (2 * Dim0 * Dim1 * self.precision_bytes)
-            + (1 * Dim0 * Dim1 * self.precision_bytes)
-        )
-        # 1: read for pointiwse div
-        # 2: 1 reads and one write for pointwise add
-        # 1: one write for multiplication by lr
-        applyGrad_time = self.roofline(
-            applyGrad_comp, applyGrad_mem, name="pointwise-applyGrad"
-        )
-
-        clip_time = self.gradClipping(Dim0, Dim1, name)
-
-        grad_time = applyGrad_time + clip_time
-
-        if self.debug:
-            print(
-                "({}) applyGrad_flop: {:,}, applyGrad_mem: {:,}".format(
-                    name, applyGrad_comp, applyGrad_mem
-                )
-            )
-            print("({}) applyGrad_time: {:,}\n".format(name, applyGrad_time))
-
-        return grad_time
+        apply_grad_time = self.roofline(apply_grad_comp, apply_grad_mem, name="pointwise-applyGrad")
+        clip_time = self.grad_clipping(num_params)
+        return apply_grad_time + clip_time
 
 
 
@@ -1731,7 +1683,7 @@ class TimeCalculation:
                 local_bytes=0.0,
                 debug_label=name or "comm",
             )
-            apply_grad_time = self.apply_grad(Dim0=k / dim1, Dim1=n, name=name)
+            apply_grad_time = self.apply_grad(int(math.ceil((k / dim1) * n)))
 
         elif self.kp_hidden_type == 2:  # RC
             total_bytes = math.ceil(self.precision_bytes * (k / dim1) * (n / dim2))
@@ -1757,7 +1709,7 @@ class TimeCalculation:
                 local_bytes=3 * total_bytes,
                 debug_label=name or "comm",
             )
-            apply_grad_time = self.apply_grad(Dim0=k, Dim1=n / dim2, name=name)
+            apply_grad_time = self.apply_grad(int(math.ceil(k * (n / dim2))))
         else:
             reduction_time_wt_kp = 0
             total_bytes = math.ceil(self.precision_bytes * k * n)
@@ -1770,7 +1722,7 @@ class TimeCalculation:
                 local_bytes=0.0,
                 debug_label=name or "comm",
             )
-            apply_grad_time = self.apply_grad(Dim0=k, Dim1=n, name=name)
+            apply_grad_time = self.apply_grad(int(math.ceil(k * n)))
         if self.debug:
             print(f"reduction_time_wt_kp: {reduction_time_wt_kp}")
             print(f"reduction_time_wt_dp: {reduction_time_wt_dp}")

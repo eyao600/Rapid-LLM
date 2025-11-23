@@ -101,21 +101,23 @@ class OperationTiming:
 
     Attributes:
         name: Logical operation name.
-        forward: Forward-direction timing (required).
+        forward: Forward-direction timing (optional).
         backward: Backward-direction timing (optional).
         metadata: Additional operation-level metadata (e.g. layer index).
     """
 
     name: str
-    forward: DirectionTiming
+    forward: Optional[DirectionTiming]
     backward: Optional[DirectionTiming] = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.name:
             raise ValueError("OperationTiming.name must be non-empty")
-        if not isinstance(self.forward, DirectionTiming):
-            raise TypeError("OperationTiming.forward must be a DirectionTiming instance")
+        if self.forward is None and self.backward is None:
+            raise ValueError(f"OperationTiming '{self.name}' must have at least one direction")
+        if self.forward is not None and not isinstance(self.forward, DirectionTiming):
+            raise TypeError("OperationTiming.forward must be a DirectionTiming instance or None")
         if self.backward is not None and not isinstance(self.backward, DirectionTiming):
             raise TypeError("OperationTiming.backward must be a DirectionTiming instance or None")
 
@@ -123,6 +125,8 @@ class OperationTiming:
         return self.backward is not None
 
     def total_forward_time(self) -> float:
+        if self.forward is None:
+            raise RuntimeError(f"Operation '{self.name}' does not have forward timing")
         return self.forward.total_time()
 
     def total_backward_time(self) -> float:
@@ -131,7 +135,7 @@ class OperationTiming:
         return self.backward.total_time()
 
     def total_time(self) -> float:
-        total = self.forward.total_time()
+        total = self.forward.total_time() if self.forward is not None else 0.0
         if self.backward is not None:
             total += self.backward.total_time()
         return total
@@ -140,8 +144,9 @@ class OperationTiming:
         """Serialize to dict for reporting or artifact dumps."""
         data: Dict[str, Any] = {
             "name": self.name,
-            "forward": self.forward.to_dict(),
         }
+        if self.forward is not None:
+            data["forward"] = self.forward.to_dict()
         if self.backward is not None:
             data["backward"] = self.backward.to_dict()
         if self.metadata:

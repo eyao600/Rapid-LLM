@@ -578,7 +578,7 @@ class Graph:
         traverse_and_convert(roots)
         return roots
 
-    def construct_fwd_bwd_graph(self, include_backward: bool = True):
+    def construct_fwd_bwd_graph(self, include_backward: bool = True, include_optimizer: bool = False):
         embedding_node = []
         data_batch_node = []
         softmax_node = []
@@ -1024,6 +1024,37 @@ class Graph:
                 )
                 op_id += 1
                 attach_parallel_edge(host, gather_edge)
+
+        if include_backward and include_optimizer:
+            optimizer_time = self._time("optimizer")
+            if optimizer_time > 0:
+                # Find the last node for each stage to attach the optimizer
+                # For stage 0, it's the embedding backward of the last microbatch
+                # For other stages, it's the first transformer layer (lowest index) of that stage for the last microbatch
+                
+                # Helper to find min layer for each stage
+                stage_min_layer = {}
+                for l in range(self.num_layer):
+                    stage = self._stage_for_layer(l)
+                    if stage not in stage_min_layer:
+                        stage_min_layer[stage] = l
+                    else:
+                        stage_min_layer[stage] = min(stage_min_layer[stage], l)
+                                
+                # bwd flips mbs, so we attach to first one, not last.
+                for stage in range(self.lp):
+                    last_node = None
+                    if stage == 0:
+                        last_node = embedding_node_b[0]
+                    else:
+                        min_l = stage_min_layer.get(stage)
+                        if min_l is not None:
+                            last_node = transformer_nodes_b[0][min_l]
+                    
+                    if last_node:
+                        opt_node = Node(f"optimizer_stage{stage}", op_id, stage, optimizer_time, fwd=False)
+                        op_id += 1
+                        last_node.add_child(opt_node)
 
         return root_forward_entry
 

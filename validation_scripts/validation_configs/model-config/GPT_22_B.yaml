@@ -3,9 +3,9 @@ model_param:
   run_type: "training"
   tied_embeddings: false
   model_type: "gpt"
-  global_batch_size: 8
+  global_batch_size: 4
   gradient_accumulation_steps: 1
-  recomputation: partial
+  recomputation: selective
   seq_len: 2048
   hidden_dim: 6144
   attention:
