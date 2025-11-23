@@ -861,7 +861,14 @@ LLMInferenceConfig = _namedtuple(
     ],
 )
 SWConfig = _namedtuple(
-    "sw_param", ["kernel_launch_overhead", "precision", "h2d_bandwidth", "dp_zero_stage"]
+    "sw_param",
+    [
+        "kernel_launch_overhead",
+        "precision",
+        "h2d_bandwidth",
+        "dp_zero_stage",
+        "full_recomputation",
+    ],
 )
 
 SchedulingConfig = _namedtuple(
@@ -1108,11 +1115,17 @@ def parse_config(filename, config_type):
         kernel_launch_overhead = sw_block["kernel_launch_overhead"]
         h2d_bandwidth = sw_block["h2d_bandwidth"]
         dp_zero_stage = sw_block["dp_zero_stage"]
+        full_recomp_raw = sw_block.get("full_recomputation", False)
+        if isinstance(full_recomp_raw, str):
+            full_recomputation = full_recomp_raw.strip().lower() in {"1", "true", "yes", "y", "on", "full"}
+        else:
+            full_recomputation = bool(full_recomp_raw)
         sw_config = SWConfig(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
             h2d_bandwidth=h2d_bandwidth,
             dp_zero_stage=dp_zero_stage,
+            full_recomputation=full_recomputation,
         )
         raw_parallelism_block = config_dict.get("parallelism", {})
         if not isinstance(raw_parallelism_block, dict):

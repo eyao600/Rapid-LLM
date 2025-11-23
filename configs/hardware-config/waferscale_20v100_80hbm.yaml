@@ -3,6 +3,7 @@
 
 
 sw_param:
+  full_recomputation: false # Enable full activation recompute during backward instead of selective recomputation
   kernel_launch_overhead: 9e-6   #9us
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1

@@ -123,12 +123,14 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 
     return processed
 
-def get_transformer_mem_layer( dp, tp, lp, mb, batch_size, hidden_dim, seq_len, intermediate_size, n_heads, precision, zero_stage, flash_attention, model_type="gpt"):#  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
+def get_transformer_mem_layer( dp, tp, lp, mb, batch_size, hidden_dim, seq_len, intermediate_size, n_heads, precision, zero_stage, flash_attention, full_recomputation, model_type="gpt"):#  https://arxiv.org/pdf/2205.05198. https://shjwudp.github.io/blog/2023/gpt-training-memory-estimation-nemo-training-practice/
     """ memory estimation of transformer layer for single gpu case in inference mode is supported.
     other modes or layers are work in progress."""
     #Activations refer to output activations that need to be stored
 
-    if flash_attention:
+    if full_recomputation:
+        act_memory_layer = seq_len * batch_size * hidden_dim * (2 ) * (precision.activations / 2) #full recompute:
+    elif flash_attention:
         act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp ) * (precision.activations / 2) #assuming selective recompute
     else:
         act_memory_layer = seq_len * batch_size * hidden_dim * (34 / tp + 5 * n_heads * seq_len/(hidden_dim * tp) ) * (precision.activations / 2) 
