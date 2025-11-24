@@ -433,7 +433,6 @@ class TimeCalculationLLM(TimeCalculation):
         
         attention_backward_reduction_time = 0
         attention_size_b = 0
-        recompute_time = 0
         # assuming key and value are preloaded into shared memory before attention backward computation
         load_kv_bytes = Bc * d * 2 * num_SMs * self.precision.activations #load key and value for one tile from HBM to SRAM
         initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load_b", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
@@ -472,11 +471,8 @@ class TimeCalculationLLM(TimeCalculation):
         act_dP_time *= batch_size * num_heads / max(1, self.tp) + self.O
         softmax_time_backward *= batch_size * num_heads / max(1, self.tp)
         act_dQ_time *= batch_size * num_heads / max(1, self.tp) + self.O
-        if self.full_recomputation:  #attention recompute is already included in full recomputation   
-            recompute_time = 0
-        else:
-            recompute_time = attn_score_time + attn_scale_softmax_time #selective recomputation only recompute attention score and softmax
-        attention_backward_gemm_time = initial_load_time + recompute_time + act_dO_time + act_dP_time + softmax_time_backward + act_dQ_time
+        
+        attention_backward_gemm_time = initial_load_time + attn_score_time + attn_scale_softmax_time + act_dO_time + act_dP_time + softmax_time_backward + act_dQ_time
         attention_backward_time = attention_backward_gemm_time + attention_backward_reduction_time
         
         
@@ -1896,9 +1892,6 @@ class TimeCalculationLLM(TimeCalculation):
             + transformer_timings["layernorm1"].total_backward_time()
             + transformer_timings["layernorm2"].total_backward_time()
         )
-        # Full recomputation during backward requires redoing the forward compute.
-        if getattr(self, "full_recomputation", False):
-            transformer_time_b += transformer_time_f
 
         node_breakdown = {
             "transformer_time_f": transformer_time_f,
@@ -2292,8 +2285,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
         if include_transformer_backward:
-            bwd_direction = "both" if getattr(self, "full_recomputation", False) else "backward"
-            transformer_backward_root = transformer_graph.construct_transformer_graph(direction=bwd_direction)
+            transformer_backward_root = transformer_graph.construct_transformer_graph(direction="backward")
 
         comp_times = {
             "embedding_f": node_breakdown.get('embedding_f', 0.0),
@@ -2445,7 +2437,6 @@ class TimeCalculationLLM(TimeCalculation):
                 model_type=self.model_type,
                 zero_stage=self.zero_stage,
                 flash_attention=self.flash_attention,
-                full_recomputation=self.full_recomputation,
             )
         )
 
