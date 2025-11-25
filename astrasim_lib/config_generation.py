@@ -100,6 +100,38 @@ def _normalize_topology_name(topo: str) -> str:
     return "FullyConnected"
 
 
+def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Expand multi-dimensional mesh/torus entries into per-dimension entries."""
+
+    expanded: List[Dict[str, Any]] = []
+    for entry in entries:
+        topo = entry.get("topology")
+        npus_value = entry.get("npus")
+        bw_value = entry.get("bandwidth")
+        lat_value = entry.get("latency")
+
+        if isinstance(topo, str) and (topo.startswith("Torus") or topo.startswith("Mesh")):
+            dim_count = int(topo[-2]) if len(topo) >= 2 and topo[-2].isdigit() else 2
+            base_name = "Ring" if topo.startswith("Torus") else "Mesh"
+            for dim_idx in range(dim_count):
+                expanded.append(
+                    {
+                        **entry,
+                        "topology": base_name,
+                        "npus": (
+                            npus_value[dim_idx]
+                            if isinstance(npus_value, (list, tuple)) and dim_idx < len(npus_value)
+                            else npus_value
+                        ),
+                        "bandwidth": bw_value,
+                        "latency": lat_value,
+                    }
+                )
+        else:
+            expanded.append(dict(entry))
+    return expanded
+
+
 def generate_astrasim_configs_from_hw(
     hw_obj,
     out_dir: str = "./astra_cache",
@@ -294,9 +326,10 @@ def generate_astrasim_configs_from_hw(
         )
 
     topo_list: List[str] = []
-    npus_list: List[int] = []
+    npus_list: List[Any] = []
     bw_list: List[float] = []
     lat_list: List[float] = []
+    network_entries: List[Dict[str, Any]] = []
 
     for dim, axes_selected, product_size, _ in selected_dims:
         topo = _normalize_topology_name(dim.topology_type)
@@ -312,10 +345,22 @@ def generate_astrasim_configs_from_hw(
             topo = "FullyConnected"
         effective_bw = float(getattr(dim, "effective_bandwidth", dim.bandwidth))
         latency_s = float(dim.latency)
-        topo_list.append(topo)
-        npus_list.append(size)
-        bw_list.append(round(_gbps_from_bps(effective_bw), 6))
-        lat_list.append(round(_ns_from_s(latency_s), 3))
+        entry = {
+            "dim": dim,
+            "axes": axes_selected,
+            "npus": size,
+            "topology": topo,
+            "bandwidth": round(_gbps_from_bps(effective_bw), 6),
+            "latency": round(_ns_from_s(latency_s), 3),
+        }
+        network_entries.append(entry)
+
+    network_entries = _expand_network_entries(network_entries)
+
+    topo_list = [entry["topology"] for entry in network_entries]
+    npus_list = [entry["npus"] for entry in network_entries]
+    bw_list = [entry["bandwidth"] for entry in network_entries]
+    lat_list = [entry["latency"] for entry in network_entries]
 
     signature_parts = [str(size) for _dim, _axes, size, _ in selected_dims]
     dim_signature = "_".join(signature_parts) if signature_parts else f"{target}"
@@ -380,7 +425,9 @@ def generate_astrasim_configs_from_hw(
     rs_impl: List[str] = []
     a2a_impl: List[str] = []
 
-    for (dim, axes, _, _), topo_name in zip(selected_dims, topo_list):
+    for entry in network_entries:
+        dim = entry["dim"]
+        topo_name = entry["topology"]
         ag_impl.append(_collective_for_dimension(dim, topo_name, "all-gather", default_ag))
         ar_impl.append(_collective_for_dimension(dim, topo_name, "all-reduce", default_ar))
         rs_impl.append(_collective_for_dimension(dim, topo_name, "reduce-scatter", default_rs))
