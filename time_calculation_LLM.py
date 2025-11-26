@@ -223,6 +223,8 @@ class TimeCalculationLLM(TimeCalculation):
         self._debug_memory = _env_flag("DEEPFLOW_DEBUG_MEMORY")
         self._memory_breakdown_debug = None
         self.execution_mode = execution_mode
+        # Use pipeline-style recomputation (explicit recompute nodes in the pipeline graph).
+        self.pipeline_style_recompute = bool(self.full_recomputation)
         inference_cfg = getattr(hw_config, "inference_config", None)
 
         self.all_reduce = "every layer"
@@ -240,6 +242,7 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_backward_root: Optional[Any] = None
         self.transformer_analytical_time_forward: Optional[float] = None
         self.transformer_analytical_time_backward: Optional[float] = None
+        self.transformer_analytical_time_backward_combined: Optional[float] = None
         self.transformer_astrasim_time_forward: Optional[float] = None
         self.transformer_astrasim_time_backward: Optional[float] = None
         self.transformer_astrasim_per_rank_forward: Optional[List[float]] = None
@@ -1930,13 +1933,13 @@ class TimeCalculationLLM(TimeCalculation):
             + transformer_timings["layernorm1"].total_backward_time()
             + transformer_timings["layernorm2"].total_backward_time()
         )
-        # Full recomputation during backward requires redoing the forward compute.
-        if getattr(self, "full_recomputation", False):
-            transformer_time_b += transformer_time_f
+        # Pipeline-style recompute uses explicit recompute nodes, so keep backward time as-is.
+        transformer_time_b_combined = transformer_time_b
 
         node_breakdown = {
             "transformer_time_f": transformer_time_f,
             "transformer_time_b": transformer_time_b,
+            "transformer_time_b_combined": transformer_time_b_combined,
             "embedding_f": transformer_timings["embedding"].total_forward_time(),
             "embedding_b": transformer_timings["embedding"].total_backward_time(),
             "linear_softmax_f": transformer_timings["linear_softmax"].total_forward_time(),
@@ -2329,7 +2332,7 @@ class TimeCalculationLLM(TimeCalculation):
         )
         transformer_forward_root = transformer_graph.construct_transformer_graph(direction="forward")
         if include_transformer_backward:
-            bwd_direction = "both" if getattr(self, "full_recomputation", False) else "backward"
+            bwd_direction = "backward"
             transformer_backward_root = transformer_graph.construct_transformer_graph(direction=bwd_direction)
 
         transformer_forward_root = apply_overlap_transforms(
@@ -2359,11 +2362,16 @@ class TimeCalculationLLM(TimeCalculation):
             "cross_layer_f": 0.0,
             "cross_layer_b": 0.0,
         }
+        flattened_mode = self.execution_mode == ExecutionMode.FULL_ASTRASIM_FLATTENED
+        pipeline_style_recompute_flag = bool(getattr(self, "full_recomputation", False))
         misc_metadata = {
             "num_batch": self.mb,
             "num_layer": self.num_layers,
             "all_reduce": "every_layer",
             "dp_zero_stage": self.zero_stage,
+            "full_recomputation": self.full_recomputation,
+            "flattened_mode": flattened_mode,
+            "pipeline_style_recompute": pipeline_style_recompute_flag,
         }
 
         pipeline_graph_obj = simulate_LLM.Graph(
@@ -2564,7 +2572,9 @@ class TimeCalculationLLM(TimeCalculation):
         self.transformer_forward_root = transformer_forward_root
         self.transformer_backward_root = transformer_backward_root
         self.transformer_analytical_time_forward = node_breakdown['transformer_time_f']
-        self.transformer_analytical_time_backward = node_breakdown['transformer_time_b']
+        # Report backward including recompute overhead when enabled.
+        self.transformer_analytical_time_backward_combined = node_breakdown['transformer_time_b_combined']
+        self.transformer_analytical_time_backward = self.transformer_analytical_time_backward_combined
 
         self.pipeline_graph = pipeline_graph_obj
         self.pipeline_root = graph_root
