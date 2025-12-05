@@ -79,11 +79,11 @@ memory_hierarchy:
 parallelism:
   dp: 2 # data parallelism. Acts as replica count during inference
   tp: 2 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
+  tp_sp: false # tensor-sequence parallelism
   cp: 2 # context parallelism. Not supported for inference.
   lp: 4 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 4 # micro-batches (for best results set to >= lp). 
+  mb: 1 # micro-batches (for best results set to >= lp). 
 
 network:
   # Global faulty links apply to the active AstraSim dimension: [[src, dst, weight]]
@@ -136,7 +136,7 @@ execution_backend:
   model: astra # analytical | astra
   astra:
     backend: astra
-    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d

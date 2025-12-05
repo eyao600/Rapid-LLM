@@ -42,7 +42,7 @@ tech_param:
     bandwidth: 1986 GB     # (/s)
     dynamic_energy_per_bit: 4.5e-12     # (J)
     latency: 100e-9     # (s)
-    util: 0.7
+    util: 0.4
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB

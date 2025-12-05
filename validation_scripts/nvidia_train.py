@@ -304,39 +304,12 @@ def run(
   plot_path = None
   if enable_plot and rows:
     out_dir = Path(PROJECT_ROOT) / "output" / "validation" / "train"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    labels = []
-    errors = []
-    colors = []
-    color_map = {"full": "#ff8c00", "partial": "#1f77b4", "selective": "#1f77b4"}
-    for row in rows:
-      gpus = int(row["dp"]) * int(row["tp"]) * int(row["pp"]) * int(row["cp"])
-      labels.append(f"{row['model']} x{gpus}")
-      errors.append(row["signed_pct_error"])
-      colors.append(color_map.get(str(row.get("recomputation")).lower(), "#1f77b4"))
-    fig_w = max(6.0, 0.6 * len(labels))
-    fig, ax = plt.subplots(figsize=(fig_w, 4))
-    bars = ax.bar(range(len(errors)), errors, color=colors)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
-    ax.set_ylabel("Percent Error")
-    ax.set_title(f"Training validation ({device})")
-    # Legend
-    handles = [
-      plt.Rectangle((0, 0), 1, 1, color="#ff8c00"),
-      plt.Rectangle((0, 0), 1, 1, color="#1f77b4"),
-    ]
-    ax.legend(handles, ["recompute=full", "recompute=partial/selective"])
-    for rect, err in zip(bars, errors):
-      if math.isnan(err):
-        continue
-      height = rect.get_height()
-      ax.text(rect.get_x() + rect.get_width() / 2, height, f"{err:.1f}%", ha="center", va="bottom", fontsize=8)
-    ax.grid(axis="y", linestyle="--", alpha=0.3)
-    plot_path = out_dir / f"train_{device}.png"
-    fig.tight_layout()
-    fig.savefig(plot_path, dpi=200)
-    plt.close(fig)
+    plot_path = _plot_training_rows(
+      rows,
+      title=f"Training validation ({device})",
+      path=out_dir / f"train_{device}.png",
+      include_device=False,
+    )
 
   avg_abs_error = sum(pct_errors) / len(pct_errors) if pct_errors else float("nan")
   if emit_logs:
@@ -346,11 +319,62 @@ def run(
   return {"avg_abs_error": avg_abs_error, "rows": rows, "plot": plot_path}
 
 
+def _plot_training_rows(rows, title: str, path: Path, include_device: bool = True) -> Path:
+  out_dir = path.parent
+  out_dir.mkdir(parents=True, exist_ok=True)
+  labels: List[str] = []
+  errors: List[float] = []
+  colors: List[str] = []
+  color_map = {"full": "#ff8c00", "partial": "#1f77b4", "selective": "#1f77b4"}
+  for row in rows:
+    if str(row.get("model")) == "GPT 22B":
+      continue
+    gpus = int(row["dp"]) * int(row["tp"]) * int(row["pp"]) * int(row["cp"])
+    prefix = ""
+    labels.append(f"{prefix}{row['model']} x{gpus}")
+    errors.append(row["signed_pct_error"])
+    colors.append(color_map.get(str(row.get("recomputation")).lower(), "#1f77b4"))
+
+  fig_w = max(6.0, 0.6 * len(labels))
+  fig, ax = plt.subplots(figsize=(fig_w, 4))
+  bars = ax.bar(range(len(errors)), errors, color=colors)
+  ax.set_xticks(range(len(labels)))
+  ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+  ax.set_ylabel("Percent Error")
+  ax.set_title(title)
+  handles = [
+    plt.Rectangle((0, 0), 1, 1, color="#ff8c00"),
+    plt.Rectangle((0, 0), 1, 1, color="#1f77b4"),
+  ]
+  ax.legend(handles, ["recompute=full", "recompute=partial/selective"])
+  for rect, err in zip(bars, errors):
+    if math.isnan(err):
+      continue
+    height = rect.get_height()
+    ax.text(rect.get_x() + rect.get_width() / 2, height, f"{err:.1f}%", ha="center", va="bottom", fontsize=8)
+  ax.grid(axis="y", linestyle="--", alpha=0.3)
+  fig.tight_layout()
+  fig.savefig(path, dpi=200)
+  plt.close(fig)
+  return path
+
+
 if __name__ == "__main__":
   devices = [
     "A100_korthi",  # Uncomment to include korthi runs.
     "A100_selene",
   ]
+  combined_rows: List[Dict[str, object]] = []
   for device in devices:
     print(f"=== Running {device} training validation ===")
-    run(device=device, emit_logs=True, show_progress=True)
+    result = run(device=device, emit_logs=True, show_progress=True)
+    combined_rows.extend(result.get("rows", []))
+
+  if combined_rows:
+    combined_path = _plot_training_rows(
+      combined_rows,
+      title="Training validation (combined)",
+      path=Path(PROJECT_ROOT) / "output" / "validation" / "train" / "train_combined.png",
+      include_device=False,
+    )
+    print(f"Saved combined plot: {combined_path}")

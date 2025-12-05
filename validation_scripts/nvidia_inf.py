@@ -36,6 +36,12 @@ MODEL_CONFIGS = {
     "Llama 2-70B": "Llama2-70B_inf.yaml",
 }
 
+MODEL_DISPLAY = {
+    "Llama 2-7B": "Llama 2-7B",
+    "Llama 2-13B": "Llama 2-13B",
+    "Llama 2-70B": "Llama 2-70B",
+}
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_PERF = os.path.join(PROJECT_ROOT, "run_perf.py")
 VALIDATION_CONFIG_ROOT = os.path.join(PROJECT_ROOT, "validation_scripts", "validation_configs")
@@ -230,6 +236,7 @@ def compute_pct_errors(results, actual_lookup: Dict[Tuple[str, int], float]):
                 "inference_time_s": inf_time,
                 "actual_inference_time_s": actual,
                 "pct_error": pct_error,
+                "display_model": MODEL_DISPLAY.get(str(model), str(model)),
                 "success": res.success,
                 "error": res.error,
             }
@@ -250,6 +257,7 @@ def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
     models = [m for m in desired_order if m in unique_models] + [
         m for m in unique_models if m not in desired_order
     ]
+    display_models = [MODEL_DISPLAY.get(m, m) for m in models]
 
     bar_width = 0.28  # width per individual bar
     tp_gap = 0.08  # gap between TP subgroups inside a model cluster
@@ -295,12 +303,12 @@ def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
         x_seconds, seconds_vals, bar_width, label="DeepFlow", color="#1f77b4"
     )
     bars_actual = ax.bar(
-        x_actual, actual_vals, bar_width, label="Actual [1]", color="#0bbd37"
+        x_actual, actual_vals, bar_width, label="Actual", color="#0bbd37"
     )
 
     # Primary ticks: model names at cluster centers
     ax.set_xticks(model_centers)
-    ax.set_xticklabels(models, fontsize=11)
+    ax.set_xticklabels(display_models, fontsize=11)
     ax.set_ylabel("Inference Latency (s)")
     ax.set_title(
         f"Validation of Inference Latency on Systems of {device} (network ignored)"
@@ -328,11 +336,6 @@ def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
     ax.legend()
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     ax.margins(x=0.02, y=0.1)
-
-    # Add citation below the graph
-    citation = "[1] J. Kundu et al., “Performance Modeling and Workload Analysis of Distributed Large Language Model Training and Inference,” (2024)"
-    plt.subplots_adjust(bottom=0.1)
-    fig.text(0.5, 0.015, citation, ha="center", va="bottom", fontsize=8)
 
     outpath = outdir / f"inf_{device}.png"
     fig.savefig(outpath, dpi=200, bbox_inches="tight")
@@ -399,6 +402,13 @@ def run(
             out = plot_device(data, device, out_dir)
             if out is not None:
                 outputs.append(out)
+        # Secondary bar plot matching the training style (combined devices).
+        bar_path = _plot_error_bars(
+            rows,
+            path=out_dir / "inf_errors_bar.png",
+            title="Inference validation (combined)",
+        )
+        outputs.append(bar_path)
         if not outputs:
             print("No plots generated (no matching device rows).")
         else:
@@ -409,6 +419,36 @@ def run(
     if emit_logs:
         print("Average absolute percent error across all tests: {:.2f}%".format(avg_abs_error))
     return {"avg_abs_error": avg_abs_error, "rows": rows}
+
+
+def _plot_error_bars(rows: List[Dict[str, object]], path: Path, title: str) -> Path:
+    # Build labels like "<model> xTP<tp>", drop device prefixes.
+    labels: List[str] = []
+    errors: List[float] = []
+    for row in rows:
+        model = row.get("display_model") or row.get("model")
+        tp = row.get("tp")
+        labels.append(f"{model} xTP{tp}")
+        errors.append(float(row.get("pct_error", float("nan"))))
+
+    fig_w = max(6.0, 0.6 * len(labels))
+    fig, ax = plt.subplots(figsize=(fig_w, 4))
+    bars = ax.bar(range(len(errors)), errors, color="#1f77b4")
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+    ax.set_ylabel("Percent Error")
+    ax.set_title(title)
+    for rect, err in zip(bars, errors):
+        if math.isnan(err):
+            continue
+        height = rect.get_height()
+        ax.text(rect.get_x() + rect.get_width() / 2, height, f"{err:.1f}%", ha="center", va="bottom", fontsize=8)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return path
 
 
 if __name__ == "__main__":
