@@ -11,3 +11,4 @@ pydot==3.0.0
 graphviz==0.21
 joblib>=1.5.2
 seaborn
+scotchpy64>=1.0.1
