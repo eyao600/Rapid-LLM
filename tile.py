@@ -31,6 +31,7 @@ hundreds of thousands of times. Key design choices for performance and determini
 from math import ceil
 from functools import lru_cache
 from enum import IntEnum
+import math
 from typing import Tuple, Union, NamedTuple
 
 class AccessBytes(NamedTuple):
@@ -382,6 +383,27 @@ class TiledGEMM:
     def GEMM_flop(self):
         """Theoretical FLOP count for the full GEMM of size MxKxN."""
         return self.M * self.N * (2 * self.K - 1)
+
+    @property
+    def bundle_util(self):
+        """Wave utilization of bundles"""
+        reuse_M = -(-self.M // self.l2_M)
+        reuse_K = -(-self.K // self.l2_K)
+        reuse_N = -(-self.N // self.l2_N)
+
+        gemm_waves = self.memLayer[1].calc_waves_per_sm(
+            self.M, self.K, self.N,
+            self.l2_M, self.l2_K, self.l2_N
+        )
+        
+        if gemm_waves == -1:
+            return 1.0
+        
+        full_waves = math.floor(gemm_waves)
+        partial_wave = gemm_waves - full_waves # fractional wave
+        
+        return (full_waves + partial_wave * partial_wave) / gemm_waves
+
 
     def sysarray_accesses(self):
         """Return systolic-array traffic (bytes) using cached pure function.
