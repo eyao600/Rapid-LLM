@@ -834,12 +834,15 @@ class TimeCalculation:
             if eff_sm > 0:
                 mem_access_per_sm[1] = mem_access_per_sm[1] / eff_sm
 
-            sm_util = 1
-            gemm_waves = self.memLayer[1].calc_waves_per_sm(dim1, dim2, dim3, gemm.l2_M, gemm.l2_K, gemm.l2_N)
-            if gemm_waves != -1:
-                full_waves = math.floor(gemm_waves)
-                partial_wave = gemm_waves - full_waves
-                sm_util = (full_waves + partial_wave * partial_wave) / gemm_waves
+            if flashattn_enable:
+                sm_util = 0.25 # assume 25% SM utilization for FlashAttention (Dao, 2023)
+            else:
+                sm_util = 1
+                gemm_waves = self.memLayer[1].calc_waves_per_sm(dim1, dim2, dim3, gemm.l2_M, gemm.l2_K, gemm.l2_N)
+                if gemm_waves != -1:
+                    full_waves = math.floor(gemm_waves)
+                    partial_wave = gemm_waves - full_waves
+                    sm_util = (full_waves + partial_wave * partial_wave) / gemm_waves
 
             GEMM_time = self.roofline(GEMM_flop, mem_access_per_sm, name, util=sm_util, flashattn_enable=flashattn_enable) 
             if flashattn_enable or disable_overhead:
