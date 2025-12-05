@@ -137,6 +137,8 @@ class Graph:
         self.num_layer = self.misc_metadata.get("num_layer", 0)
         self.layer_per_device = self.num_layer / self.lp if self.lp else self.num_layer
         self.all_reduce = self.misc_metadata.get("all_reduce", "every layer")
+        self.dp_microbatch_mode = str(self.misc_metadata.get("dp_microbatch_mode", "every_mb")).lower()
+        self.dp_zero_stage = int(self.misc_metadata.get("dp_zero_stage", 0) or 0)
 
         self.transformer_cfg = self.comp_times.get("transformer", {})
         self.T_grad_transformer = self.comp_times.get("grad_transformer", 0.0)
@@ -836,6 +838,9 @@ class Graph:
         for b in range(self.num_batch):
             # Data parallel collectives (all reduce for DDP/ZeRO-1, reduce-scatter + all-gather for ZeRO-2/3)
             if self.dp > 1:
+                apply_dp_all_mbs = self.dp_microbatch_mode != "last_mb" or self.dp_zero_stage >= 3
+                if not apply_dp_all_mbs and b != 0: # mb is backwards in backpass
+                    continue
                 zero2_embedding_key = "zero2_embedding_gather"
                 zero2_transformer_key = "zero2_transformer_gather"
                 zero2_softmax_key = "zero2_softmax_gather"

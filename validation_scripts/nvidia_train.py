@@ -113,10 +113,12 @@ def _build_spec(
 ) -> Tuple[ValidationSpec, str, str]:
   label = f"{device} {model} bs={batch} mb={mb} dp={dp} tp={tp} pp={pp} cp={cp} tp_sp={tp_sp}"
 
+  recomputation_mode = str(recomputation).strip().lower()
+  full_recompute = recomputation_mode in {"full", "true", "yes", "on", "1"}
+
   model_overrides = {
     "model_param": {
       "global_batch_size": int(batch),
-      "recomputation": str(recomputation),
     }
   }
 
@@ -128,7 +130,11 @@ def _build_spec(
       "cp": int(cp),
       "lp": int(pp),
       "mb": max(1, int(mb)),
-    }
+    },
+    "sw_param": {
+      # sw_param.full_recomputation toggles full activation recompute during backward.
+      "full_recomputation": full_recompute,
+    },
   }
 
   spec = ValidationSpec(
@@ -341,7 +347,10 @@ def run(
 
 
 if __name__ == "__main__":
-  print("=== Running A100_korthi training validation ===")
-  run(device="A100_korthi", emit_logs=True, show_progress=True)
-  # print("\n=== Running A100_selene training validation ===")
-  # run(device="A100_selene", emit_logs=True, show_progress=True)
+  devices = [
+    "A100_korthi",  # Uncomment to include korthi runs.
+    "A100_selene",
+  ]
+  for device in devices:
+    print(f"=== Running {device} training validation ===")
+    run(device=device, emit_logs=True, show_progress=True)

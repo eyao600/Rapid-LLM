@@ -204,6 +204,7 @@ class TimeCalculation:
         self.h2d_bandwidth = getattr(hw_config.sw_config, "h2d_bandwidth", -1)
         self.zero_stage = getattr(hw_config.sw_config, "dp_zero_stage", 0)
         self.full_recomputation = getattr(hw_config.sw_config, "full_recomputation", False)
+        self.dp_microbatch = getattr(hw_config.sw_config, "dp_microbatch", "every_mb")
         self.attached = True
 
         # Hardware Parameters

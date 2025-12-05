@@ -868,6 +868,7 @@ SWConfig = _namedtuple(
         "h2d_bandwidth",
         "dp_zero_stage",
         "full_recomputation",
+        "dp_microbatch",
     ],
 )
 
@@ -1120,12 +1121,20 @@ def parse_config(filename, config_type):
             full_recomputation = full_recomp_raw.strip().lower() in {"1", "true", "yes", "y", "on", "full"}
         else:
             full_recomputation = bool(full_recomp_raw)
+        dp_microbatch_raw = sw_block.get("dp_microbatch", "every_mb")
+        if isinstance(dp_microbatch_raw, str):
+            dp_microbatch = dp_microbatch_raw.strip().lower()
+        else:
+            dp_microbatch = str(dp_microbatch_raw).strip().lower()
+        if dp_microbatch not in {"every_mb", "last_mb"}:
+            raise ValueError("sw_param.dp_microbatch must be 'every_mb' or 'last_mb'")
         sw_config = SWConfig(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
             h2d_bandwidth=h2d_bandwidth,
             dp_zero_stage=dp_zero_stage,
             full_recomputation=full_recomputation,
+            dp_microbatch=dp_microbatch,
         )
         raw_parallelism_block = config_dict.get("parallelism", {})
         if not isinstance(raw_parallelism_block, dict):

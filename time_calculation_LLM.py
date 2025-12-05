@@ -2372,6 +2372,7 @@ class TimeCalculationLLM(TimeCalculation):
             "full_recomputation": self.full_recomputation,
             "flattened_mode": flattened_mode,
             "pipeline_style_recompute": pipeline_style_recompute_flag,
+            "dp_microbatch_mode": getattr(self, "dp_microbatch", "every_mb"),
         }
 
         pipeline_graph_obj = simulate_LLM.Graph(
