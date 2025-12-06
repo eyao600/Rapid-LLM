@@ -1303,29 +1303,6 @@ def convert_deepflow_graph_to_chakra_et(
     pipeline_recv_cache: Dict[Tuple[Any, Any, int], int] = {}
     tag_counter = itertools.count(start=1)
 
-    # Build TP communicator groups (ids start at 1000) per label and dp
-    global _LAST_TP_GROUPS, _TP_LABEL_DP_TO_ID, _TP_MEMBERS_TO_GID
-    _LAST_TP_GROUPS = {}
-    _TP_LABEL_DP_TO_ID = {}
-    _TP_MEMBERS_TO_GID = {}
-    tp_gid_counter = _it_count(start=_TP_GROUP_BASE_ID)
-
-    # Collect per-label TP members per dp index (use prebuilt mapping to avoid rescans)
-    # Step 9: Convert axis membership tokens into communicator IDs (reused across
-    # labels/dp replicas) so later we can write ``comm_groups.json``.
-    for label in sorted(label_group_tokens.keys()):
-        tokens = sorted(label_group_tokens[label])
-        for axis, dp_idx, members_tuple in tokens:
-            members_list = list(members_tuple)
-            members_key = tuple(members_list)
-            gid = _TP_MEMBERS_TO_GID.get(members_key)
-            if gid is None:
-                gid = str(next(tp_gid_counter))
-                _TP_MEMBERS_TO_GID[members_key] = gid
-                if gid not in _LAST_TP_GROUPS:
-                    _LAST_TP_GROUPS[gid] = members_list
-            _TP_LABEL_DP_TO_ID[(label, dp_idx)] = gid
-
     # Step 8 helper: materialise SEND/RECV control edges across stages whenever a
     # pipeline dependency exists between ``parent`` and ``target``.
     def ensure_pipeline(parent: Any, target: Any, dp_idx: int) -> int:
@@ -1409,7 +1386,6 @@ def convert_deepflow_graph_to_chakra_et(
         pipeline_recv_cache[key] = recv_id
         return recv_id
 
-
     mapping_result = gmap.finalize_collection(collector)
     if mapping_result:
         stage_ids, stage_index = _remap_stages_for_mapping(
@@ -1424,6 +1400,44 @@ def convert_deepflow_graph_to_chakra_et(
             num_stages=num_stages,
             output_dir=output_dir,
         )
+        # Rebuild communicator layout after remapping so pg_name and comm_groups.json
+        # reflect the SCOTCH permutation.
+        axis_groups = _build_axis_groups(axis_order, axis_sizes, stage_axis_coords, stage_to_ranks)
+        (
+            tp_collective_labels,
+            label_to_edges,
+            label_group_tokens,
+        ) = _assign_collective_labels(
+            tp_collective_groups,
+            collective_info,
+            axis_order,
+            axis_sizes,
+            stage_axis_coords,
+            axis_groups,
+            stage_to_ranks,
+            dp_count,
+        )
+
+    # Build TP communicator groups (ids start at 1000) per label and dp using the
+    # (potentially remapped) label tokens.
+    global _LAST_TP_GROUPS, _TP_LABEL_DP_TO_ID, _TP_MEMBERS_TO_GID
+    _LAST_TP_GROUPS = {}
+    _TP_LABEL_DP_TO_ID = {}
+    _TP_MEMBERS_TO_GID = {}
+    tp_gid_counter = _it_count(start=_TP_GROUP_BASE_ID)
+
+    for label in sorted(label_group_tokens.keys()):
+        tokens = sorted(label_group_tokens[label])
+        for axis, dp_idx, members_tuple in tokens:
+            members_list = list(members_tuple)
+            members_key = tuple(members_list)
+            gid = _TP_MEMBERS_TO_GID.get(members_key)
+            if gid is None:
+                gid = str(next(tp_gid_counter))
+                _TP_MEMBERS_TO_GID[members_key] = gid
+                if gid not in _LAST_TP_GROUPS:
+                    _LAST_TP_GROUPS[gid] = members_list
+            _TP_LABEL_DP_TO_ID[(label, dp_idx)] = gid
 
     # Step 10: Emit ET nodes per stage (collectives first, then compute nodes),
     # iterating in the topological order computed above.
