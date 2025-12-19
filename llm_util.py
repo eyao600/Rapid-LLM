@@ -381,7 +381,7 @@ def process_decode_gemm_shapes(
     Similar to process_gemm_shapes but for decode-specific patterns. Handles grouped
     query attention (GQA) by allowing kv_heads != num_heads.
 
-    Integrates with existing DeepFlow GEMM processing infrastructure.
+    Integrates with existing RAPID-LLM GEMM processing infrastructure.
     """
     # Generate decode GEMM shapes in 4D
     gemm_shapes_4d = autoregressive_decoder_gemm(

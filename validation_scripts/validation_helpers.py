@@ -21,7 +21,7 @@ if PROJECT_ROOT not in sys.path:
 
 from tools.parallelism_sweep import set_astrasim_cache_mode  # type: ignore
 
-VALIDATION_WORKERS_ENV = "DEEPFLOW_VALIDATION_WORKERS"
+VALIDATION_WORKERS_ENV = "RAPID_VALIDATION_WORKERS"
 DEFAULT_WORKER_COUNT = 8
 
 ResultParser = Callable[[str, "ValidationSpec"], Dict[str, Any]]
@@ -243,7 +243,7 @@ def _execute_spec(spec: ValidationSpec) -> ValidationResult:
         success=False,
         metrics={},
         raw_output=output,
-        error=f"DeepFlow exited with status {proc.returncode}",
+        error=f"RAPID-LLM exited with status {proc.returncode}",
         returncode=proc.returncode,
         duration_s=duration,
         model_config_used=model_config_path,
@@ -257,7 +257,7 @@ def _execute_spec(spec: ValidationSpec) -> ValidationResult:
         success=False,
         metrics={},
         raw_output=output,
-        error=f"Failed to parse DeepFlow output: {exc}",
+        error=f"Failed to parse RAPID-LLM output: {exc}",
         returncode=proc.returncode,
         duration_s=duration,
         model_config_used=model_config_path,
@@ -301,7 +301,7 @@ def run_validation_suite(
   os.makedirs(tmp_root, exist_ok=True)
   set_astrasim_cache_mode(cache_mode)
   env_map = dict(env_overrides or {})
-  env_map.setdefault("DEEPFLOW_ASTRA_CACHE_MODE", os.environ.get("DEEPFLOW_ASTRA_CACHE_MODE", cache_mode))
+  env_map.setdefault("RAPID_ASTRA_CACHE_MODE", os.environ.get("RAPID_ASTRA_CACHE_MODE", cache_mode))
   model_paths = {os.path.abspath(base_model_config_path)}
   hardware_paths = {os.path.abspath(base_hardware_config_path)}
   for spec in specs:
@@ -324,7 +324,7 @@ def run_validation_suite(
     default_model_config_path=os.path.abspath(base_model_config_path),
     default_hardware_config_path=os.path.abspath(base_hardware_config_path),
     result_parser=result_parser,
-    cache_mode=os.environ.get("DEEPFLOW_ASTRA_CACHE_MODE", cache_mode),
+    cache_mode=os.environ.get("RAPID_ASTRA_CACHE_MODE", cache_mode),
     extra_run_perf_args=extra_args,
   )
   results: List[ValidationResult] = []

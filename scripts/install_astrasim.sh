@@ -7,7 +7,7 @@ ASTRA_SIM_DIR="${REPO_ROOT}/astra-sim"
 
 cd "${REPO_ROOT}"
 
-echo "[astrasim] Updating DeepFlow submodules..."
+echo "[astrasim] Updating RAPID-LLM submodules..."
 git submodule update --init --recursive
 git submodule update --remote -- astra-sim
 

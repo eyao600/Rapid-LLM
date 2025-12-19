@@ -1,7 +1,7 @@
 """
 LLM Inference Simulation - Extended Graph Generation for Prefill + Decode
 
-This module extends DeepFlow's LLM training simulation to support full inference
+This module extends RAPID-LLM's LLM training simulation to support full inference
 workflows including both prefill and autoregressive decode phases.
 """
 
@@ -162,7 +162,7 @@ class DecodeGraph(Graph):
         total_seq_len: int,
         gemm_shapes: Dict[str, Tuple[int, ...]],
     ) -> float:
-        """Execute decode step using appropriate DeepFlow execution mode."""
+        """Execute decode step using appropriate RAPID-LLM execution mode."""
 
         if not self.hw_config or not self.model_config:
             raise RuntimeError("Hardware config and model config are required for decode step execution.")
@@ -293,7 +293,7 @@ class DecodeGraph(Graph):
         return total_time, total_energy
 
     def _debug_graphs_enabled(self) -> bool:
-        flag = os.environ.get("DEEPFLOW_VISUALIZE_GRAPHS")
+        flag = os.environ.get("RAPID_VISUALIZE_GRAPHS")
         if flag is None:
             return False
         return flag.strip().lower() not in {"", "0", "false", "no"}
@@ -305,7 +305,7 @@ class InferenceEngine:
     Main orchestrator for complete LLM inference simulation.
 
     Manages the transition from prefill to decode phases and coordinates
-    the overall inference execution using existing DeepFlow infrastructure.
+    the overall inference execution using existing RAPID-LLM infrastructure.
     """
 
     def __init__(
@@ -326,7 +326,7 @@ class InferenceEngine:
 
     def _build_decode_graph(self) -> Tuple[float, List[DecodeSample]]:
         """
-        Build decode phase using sample-based approach with proper DeepFlow integration.
+        Build decode phase using sample-based approach with proper RAPID-LLM integration.
 
         Returns:
             Tuple of (total_decode_time, decode_samples)

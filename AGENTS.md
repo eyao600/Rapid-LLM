@@ -1,4 +1,4 @@
-DeepFlow quick brief for future agents
+RAPID-LLM quick brief for future agents
 
 - Purpose: Python simulator for LSTM/GEMM/LLM performance, memory, and (rudimentary) energy. Entry point `run_perf.py` loads YAML configs (hardware + model) and builds compute/comm graphs, then simulates analytically or via AstraSim.
 - Execution backends (set in hardware config `execution_backend`): analytical (ring-only, no congestion); hybrid (AstraSim for transformer block graph, analytical pipeline); full_astrasim_hierarchical (AstraSim separately for transformer and pipeline graphs, assumes no congestion between them); full_astrasim_flattened (one big combined graph in AstraSim, slowest/most detailed).
@@ -9,4 +9,4 @@ DeepFlow quick brief for future agents
 - Memory model: static formulas for activations/weights/optimizer; KV-cache memory estimation WIP. Peak memory compared to DRAM per device; ZeRO-3 ephemeral gather tracked separately. No fragmentation/eviction modeling.
 - Inference: `TimeCalculationLLMInference` handles prefill + sampled decode steps (linear interpolation between samples). DP acts as replica multiplier only; CP decode is noted WIP. FlashAttention disabled for decode.
 - Artifacts/logs: outputs under `output/` (mode subdir). AstraSim artifacts live in `astra_cache/` and optionally `output/LLM/astra_hier` or `astra_flat` when persistence flags are set. Current logs/marker: `log/this_folder_contains_astrasim_logs`, `log/log.log` hold prior runs. Debug hardware snapshots in `dbg_hw_conf/20251105_173209/` (e.g., `baseline_001_tp64_cp1_dp1_lp1.yaml`, `baseline_053_tp1_cp1_dp64_lp1.yaml`).
-- Key environment flags: `DEEPFLOW_VISUALIZE_GRAPHS`, `DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS`, `DEEPFLOW_PERSIST_ARTIFACT_VIZ`, `DEEPFLOW_ASTRA_CACHE_MODE` (default CACHE_READWRITE).
+- Key environment flags: `RAPID_VISUALIZE_GRAPHS`, `RAPID_PERSIST_ASTRASIM_ARTIFACTS`, `RAPID_PERSIST_ARTIFACT_VIZ`, `RAPID_ASTRA_CACHE_MODE` (default CACHE_READWRITE).

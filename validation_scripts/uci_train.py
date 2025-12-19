@@ -3,7 +3,7 @@
 UCI training validation harness combining DDP and FSDP grid-search measurements.
 
 Inspired by nvidia_train.py: builds ValidationSpecs from benchmark CSVs,
-runs DeepFlow, compares training time to measured Avg_Step_Time_s, and
+runs RAPID-LLM, compares training time to measured Avg_Step_Time_s, and
 produces bar plots of percent error.
 """
 
@@ -258,11 +258,11 @@ def run(
                     f"\n=== Result ({row['variant']}, TP={row['tp']}, PP={row['pp']}, CP={row['cp']}, DP={row['dp']}) ==="
                 ]
                 if row["success"] and not math.isnan(row["pct_error"]):
-                    block.append(f"  DeepFlow train time: {float(row['training_time_s']):.2f}s")
+                    block.append(f"  RAPID-LLM train time: {float(row['training_time_s']):.2f}s")
                     block.append(f"  Actual train time:   {float(row['actual_training_time_s']):.2f}s")
                     block.append(f"  Percent Error:  {float(row['signed_pct_error']):+.2f}%")
                 else:
-                    block.append(f"  DeepFlow run failed. {(row.get('error') or '')}".rstrip())
+                    block.append(f"  RAPID-LLM run failed. {(row.get('error') or '')}".rstrip())
                     if row.get("raw_output"):
                         block.append("  --- Raw output ---")
                         block.append(str(row["raw_output"]).strip())

@@ -1,4 +1,4 @@
-"""Generate AstraSim configuration artifacts from DeepFlow hardware configs."""
+"""Generate AstraSim configuration artifacts from RAPID-LLM hardware configs."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def choose_collective(alg: str, topo: str, op: str) -> str:
 
 
 def compute_intra_inter_ib_ll_from_hw(hw_obj) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-    """Return intra/inter bandwidth+latency tuples from a parsed DeepFlow config."""
+    """Return intra/inter bandwidth+latency tuples from a parsed RAPID-LLM config."""
     net = Network(hw_obj)
     intra_throughput, inter_throughput = net.calc_throughput()
     intra_latency, inter_latency = net.calc_latency()
@@ -72,7 +72,7 @@ def compute_intra_inter_ib_ll_from_hw(hw_obj) -> Tuple[Tuple[float, float], Tupl
 
 
 def derive_topology_from_hw(hw_obj) -> str:
-    """Map DeepFlow network topology enums to AstraSim names."""
+    """Map RAPID-LLM network topology enums to AstraSim names."""
     layout = getattr(hw_obj, "network_layout", None)
     primary = layout.primary_dimension() if layout else None
     topo = (primary.topology_type if primary else "ring") or "ring"

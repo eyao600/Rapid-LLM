@@ -1,4 +1,4 @@
-"""Shared helpers for reasoning about DeepFlow axis layouts."""
+"""Shared helpers for reasoning about RAPID-LLM axis layouts."""
 
 from __future__ import annotations
 

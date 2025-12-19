@@ -55,9 +55,9 @@ _COLLECTIVE_ENUMS = {
 
 
 def _cache_mode() -> str:
-    """Return the normalized cache mode set via ``DEEPFLOW_ASTRA_CACHE_MODE``."""
+    """Return the normalized cache mode set via ``RAPID_ASTRA_CACHE_MODE``."""
 
-    mode = os.environ.get("DEEPFLOW_ASTRA_CACHE_MODE", "CACHE_READWRITE")
+    mode = os.environ.get("RAPID_ASTRA_CACHE_MODE", "CACHE_READWRITE")
     if mode is None:
         return "CACHE_READWRITE"
     normalized = mode.strip().upper()

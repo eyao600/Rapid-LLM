@@ -559,7 +559,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             time_calc_cls=TimeCalculationLLMInference,
         )
 
-        # Build decode phase using sample-based approach with real DeepFlow integration
+        # Build decode phase using sample-based approach with real RAPID-LLM integration
         # decode_time, decode_energy, decode_samples = inference_engine._build_decode_graph()
         return inference_engine._build_decode_graph()
 

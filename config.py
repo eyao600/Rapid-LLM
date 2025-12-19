@@ -1066,7 +1066,6 @@ class LLMConfig:
     intermediate_size: Optional[int]
     vocab_size: int
     n_tokens: int
-    all_reduce: str
     attention: LLMAttentionConfig
     num_experts: int
     top_k: int
@@ -1175,7 +1174,6 @@ class LLMConfig:
             intermediate_size=intermediate_size,
             vocab_size=vocab_size,
             n_tokens=0,
-            all_reduce="every layer",
             attention=attention,
             num_experts=num_experts,
             top_k=top_k,

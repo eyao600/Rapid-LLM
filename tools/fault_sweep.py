@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fault sensitivity sweep for DeepFlow parallelism configurations.
+Fault sensitivity sweep for RAPID-LLM parallelism configurations.
 
 Generates a representative set of parallelism tuples that map to a fixed GPU
 budget, evaluates baseline runtimes, and then injects random soft faults across
@@ -284,7 +284,7 @@ def _candidate_fault_dimensions(settings: Dict[str, int]) -> List[Tuple[int, int
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="DeepFlow fault sensitivity sweep")
+    parser = argparse.ArgumentParser(description="RAPID-LLM fault sensitivity sweep")
     parser.add_argument("--target-num-gpus", type=int, default=TARGET_NUM_GPUS)
     parser.add_argument("--sample-count", type=int, default=SAMPLE_COUNT)
     parser.add_argument("--fault-iter", type=int, default=FAULT_ITER)

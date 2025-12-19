@@ -151,7 +151,7 @@ def run_single(
 
     result = validation_results[0]
     inference_time_s = float(result.metrics.get("inference_time_s", float("nan"))) if result.success else float("nan")
-    err_detail = None if result.success else (result.error or "DeepFlow run failed")
+    err_detail = None if result.success else (result.error or "RAPID-LLM run failed")
 
     if actual_inference_time_s is None:
         try:
@@ -169,11 +169,11 @@ def run_single(
             f"\n=== Result (device={device}, model={model}, TP={tp}) ===",
         ]
         if not math.isnan(inference_time_s):
-            block_lines.append(f"  DeepFlow Inference Time: {inference_time_s:.2f}s")
+            block_lines.append(f"  RAPID-LLM Inference Time: {inference_time_s:.2f}s")
             block_lines.append(f"  Actual Inference Time:   {actual_inference_time_s:.2f}s")
             block_lines.append(f"  Percent Error:          {pct_error:.2f}%")
         else:
-            block_lines.append(f"  DeepFlow run failed. {err_detail or ''}".rstrip())
+            block_lines.append(f"  RAPID-LLM run failed. {err_detail or ''}".rstrip())
             if result.raw_output:
                 block_lines.append(result.raw_output.strip())
         print("\n".join(block_lines))
@@ -300,7 +300,7 @@ def plot_device(df: pd.DataFrame, device: str, outdir: Path) -> Path | None:
     fig, ax = plt.subplots(figsize=(fig_w, 5))
 
     bars_seconds = ax.bar(
-        x_seconds, seconds_vals, bar_width, label="DeepFlow", color="#1f77b4"
+        x_seconds, seconds_vals, bar_width, label="RAPID-LLM", color="#1f77b4"
     )
     bars_actual = ax.bar(
         x_actual, actual_vals, bar_width, label="Actual", color="#0bbd37"
@@ -385,11 +385,11 @@ def run(
                 f"\n=== Result (device={row['device']}, model={row['model']}, TP={row['tp']}) ===",
             ]
             if not math.isnan(row["inference_time_s"]):
-                block_lines.append(f"  DeepFlow Inference Time: {float(row['inference_time_s']):.2f}s")
+                block_lines.append(f"  RAPID-LLM Inference Time: {float(row['inference_time_s']):.2f}s")
                 block_lines.append(f"  Actual Inference Time:   {float(row['actual_inference_time_s']):.2f}s")
                 block_lines.append(f"  Percent Error:          {pct_error:.2f}%")
             else:
-                block_lines.append(f"  DeepFlow run failed. {(row.get('error') or '')}".rstrip())
+                block_lines.append(f"  RAPID-LLM run failed. {(row.get('error') or '')}".rstrip())
             print("\n".join(block_lines))
 
     if enable_plot:

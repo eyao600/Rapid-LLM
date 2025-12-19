@@ -1,1 +1,1 @@
-"""Validation helpers for DeepFlow."""
+"""Validation helpers for RAPID-LLM."""

@@ -1,4 +1,4 @@
-"""AstraSim integration helpers for DeepFlow with optional dependency handling."""
+"""AstraSim integration helpers for RAPID-LLM with optional dependency handling."""
 
 from typing import Optional
 
@@ -31,7 +31,7 @@ try:
     )
     from .graph_debug import build_debug_view, debug_view_to_json
     from .executor import (
-        convert_deepflow_graph_to_chakra_et,
+        convert_rapid_llm_graph_to_chakra_et,
         run_astra_simulation_only_onepath,
     )
 except RuntimeError as exc:
@@ -75,7 +75,7 @@ if not _ASTRASIM_AVAILABLE:
     write_et_node = _stub  # type: ignore
     build_debug_view = _stub  # type: ignore
     debug_view_to_json = _stub  # type: ignore
-    convert_deepflow_graph_to_chakra_et = _stub  # type: ignore
+    convert_rapid_llm_graph_to_chakra_et = _stub  # type: ignore
     run_astra_simulation_only_onepath = _stub  # type: ignore
 
 
@@ -110,6 +110,6 @@ __all__ = [
     "write_et_node",
     "build_debug_view",
     "debug_view_to_json",
-    "convert_deepflow_graph_to_chakra_et",
+    "convert_rapid_llm_graph_to_chakra_et",
     "run_astra_simulation_only_onepath",
 ]

@@ -291,11 +291,11 @@ def run(
         f"\n=== Result (device={row['device']}, model={row['model']}, bs={row['batch']}, mb={row['mb']}, dp={row['dp']}, tp={row['tp']}, pp={row['pp']}, cp={row['cp']}, tp_sp={row['tp_sp']}, recomputation={row['recomputation']}) ==="
       ]
       if row["success"] and not math.isnan(row["pct_error"]):
-        block.append(f"  DeepFlow train time: {float(row['training_time_s']):.2f}s")
+        block.append(f"  RAPID-LLM train time: {float(row['training_time_s']):.2f}s")
         block.append(f"  Actual train time:   {float(row['actual_inference_time_s']):.2f}s")
         block.append(f"  Percent Error:  {float(row['signed_pct_error']):+.2f}%")
       else:
-        block.append(f"  DeepFlow run failed. {(row.get('error') or '')}".rstrip())
+        block.append(f"  RAPID-LLM run failed. {(row.get('error') or '')}".rstrip())
         if row.get("raw_output"):
           block.append("  --- Raw output ---")
           block.append(str(row["raw_output"]).strip())

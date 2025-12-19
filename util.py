@@ -14,7 +14,7 @@ _SECTION_ORDER = [
     ("results", "RESULTS"),
 ]
 
-_REPO_ROOT = os.path.abspath(os.environ.get("DEEPFLOW_REPO_ROOT", os.getcwd()))
+_REPO_ROOT = os.path.abspath(os.environ.get("RAPID_REPO_ROOT", os.getcwd()))
 
 
 def log_message(message: str, category: Optional[str] = None) -> None:
@@ -198,7 +198,7 @@ def print_error(message):
   sys.exit(message)
 
 # Async Graphviz helpers (moved from graphviz_async.py)
-_ENV_FLAGS = ("DEEPFLOW_VISUALIZE_GRAPHS", "DEEPFLOW_PERSIST_ARTIFACT_VIZ")
+_ENV_FLAGS = ("RAPID_VISUALIZE_GRAPHS", "RAPID_PERSIST_ARTIFACT_VIZ")
 
 
 def _env_truthy(name: str) -> bool:

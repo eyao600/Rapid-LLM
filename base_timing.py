@@ -50,7 +50,6 @@ class model_LLM:
         self.model_type = exp_config.model_config.model_type
         self.intermediate_size = exp_config.model_config.intermediate_size
         self.n_tokens = exp_config.model_config.n_tokens
-        self.all_reduce = "every layer"
         self.run_type = exp_config.model_config.run_type
         self.attention_type = exp_config.model_config.attention.attention_type
         self.kv_heads = (

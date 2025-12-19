@@ -1117,7 +1117,7 @@ class LLMExecutionDispatcher:
             return
         network_dims = getattr(self, "_network_dimensions", tuple())
         if not network_dims:
-            log_message("[DeepFlow][faults] Hardware dimensions unavailable; skipping fault summary.")
+            log_message("[RAPID-LLM][faults] Hardware dimensions unavailable; skipping fault summary.")
             return
 
         def coords_to_dict(coords: Tuple[Tuple[str, int], ...]) -> Dict[str, int]:
@@ -1331,7 +1331,7 @@ class LLMExecutionDispatcher:
             self.interconnect_params,
         )
             
-        generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
+        generate_graphs = _env_flag("RAPID_VISUALIZE_GRAPHS")
         if generate_graphs:
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
@@ -1345,7 +1345,7 @@ class LLMExecutionDispatcher:
         return ExecutionResult(total_time=total_time, graph_root=timed_root, mode=declared_mode)
 
     def _run_hybrid(self) -> ExecutionResult:
-        generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
+        generate_graphs = _env_flag("RAPID_VISUALIZE_GRAPHS")
 
         transformer_time = self._run_transformer_astrasim(ExecutionMode.HYBRID)
 
@@ -1381,7 +1381,7 @@ class LLMExecutionDispatcher:
         if transformer_time is not None:
             self._apply_transformer_time(transformer_time)
 
-        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.transformer_graph:
+        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.transformer_graph:
             transformer_timed_forward_root = self.transformer_graph.convert_comm_sizes_to_times(
                 self.transformer_forward_root,
                 self.time_calc.network_model,
@@ -1422,7 +1422,7 @@ class LLMExecutionDispatcher:
         if run_type == "inference":
             run_kwargs["dp_override"] = 1
 
-        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             filename = "/pipeline_graph_hierarchical_no_dp" if self.no_data_parallel else "/pipeline_graph_hierarchical"
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
@@ -1460,7 +1460,7 @@ class LLMExecutionDispatcher:
             rank_layout=self._rank_layout,
         )
 
-        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None :
+        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None :
             filename = "/pipeline_graph_pre_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_pre_flatten"
             self.pipeline_graph.save_graph(
                 self.pipeline_root,
@@ -1482,7 +1482,7 @@ class LLMExecutionDispatcher:
         setattr(flattened_root, "_astrasim_rank_layout", self._rank_layout)
         self._attach_optimize_hint(flattened_root)
         self.time_calc.flattened_pipeline_root = flattened_root
-        if _env_flag("DEEPFLOW_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
+        if _env_flag("RAPID_VISUALIZE_GRAPHS") and self.pipeline_root is not None:
             filename = "/pipeline_graph_post_flatten_no_dp" if self.no_data_parallel else "/pipeline_graph_post_flatten"
             self.pipeline_graph.save_graph(
                 flattened_root,

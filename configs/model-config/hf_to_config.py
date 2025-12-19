@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a Hugging Face transformer config.json into a DeepFlow LLM YAML config."""
+"""Convert a Hugging Face transformer config.json into a RAPID-LLM LLM YAML config."""
 
 import argparse
 import json
@@ -274,7 +274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.write(yaml_dump)
 
     if alias:
-        print(f"[INFO] Mapping Hugging Face model_type '{orig_model_type}' to DeepFlow model_type 'llama'.")
+        print(f"[INFO] Mapping Hugging Face model_type '{orig_model_type}' to RAPID-LLM model_type 'llama'.")
 
     lang_cfg = cfg.get("language_config", {})
     if alias == "phi3":

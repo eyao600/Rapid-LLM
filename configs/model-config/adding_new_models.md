@@ -1,4 +1,4 @@
-The hf_to_config.py utility can be used to convert a Hugging Face model config.json into a DeepFlow LLM YAML config.
+The hf_to_config.py utility can be used to convert a Hugging Face model config.json into a RAPID-LLM LLM YAML config.
 
 Usage:
 ```

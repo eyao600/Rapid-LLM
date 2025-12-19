@@ -1,4 +1,4 @@
-"""Debug helpers for DeepFlow->AstraSim graph conversion."""
+"""Debug helpers for RAPID-LLM->AstraSim graph conversion."""
 
 from __future__ import annotations
 

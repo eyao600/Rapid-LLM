@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Parallelism sweep utility for DeepFlow LLM configurations.
+Parallelism sweep utility for RAPID-LLM LLM configurations.
 
 Update the global configuration section below to point at the desired hardware
 and model config files and to tailor the parallelism search space. The tool
 enumerates every combination, filters those whose total GPU count falls inside
-the configured bounds, evaluates runtime with DeepFlow, and plots a scatter
+the configured bounds, evaluates runtime with RAPID-LLM, and plots a scatter
 chart of accuracy (by default, 1 / runtime) versus GPU count with horizontal
 jitter to avoid overlap.
 """
@@ -88,7 +88,7 @@ PLOT_OUTPUT_PATH = "tools/parallelism_sweep.png"
 PLOT_MFU_OUTPUT_PATH = "tools/parallelism_sweep_mfu.png"
 REPORT_OUTPUT_PATH = "tools/parallelism_sweep.tsv"
 
-# AstraSim cache handling within DeepFlow (mirrors run_perf default options).
+# AstraSim cache handling within RAPID-LLM (mirrors run_perf default options).
 ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWRITE
 
 # Plotting behaviour toggles
@@ -402,7 +402,7 @@ def set_astrasim_cache_mode(mode_str):
         "CACHE_READWRITE": "CACHE_READWRITE",
     }
     env_value = mapping.get(str(mode_str).strip().upper(), "NO_CACHE")
-    os.environ["DEEPFLOW_ASTRA_CACHE_MODE"] = env_value
+    os.environ["RAPID_ASTRA_CACHE_MODE"] = env_value
 
 
 def write_report(results, path):
@@ -486,7 +486,7 @@ def load_results_from_report(path: str) -> List[Dict[str, object]]:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DeepFlow parallelism sweep utility.")
+    parser = argparse.ArgumentParser(description="RAPID-LLM parallelism sweep utility.")
     parser.add_argument(
         "--plot_only",
         action="store_true",

@@ -216,16 +216,13 @@ class TimeCalculationLLM(TimeCalculation):
         self.tp_overlap = float(overlap_cfg.tp_overlap)
         self.tp_sp_overlap = float(overlap_cfg.tp_sp_overlap)
         self.cp_overlap = float(overlap_cfg.cp_overlap)
-        self._generate_graphs = _env_flag("DEEPFLOW_VISUALIZE_GRAPHS")
-        self.persist_astrasim_artifacts = _env_flag("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")
-        self._debug_memory = _env_flag("DEEPFLOW_DEBUG_MEMORY")
+        self._generate_graphs = _env_flag("RAPID_VISUALIZE_GRAPHS")
+        self.persist_astrasim_artifacts = _env_flag("RAPID_PERSIST_ASTRASIM_ARTIFACTS")
+        self._debug_memory = _env_flag("RAPID_DEBUG_MEMORY")
         self._memory_breakdown_debug = None
         self.execution_mode = execution_mode
-        # Use pipeline-style recomputation (explicit recompute nodes in the pipeline graph).
         self.pipeline_style_recompute = bool(self.full_recomputation)
-        inference_cfg = getattr(hw_config, "inference_config", None)
 
-        self.all_reduce = "every layer"
         self.model_type = self.model.model_type
         self.tied_embeddings = getattr(self.model, "tied_embeddings", True)
 
@@ -2357,7 +2354,6 @@ class TimeCalculationLLM(TimeCalculation):
         misc_metadata = {
             "num_batch": self.mb,
             "num_layer": self.num_layers,
-            "all_reduce": "every_layer",
             "dp_zero_stage": self.zero_stage,
             "full_recomputation": self.full_recomputation,
             "flattened_mode": flattened_mode,

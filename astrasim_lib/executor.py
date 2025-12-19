@@ -1,7 +1,7 @@
-"""AstraSim execution helpers used by DeepFlow's comparison workflow.
+"""AstraSim execution helpers used by RAPID-LLM's comparison workflow.
 
-This module converts DeepFlow graphs (with communication sizes) to AstraSim Chakra ET
-format and executes AstraSim simulation for comparison with DeepFlow analytical timing.
+This module converts RAPID-LLM graphs (with communication sizes) to AstraSim Chakra ET
+format and executes AstraSim simulation for comparison with RAPID-LLM analytical timing.
 
 Non-mainlined test functionality - designed to be easily removable.
 
@@ -396,7 +396,7 @@ class _RankTrace:
 
 
 def get_collective_type(comm_type_str: str) -> int:
-    """Map DeepFlow comm types to AstraSim protobuf enums."""
+    """Map RAPID-LLM comm types to AstraSim protobuf enums."""
     mapping = {
         "all_reduce": pb.ALL_REDUCE,
         "all_gather": pb.ALL_GATHER,
@@ -666,15 +666,15 @@ def _write_comm_groups_json(base_output_dir: str, dp_count: int, rank_ids: List[
         print(f"[WARN] Failed to write comm_groups.json: {exc}")
         return None
 
-def convert_deepflow_graph_to_chakra_et(
+def convert_rapid_llm_graph_to_chakra_et(
     graph_root,
     dp_size: int,
     output_dir: str,
 ) -> Tuple[str, List[int], str]:
-    """Convert DeepFlow graph to AstraSim ET format by scheduling per stage and DP rank.
-    This means converting the single DeepFlow DAG into a set of different AstraSim ET files.
+    """Convert RAPID-LLM graph to AstraSim ET format by scheduling per stage and DP rank.
+    This means converting the single RAPID-LLM DAG into a set of different AstraSim ET files.
 
-    INPUTS: ``graph_root`` is the DeepFlow DAG (after flattening). ``dp_size`` is the
+    INPUTS: ``graph_root`` is the RAPID-LLM DAG (after flattening). ``dp_size`` is the
     data-parallel replication degree. ``output_dir`` is where ET traces + metadata
     should be written.
 
@@ -693,7 +693,7 @@ def convert_deepflow_graph_to_chakra_et(
     as much as possible, but it definitely needs further cleaning and breaking up. This is TODO."""
 
     os.makedirs(output_dir, exist_ok=True)
-    debug_enabled = _env_truthy("DEEPFLOW_DUMP_CONVERTER_DEBUG")
+    debug_enabled = _env_truthy("RAPID_DUMP_CONVERTER_DEBUG")
 
     # Step 1: Traverse the graph once to snapshot every object reachable from the
     # provided root(s). Collecting upfront avoids mutating the graph while we
@@ -726,7 +726,7 @@ def convert_deepflow_graph_to_chakra_et(
         and not getattr(obj, "flatten_placeholder", False)
     ]
     if not compute_nodes:
-        raise ValueError("DeepFlow graph did not expose any executable compute nodes (hw_id >= 0).")
+        raise ValueError("RAPID-LLM graph did not expose any executable compute nodes (hw_id >= 0).")
 
     # Step 2: Each unique ``hw_id`` defines a logical stage (one flattened hardware
     # coordinate). We build a DP-major rank ordering so AstraSim sees one rank per
@@ -1668,7 +1668,7 @@ def run_astra_simulation_only_onepath(
     faulty_links_override: Optional[Sequence[Tuple[int, int, float]]] = None,
 ):
     """
-    Run AstraSim simulation on DeepFlow graph and print results.
+    Run AstraSim simulation on RAPID-LLM graph and print results.
 
     Args:
         fwdbwd_root: Forward and backward graph root node
@@ -1681,7 +1681,7 @@ def run_astra_simulation_only_onepath(
     print("="*60)
 
     persist = persist_artifacts if persist_artifacts is not None else _env_truthy(
-        "DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS"
+        "RAPID_PERSIST_ASTRASIM_ARTIFACTS"
     )
     os.makedirs(output_dir, exist_ok=True)
     work_dir: str
@@ -1700,7 +1700,7 @@ def run_astra_simulation_only_onepath(
         user_dp = max(1, getattr(time_calc_obj, "dp", 1))
         run_type = getattr(getattr(time_calc_obj, "model", None), "run_type", "")
         dp_count = dp_override if dp_override is not None else user_dp
-        fwd_et_prefix, rank_ids, fwd_manifest = convert_deepflow_graph_to_chakra_et(
+        fwd_et_prefix, rank_ids, fwd_manifest = convert_rapid_llm_graph_to_chakra_et(
             fwdbwd_root,
             dp_count,
             work_dir,
@@ -1719,7 +1719,7 @@ def run_astra_simulation_only_onepath(
         rank_count = len(rank_ids)
 
         # Handle artifact visualization if enabled
-        if persist and _env_truthy("DEEPFLOW_PERSIST_ARTIFACT_VIZ"):
+        if persist and _env_truthy("RAPID_PERSIST_ARTIFACT_VIZ"):
             et_paths = []
             for rank in rank_ids:
                 et_path = os.path.join(work_dir, f"llm_graph.{rank}.et")
@@ -1735,8 +1735,8 @@ def run_astra_simulation_only_onepath(
         print(f"[AstraSim] Generating configuration files...")
         comm_groups_dp = dp_count if dp_override is not None else user_dp
         comm_groups_path = _write_comm_groups_json(work_dir, comm_groups_dp, rank_ids)
-        if os.environ.get("DEEPFLOW_ASTRA_SKIP_EXEC"):
-            print("[AstraSim] DEEPFLOW_ASTRA_SKIP_EXEC set. Exiting after ET artifact generation.")
+        if os.environ.get("RAPID_ASTRA_SKIP_EXEC"):
+            print("[AstraSim] RAPID_ASTRA_SKIP_EXEC set. Exiting after ET artifact generation.")
             exit()
 
         rank_layout = getattr(fwdbwd_root, "_astrasim_rank_layout", None)
@@ -1837,6 +1837,6 @@ if __name__ == "__main__":
     time_calc_obj = FakeTimeCalculationLLM(exp_hw_config, exp_model_config, "LLM")
     my_save_graph(fw_bw_root, "./astra_comparison_output", "fw_bw_graph_astra")
     paths = []
-    paths.append("/app/nanocad/projects/deepflow_dev/DeepFlow/DeepFlow_george/astra_cache/workload/all_reduce/2npus_1.50GB/all_reduce_1.50GB.0.et")
+    paths.append("/app/nanocad/projects/rapid_llm_dev/RAPID-LLM/RAPID-LLM_george/astra_cache/workload/all_reduce/2npus_1.50GB/all_reduce_1.50GB.0.et")
     _dump_et_text(paths)
     run_astra_simulation_only_onepath(fw_bw_root, time_calc_obj, "./astra_comparison_output")   

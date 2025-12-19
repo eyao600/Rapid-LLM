@@ -26,7 +26,7 @@ _CACHE_MODE_MAP = {
     "CACHE READONLY": "CACHE_READONLY",
     "CACHE READWRITE": "CACHE_READWRITE",
 }
-os.environ["DEEPFLOW_ASTRA_CACHE_MODE"] = _CACHE_MODE_MAP.get(
+os.environ["RAPID_ASTRA_CACHE_MODE"] = _CACHE_MODE_MAP.get(
     cache_handling.strip().upper(), "CACHE_READWRITE"
 )
 
@@ -39,7 +39,7 @@ _program_start_time = time.perf_counter()
 def _report_total_wall_time() -> None:
     try:
         elapsed = time.perf_counter() - _program_start_time
-        print("DeepFlow wall-clock time: {:.2f}s".format(elapsed))
+        print("RAPID-LLM wall-clock time: {:.2f}s".format(elapsed))
     except Exception:
         # Best-effort only
         pass

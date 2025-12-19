@@ -136,7 +136,6 @@ class Graph:
         self.num_batch = self.misc_metadata.get("num_batch", 0)
         self.num_layer = self.misc_metadata.get("num_layer", 0)
         self.layer_per_device = self.num_layer / self.lp if self.lp else self.num_layer
-        self.all_reduce = self.misc_metadata.get("all_reduce", "every layer")
         self.dp_microbatch_mode = str(self.misc_metadata.get("dp_microbatch_mode", "every_mb")).lower()
         self.dp_zero_stage = int(self.misc_metadata.get("dp_zero_stage", 0) or 0)
 

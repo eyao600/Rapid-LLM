@@ -1,4 +1,4 @@
-# DeepFlow configuration for NVIDIA H100 PCIe 80 GB
+# RAPID-LLM configuration for NVIDIA H100 PCIe 80 GB
 # specifications from the following sources:
 # [NVIDIA] https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-tensor-c
 # [TePU] https://www.techpowerup.com/gpu-specs/h100-sxm5-80-gb.c3900

@@ -403,10 +403,10 @@ def finalize_collection(collector: Optional[GMapCollector]) -> Optional[MappingR
     metrics_path = os.path.join(collector.output_dir, "first_dim_comm.metrics")
     _write_metrics_report(metrics_path, before_metrics, after_metrics)
     _maybe_print_commexpan_delta(before_commexp, after_commexp, should_apply_mapping)
-    if _env_truthy("DEEPFLOW_GMAP_ONLY"):
+    if _env_truthy("RAPID_GMAP_ONLY"):
         status = "applied" if should_apply_mapping else "skipped"
         print(
-            "[GMapDebug] DEEPFLOW_GMAP_ONLY=1; "
+            "[GMapDebug] RAPID_GMAP_ONLY=1; "
             f"{status} mapping. Artifacts: map={map_path}, metrics={metrics_path}"
         )
         raise SystemExit(0)
@@ -498,7 +498,7 @@ def _maybe_print_commexpan_delta(
 ) -> None:
     if before_val is None or after_val is None or before_val == 0:
         return
-    if not (_env_truthy("DEEPFLOW_VISUALIZE_GRAPHS") or _env_truthy("DEEPFLOW_GMAP_ONLY")):
+    if not (_env_truthy("RAPID_VISUALIZE_GRAPHS") or _env_truthy("RAPID_GMAP_ONLY")):
         return
     delta_pct = (after_val - before_val) / before_val * 100.0
     status = "applied" if applied else "skipped"

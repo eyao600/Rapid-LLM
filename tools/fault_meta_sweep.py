@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Meta sweep orchestrator for DeepFlow fault sensitivity experiments.
+Meta sweep orchestrator for RAPID-LLM fault sensitivity experiments.
 
 Runs a sequence of configurations by invoking ``fault_sweep.py`` with tailored
 arguments, collects artefacts under ``tools/fault_sweep_results/``, and skips

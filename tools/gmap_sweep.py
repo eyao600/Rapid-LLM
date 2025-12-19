@@ -4,8 +4,8 @@ GMap sweep utility.
 
 This tool explores tensor/context/pipeline parallelism combinations that live in
 the first network dimension (TP/CP/LP) for a square, power-of-two GPU count.
-Each configuration is evaluated by running DeepFlow with the
-DEEPFLOW_GMAP_ONLY=1 environment variable so execution stops immediately after
+Each configuration is evaluated by running RAPID-LLM with the
+RAPID_GMAP_ONLY=1 environment variable so execution stops immediately after
 SCOTCH emits the mapping artefacts.  The script parses the resulting
 `first_dim_comm.metrics` file (and the `[GMapDebug]` printouts) to recover the
 before/after CommExpan values, computes the percentage delta, and produces both
@@ -263,13 +263,13 @@ def run_single_configuration(
         os.makedirs(temp_dir, exist_ok=True)
     else:
         temp_dir = tempfile.mkdtemp(prefix="gmap_sweep_")
-    prev_flag = os.environ.get("DEEPFLOW_GMAP_ONLY")
-    prev_persist = os.environ.get("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS")    
-    os.environ["DEEPFLOW_GMAP_ONLY"] = "1"
+    prev_flag = os.environ.get("RAPID_GMAP_ONLY")
+    prev_persist = os.environ.get("RAPID_PERSIST_ASTRASIM_ARTIFACTS")    
+    os.environ["RAPID_GMAP_ONLY"] = "1"
     if keep_artifacts:
-        os.environ["DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS"] = "1"
+        os.environ["RAPID_PERSIST_ASTRASIM_ARTIFACTS"] = "1"
     else:
-        os.environ.pop("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS", None)
+        os.environ.pop("RAPID_PERSIST_ASTRASIM_ARTIFACTS", None)
     stdout_buffer = io.StringIO()
     try:
         calculator = TimeCalculationLLM(hw_config, model_config, mode, output_dir=temp_dir)
@@ -288,13 +288,13 @@ def run_single_configuration(
                     raise
     finally:
         if prev_flag is None:
-            os.environ.pop("DEEPFLOW_GMAP_ONLY", None)
+            os.environ.pop("RAPID_GMAP_ONLY", None)
         else:
-            os.environ["DEEPFLOW_GMAP_ONLY"] = prev_flag
+            os.environ["RAPID_GMAP_ONLY"] = prev_flag
         if prev_persist is None:
-            os.environ.pop("DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS", None)
+            os.environ.pop("RAPID_PERSIST_ASTRASIM_ARTIFACTS", None)
         else:
-            os.environ["DEEPFLOW_PERSIST_ASTRASIM_ARTIFACTS"] = prev_persist
+            os.environ["RAPID_PERSIST_ASTRASIM_ARTIFACTS"] = prev_persist
     stdout_text = stdout_buffer.getvalue() if capture_output else ""
     metrics_path = os.path.join(temp_dir, "first_dim_comm.metrics")
     before, after = parse_metrics_file(metrics_path)

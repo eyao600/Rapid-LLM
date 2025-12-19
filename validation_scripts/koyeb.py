@@ -182,7 +182,7 @@ def run_all_and_plot(*, enable_plot: bool = True, verbose: bool = True) -> Dict[
       block_lines.append(f"Expected agg tok/s  = {expected_tokps_agg:.2f}")
       block_lines.append(f"Error = {pct_error:+.2f}%")
     else:
-      err_detail = result.error or "DeepFlow run failed"
+      err_detail = result.error or "RAPID-LLM run failed"
       block_lines.append(f"ERROR: {err_detail}")
       if result.raw_output:
         block_lines.append(result.raw_output.strip())
@@ -209,11 +209,11 @@ def run_all_and_plot(*, enable_plot: bool = True, verbose: bool = True) -> Dict[
     # Plot
     fig = plt.figure(figsize=(12, 6))
     x = list(range(len(labels)))
-    plt.plot(x, predicted_tokps, marker="o", linestyle="-", color="#1f77b4", label="DeepFlow predicted tok/s (aggregate)")
+    plt.plot(x, predicted_tokps, marker="o", linestyle="-", color="#1f77b4", label="RAPID-LLM predicted tok/s (aggregate)")
     plt.plot(x, expected_tokps, marker="o", linestyle="--", color="#ff7f0e", alpha=0.7, label="Expected tok/s (Koyeb)")
     plt.xticks(x, labels, rotation=30, ha="right")
     plt.ylabel("Tokens per second (aggregate)")
-    plt.title("Koyeb vs DeepFlow (single A100 SXM, Llama3.1-8B)")
+    plt.title("Koyeb vs RAPID-LLM (single A100 SXM, Llama3.1-8B)")
     plt.grid(True, linestyle=":", alpha=0.4)
     plt.legend()
 
@@ -243,7 +243,7 @@ def run_all_and_plot(*, enable_plot: bool = True, verbose: bool = True) -> Dict[
 
 def _parse_args():
   import argparse
-  parser = argparse.ArgumentParser(description="Validate DeepFlow against Koyeb benchmarks.")
+  parser = argparse.ArgumentParser(description="Validate RAPID-LLM against Koyeb benchmarks.")
   parser.add_argument("--no-plot", action="store_true", help="Skip generating the matplotlib plot/output file.")
   parser.add_argument("--quiet", action="store_true", help="Suppress detailed per-experiment logs.")
   return parser.parse_args()
