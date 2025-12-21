@@ -173,10 +173,10 @@ def get_linear_softmax_mem(batch_size, seq_len, hidden_dim, vocab_size, precisio
     # softmax_act = batch_size * seq_len * vocab_size * precision
     # softmax_wt = (hidden_dim + 1) * vocab_size * precision
     # softmax_point = (2 * batch_size * seq_len * vocab_size + batch_size * seq_len) * precision
-    # #NOTE: sigmoid and exp could have been combined
-    # #1 sigmoids
-    # #1 exp
-    # #1 pointwise div
+    # NOTE: sigmoid and exp could have been combined
+    # 1 sigmoids
+    # 1 exp
+    # 1 pointwise div
     # softmax_mem = (softmax_act + softmax_wt + softmax_point)
     mem = 4 * seq_len * batch_size * hidden_dim / t *(1+vocab_size/hidden_dim) * (precision.activations / 2) #from https://arxiv.org/pdf/2205.05198
     return mem

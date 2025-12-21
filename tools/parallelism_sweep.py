@@ -15,7 +15,9 @@ from __future__ import print_function
 import argparse
 import ast
 import copy
+import csv
 import itertools
+import json
 import math
 import os
 import random
@@ -25,6 +27,7 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Iterable, List, Tuple
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import yaml
@@ -41,13 +44,17 @@ import pandas as pd
 import math
 import numpy as np
 from matplotlib.patches import Polygon
+plt.rcParams.update({"font.size": 13})
 
 # -----------------------------------------------------------------------------
 # Global configuration knobs (no CLI)
 # -----------------------------------------------------------------------------
 
 # Paths to the baseline configuration files
-HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB_faraz.yaml"
+HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
+HARDWARE_CONFIG_DIR = "configs/hardware-config"
+HW_CONFIGS = []  # Optional: list of hardware configs to sweep; if empty, uses HARDWARE_CONFIG_PATH.
+HW_LABELS = []   # Optional: labels aligned with HW_CONFIGS.
 MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-405B.yaml"
 
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
@@ -69,6 +76,8 @@ OTHER_PARALLELISM_OPTIONS = {
 # this inclusive range.
 GPU_COUNT_MIN = 64
 GPU_COUNT_MAX = 1024
+TP_CP_PRODUCT_MIN = None  # Optional: set to int to filter tp*cp below this threshold.
+TP_CP_PRODUCT_MAX = None  # Optional: set to int to filter tp*cp above this threshold.
 
 # When True, discard configurations whose tp*cp product is not a square power of two.
 ENFORCE_SQUARE_TP_CP = False
@@ -87,6 +96,12 @@ PLOT_JITTER_WIDTH = 0.175
 PLOT_OUTPUT_PATH = "tools/parallelism_sweep.png"
 PLOT_MFU_OUTPUT_PATH = "tools/parallelism_sweep_mfu.png"
 REPORT_OUTPUT_PATH = "tools/parallelism_sweep.tsv"
+BEST_RUNTIME_PLOT_PATH = "tools/parallelism_best_runtimes.png"
+BEST_RUNTIME_PER_GPU_DIR = "tools/parallelism_best_runtimes_per_gpu"
+BEST_RUNTIME_PER_GPU_COMBINED_PATH = "tools/parallelism_best_runtimes_per_gpu_combined.png"
+BEST_SPEEDUP_PER_GPU_COMBINED_PATH = "tools/parallelism_speedup_per_gpu_combined.png"
+RUNTIME_CACHE_PATH = "tools/parallelism_sweep_cache.csv"
+PLOT_TITLE = "Parallelism sweep – beeswarm on log2(GPUs) categories"
 
 # AstraSim cache handling within RAPID-LLM (mirrors run_perf default options).
 ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWRITE
@@ -95,7 +110,7 @@ ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWR
 MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in plots.
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 100
+MAX_WORKERS = 20
 
 
 # -----------------------------------------------------------------------------
@@ -169,6 +184,73 @@ def read_yaml(path):
         return yaml.safe_load(handle)
 
 
+def _parse_hardware_list(arg: str) -> List[str]:
+    if not arg:
+        return []
+    paths = []
+    for part in arg.split(","):
+        part = part.strip()
+        if part:
+            paths.append(part)
+    return paths
+
+
+def _tagged_output_path(base_path: str, tag: str) -> str:
+    """Insert a tag before the file extension in base_path."""
+    p = Path(base_path)
+    tag = tag.replace(os.sep, "_")
+    new_name = f"{p.stem}_{tag}{p.suffix}"
+    return str(p.with_name(new_name))
+
+
+def _resolve_hw_paths(config_list: List[str]) -> List[str]:
+    resolved: List[str] = []
+    for cfg in config_list:
+        p = Path(cfg)
+        if not p.is_absolute() and not p.exists():
+            p = Path(HARDWARE_CONFIG_DIR) / p
+        resolved.append(str(p))
+    return resolved
+
+
+def _hardware_label(index: int, hw_path: str) -> str:
+    try:
+        if 0 <= index < len(HW_LABELS):
+            return str(HW_LABELS[index])
+    except Exception:
+        pass
+    return Path(hw_path).stem
+
+
+def _model_config_with_overrides(base_model_path: str, hw_config_path: str) -> Tuple[str, str]:
+    """
+    Return a path to a model config that includes hardware-specific overrides.
+    For a100_80GB_L2.yaml, tweak attention tiling and enable flash attention.
+    """
+    hw_name = Path(hw_config_path).name
+    cache_id = str(Path(base_model_path).resolve())
+    if hw_name != "a100_80GB_L2.yaml":
+        return base_model_path, cache_id
+
+    model_dict = read_yaml(base_model_path)
+    model_param = model_dict.setdefault("model_param", {})
+    attention = model_param.setdefault("attention", {})
+    attention["attention_tile_size"] = 409
+    attention["use_flashattention"] = True
+
+    tmp_handle = tempfile.NamedTemporaryFile("w", suffix="_model_override.yaml", delete=False)
+    try:
+        yaml.safe_dump(model_dict, tmp_handle, default_flow_style=False, sort_keys=False)
+        tmp_handle.flush()
+        cache_id = f"{cache_id}|l2_flashattention"
+        return tmp_handle.name, cache_id
+    finally:
+        try:
+            tmp_handle.close()
+        except Exception:
+            pass
+
+
 def determine_model_mode(model_config_path):
     model_dict = read_yaml(model_config_path)
     model_param = model_dict.get("model_param") or {}
@@ -176,6 +258,81 @@ def determine_model_mode(model_config_path):
     if not mode:
         raise ValueError("model_param.mode must be defined in {}".format(model_config_path))
     return mode
+
+
+def _cache_key(hw_path: str, model_id: str, settings: Dict[str, object]) -> Tuple[str, str, str]:
+    hw_id = str(Path(hw_path).resolve())
+    settings_json = json.dumps(settings, sort_keys=True)
+    return (hw_id, model_id, settings_json)
+
+
+def _load_runtime_cache(path: str) -> Dict[Tuple[str, str, str], Dict[str, object]]:
+    cache: Dict[Tuple[str, str, str], Dict[str, object]] = {}
+    p = Path(path)
+    if not p.exists():
+        return cache
+    try:
+        with p.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                try:
+                    settings = json.loads(row.get("parallelism", "{}"))
+                except Exception:
+                    continue
+                hw_id = row.get("hardware_config")
+                model_id = row.get("model_config")
+                if not hw_id or not model_id:
+                    continue
+                key = _cache_key(hw_id, model_id, settings)
+                entry = {
+                    "hardware_config": hw_id,
+                    "model_config": model_id,
+                    "parallelism": settings,
+                    "num_gpus": int(row.get("num_gpus", 0)),
+                    "runtime": float(row.get("runtime", "nan")),
+                    "performance": float(row.get("performance", "nan")),
+                    "total_flops": float(row.get("total_flops", "nan")),
+                    "achieved_flops": float(row.get("achieved_flops", "nan")),
+                    "peak_flops": float(row.get("peak_flops", "nan")),
+                    "mfu": float(row.get("mfu", "nan")),
+                    "memory_exceeded": str(row.get("memory_exceeded", "")).strip().lower() == "true",
+                    "memory_violation_gb": float(row.get("memory_violation_gb", "0.0") or 0.0),
+                }
+                cache[key] = entry
+    except Exception as exc:
+        print(f"Warning: failed to load runtime cache from {path}: {exc}", file=sys.stderr)
+    return cache
+
+
+def _save_runtime_cache(cache: Dict[Tuple[str, str, str], Dict[str, object]], path: str) -> None:
+    if not cache:
+        return
+    fieldnames = [
+        "hardware_config",
+        "model_config",
+        "parallelism",
+        "num_gpus",
+        "runtime",
+        "performance",
+        "total_flops",
+        "achieved_flops",
+        "peak_flops",
+        "mfu",
+        "memory_exceeded",
+        "memory_violation_gb",
+    ]
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with p.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for entry in cache.values():
+                row = dict(entry)
+                row["parallelism"] = json.dumps(entry.get("parallelism", {}), sort_keys=True)
+                writer.writerow(row)
+    except Exception as exc:
+        print(f"Warning: failed to save runtime cache to {path}: {exc}", file=sys.stderr)
 
 
 def cartesian_product(option_map):
@@ -371,6 +528,23 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
     temp_dir = tempfile.mkdtemp(prefix="parallelism_sweep_")
     try:
         calculator = TimeCalculationLLM(hw_config, model_config_obj, mode, output_dir=temp_dir)
+        mem_exceeded = bool(getattr(calculator, "memory_capacity_exceeded", False))
+        mem_violation = float(getattr(calculator, "memory_capacity_violation_gb", 0.0) or 0.0)
+        if mem_exceeded:
+            total_flops = compute_total_flops(calculator)
+            peak_flops = gpu_peak_flops(hw_config)
+            num_gpus = total_gpu_count(parallel_settings)
+            return {
+                "runtime": float("nan"),
+                "performance": float("nan"),
+                "total_flops": total_flops,
+                "peak_flops": peak_flops,
+                "mfu": float("nan"),
+                "achieved_flops": float("nan"),
+                "memory_exceeded": True,
+                "memory_violation_gb": mem_violation,
+                "hw_yaml": debug_yaml,
+            }
         with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
             runtime = calculator.calc_time_llm()
             total_flops = compute_total_flops(calculator)
@@ -563,11 +737,21 @@ def plot_results(results, output_path):
 
     metric_key = "runtime" if PLOT_METRIC.lower() == "runtime" else "performance"
 
+    finite_values = [
+        float(item[metric_key])
+        for item in plot_entries
+        if math.isfinite(float(item[metric_key]))
+    ]
+    fallback_metric = max(finite_values) * 1.05 if finite_values else 1.0
+
     # Build tidy frame (include GPU exponent)
     rows = []
     for i, item in enumerate(plot_entries):
         p = item["parallelism"]
         ng = int(item["num_gpus"])
+        metric_val = float(item[metric_key])
+        if not math.isfinite(metric_val):
+            metric_val = fallback_metric
         rows.append({
             "row_id": i,
             "num_gpus": ng,
@@ -576,7 +760,8 @@ def plot_results(results, output_path):
             "cp": int(p.get("cp", 1)),
             "dp": int(p.get("dp", 1)),
             "lp": int(p.get("lp", 1)),
-            metric_key: float(item[metric_key]),
+            "memory_exceeded": bool(item.get("memory_exceeded", False)),
+            metric_key: metric_val,
         })
     df = pd.DataFrame(rows)
 
@@ -609,8 +794,12 @@ def plot_results(results, output_path):
     a = np.full_like(r, 0.9)
 
     # Palette: unique color per row via hue="row_id"
-    palette = {rid: (float(r[i]), float(g[i]), float(b[i]), float(a[i]))
-               for i, rid in enumerate(df["row_id"])}
+    palette = {}
+    for i, rid in enumerate(df["row_id"]):
+        if bool(df.iloc[i]["memory_exceeded"]):
+            palette[rid] = (0.6, 0.6, 0.6, 0.7)
+        else:
+            palette[rid] = (float(r[i]), float(g[i]), float(b[i]), float(a[i]))
 
     plt.figure(figsize=(10, 6))
     ax = sns.swarmplot(
@@ -633,14 +822,19 @@ def plot_results(results, output_path):
 
 
     # Best runtime star — place at the matching exponent category index
-    best = min(plot_entries, key=lambda it: it["runtime"])
-    best_exp = _gpu_exp(int(best["num_gpus"]))
-    best_idx = order.index(best_exp)
-    best_y = float(best[metric_key])
-    ax.scatter([best_idx], [best_y], s=180, marker="*", c="red", zorder=5, label="Best runtime")
+    best_candidates = [
+        it for it in plot_entries
+        if not it.get("memory_exceeded") and math.isfinite(it.get("runtime", float("nan")))
+    ]
+    # if best_candidates:
+    #     best = min(best_candidates, key=lambda it: it["runtime"])
+    #     best_exp = _gpu_exp(int(best["num_gpus"]))
+    #     best_idx = order.index(best_exp)
+    #     best_y = float(best[metric_key])
+    #     ax.scatter([best_idx], [best_y], s=180, marker="*", c="red", zorder=5, label="Best runtime")
 
     # Labels & scales
-    ax.set_xlabel("Number of GPUs (log2 categories)")
+    ax.set_xlabel("Number of GPUs")
     if metric_key == "runtime":
         ax.set_ylabel("Runtime (s)")
         ax.set_yscale("log")
@@ -652,20 +846,225 @@ def plot_results(results, output_path):
     ax.set_xticklabels([str(int(round(2 ** e))) if float(e).is_integer() else f"2^{e:.2f}"
                         for e in order])
 
-    ax.set_title("Parallelism sweep – beeswarm on log2(GPUs) categories")
+    ax.set_title(PLOT_TITLE)
     ax.grid(alpha=0.3, axis="y")
-    ax.legend(loc="best")
 
     # Reminder of color encoding
     ax.text(0.99, 0.01,
             "Color: R=log2(tp+cp), G=log2(lp), B=log2(dp)",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=9, alpha=0.8)
 
+    # Per-GPU-count best runtime markers (exclude memory violations)
+    best_by_gpu: Dict[int, Tuple[float, float]] = {}
+    for item in plot_entries:
+        if item.get("memory_exceeded"):
+            continue
+        runtime_val = float(item.get("runtime", float("nan")))
+        if not math.isfinite(runtime_val):
+            continue
+        ng = int(item.get("num_gpus", 0))
+        gpu_exp = _gpu_exp(ng)
+        best = best_by_gpu.get(ng)
+        if best is None or runtime_val < best[1]:
+            best_by_gpu[ng] = (gpu_exp, runtime_val)
+    if best_by_gpu:
+        xs = []
+        ys = []
+        for ng, (gpu_exp, runtime_val) in best_by_gpu.items():
+            if gpu_exp in order:
+                xs.append(order.index(gpu_exp))
+                ys.append(runtime_val)
+        if xs and ys:
+            ax.scatter(xs, ys, s=100, marker="*", c="white", edgecolor="black", zorder=6, label="Best runtime")
+    ax.legend(loc="best")
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
     plt.close()
     print(f"Saved swarm plot to {output_path}")
 
+
+def plot_best_runtimes(best_entries: List[Dict[str, object]], output_path: str, label_order: List[str]) -> None:
+    if not best_entries:
+        print("No best runtimes to plot.", file=sys.stderr)
+        return
+    labels: List[str] = []
+    runtimes: List[float] = []
+    ordered_labels = [lbl for lbl in label_order if any(str(entry["label"]) == str(lbl) for entry in best_entries)]
+    for lbl in ordered_labels:
+        match = next((entry for entry in best_entries if str(entry["label"]) == str(lbl)), None)
+        if match is None:
+            continue
+        labels.append(str(lbl))
+        runtimes.append(float(match["runtime"]))
+
+    plt.figure(figsize=(10, 6))
+    bars = plt.bar(labels, runtimes, color="#1f78b4")
+    plt.ylabel("Best runtime (s)")
+    plt.title("Best runtime per hardware config")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+
+    for bar, value in zip(bars, runtimes):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{value:.3f}", ha="center", va="bottom", fontsize=8)
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+    print(f"Saved best-runtime bar chart to {output_path}")
+
+
+def plot_best_runtimes_per_gpu(best_by_gpu: Dict[int, List[Dict[str, object]]], output_dir: str, label_order: List[str]) -> None:
+    if not best_by_gpu:
+        print("No per-GPU best runtimes to plot.", file=sys.stderr)
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    for gpu_count, entries in sorted(best_by_gpu.items()):
+        if not entries:
+            continue
+        labels: List[str] = []
+        runtimes: List[float] = []
+        ordered_labels = [lbl for lbl in label_order if any(str(ent["label"]) == str(lbl) for ent in entries)]
+        for lbl in ordered_labels:
+            match = next((ent for ent in entries if str(ent["label"]) == str(lbl)), None)
+            if match is None:
+                continue
+            labels.append(str(lbl))
+            runtimes.append(float(match["runtime"]))
+
+        plt.figure(figsize=(8, 5))
+        bars = plt.bar(labels, runtimes, color="#1f78b4")
+        plt.ylabel("Best runtime (s)")
+        plt.title(f"Best runtime per hardware config (GPU count = {gpu_count})")
+        plt.xticks(rotation=45, ha="right")
+        plt.tight_layout()
+
+        for bar, value in zip(bars, runtimes):
+            plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{value:.3f}", ha="center", va="bottom", fontsize=8)
+
+        path = os.path.join(output_dir, f"best_runtime_{gpu_count}gpus.png")
+        plt.savefig(path, dpi=200)
+        plt.close()
+        print(f"Saved per-GPU best-runtime bar chart to {path}")
+
+
+def plot_best_runtimes_per_gpu_combined(best_by_gpu: Dict[int, List[Dict[str, object]]], output_path: str, label_order: List[str]) -> None:
+    """
+    Combined view: x-axis GPU count categories, each showing bars for the best runtime
+    achieved by every hardware config at that GPU count.
+    """
+    if not best_by_gpu:
+        print("No per-GPU best runtimes to plot.", file=sys.stderr)
+        return
+
+    gpu_counts = sorted(best_by_gpu.keys())
+    labels = [lbl for lbl in label_order if any(str(entry["label"]) == str(lbl) for entries in best_by_gpu.values() for entry in entries)]
+    if not labels:
+        print("No hardware labels found for combined per-GPU plot.", file=sys.stderr)
+        return
+
+    group_width = 0.7
+    bar_width = group_width / max(1, len(labels))
+
+    plt.figure(figsize=(8, 5))
+    palette = sns.color_palette("tab10", n_colors=max(len(labels), 3))
+
+    for li, label in enumerate(labels):
+        xs = []
+        ys = []
+        for idx, gpu_count in enumerate(gpu_counts):
+            entries = best_by_gpu.get(gpu_count, [])
+            runtime = next((float(ent["runtime"]) for ent in entries if ent.get("label") == label), float("nan"))
+            if not math.isfinite(runtime):
+                continue
+            x_pos = idx - (group_width / 2) + bar_width * li + bar_width / 2
+            xs.append(x_pos)
+            ys.append(runtime)
+        if xs:
+            plt.bar(xs, ys, width=bar_width, label=label, color=palette[li % len(palette)])
+
+    plt.xticks(range(len(gpu_counts)), [str(g) for g in gpu_counts])
+    plt.xlabel("GPU count")
+    plt.ylabel("Best runtime (s)")
+    plt.title("Best runtime per GPU count across hardware configs")
+    plt.legend(title="Hardware config", loc="best")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+    print(f"Saved combined per-GPU best-runtime chart to {output_path}")
+
+
+def plot_speedup_per_gpu_combined(
+    best_by_gpu: Dict[int, List[Dict[str, object]]],
+    output_path: str,
+    label_order: List[str],
+    base_label: str = "Base",
+    omit_gpu_counts: List[int] = None,
+) -> None:
+    """
+    Combined view: bars show speedup vs base hardware (runtime_base / runtime_other) per GPU count.
+    """
+    if omit_gpu_counts is None:
+        omit_gpu_counts = []
+    if not best_by_gpu:
+        print("No per-GPU best runtimes to plot for speedup.", file=sys.stderr)
+        return
+
+    gpu_counts = [g for g in sorted(best_by_gpu.keys()) if g not in omit_gpu_counts]
+    labels = [lbl for lbl in label_order if any(str(entry["label"]) == str(lbl) for entries in best_by_gpu.values() for entry in entries)]
+    if not labels:
+        print("No hardware labels found for speedup plot.", file=sys.stderr)
+        return
+
+    group_width = 0.85
+    bar_width = group_width / max(1, len(labels))
+
+    plt.figure(figsize=(10, 5))
+    palette = sns.color_palette("tab10", n_colors=max(len(labels), 3))
+
+    for li, label in enumerate(labels):
+        xs = []
+        ys = []
+        runtimes_for_labels = []
+        for idx, gpu_count in enumerate(gpu_counts):
+            entries = best_by_gpu.get(gpu_count, [])
+            base_entry = next((ent for ent in entries if str(ent.get("label")) == str(base_label)), None)
+            if base_entry is None or not math.isfinite(float(base_entry.get("runtime", float("nan")))):
+                continue
+            base_runtime = float(base_entry["runtime"])
+            runtime = next((float(ent["runtime"]) for ent in entries if ent.get("label") == label), float("nan"))
+            if not math.isfinite(runtime):
+                continue
+            speedup = base_runtime / runtime if runtime > 0 else float("nan")
+            if not math.isfinite(speedup):
+                continue
+            x_pos = idx - (group_width / 2) + bar_width * li + bar_width / 2
+            xs.append(x_pos)
+            ys.append(speedup)
+            runtimes_for_labels.append(runtime)
+        if xs:
+            bars = plt.bar(xs, ys, width=bar_width, label=label, color=palette[li % len(palette)])
+            for bar, runtime_val in zip(bars, runtimes_for_labels):
+                plt.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    bar.get_height(),
+                    f"{int(round(runtime_val))}s",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+    plt.xticks(range(len(gpu_counts)), [str(g) for g in gpu_counts])
+    plt.xlabel("GPU count")
+    plt.ylabel("Speedup vs Base")
+    plt.title("Optimal training speedup per GPU count")
+    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+    print(f"Saved combined per-GPU speedup chart to {output_path}")
 
 # def plot_results_categorical(results, output_path):
 #     if not results:
@@ -838,159 +1237,309 @@ def main():
     args = parse_args()
     set_astrasim_cache_mode(ASTRA_CACHE_MODE)
 
+    hw_config_paths = _resolve_hw_paths(HW_CONFIGS or [HARDWARE_CONFIG_PATH])
     enforce_square = ENFORCE_SQUARE_TP_CP or args.enforce_square_tp_cp
+    mode = determine_model_mode(MODEL_CONFIG_PATH)
+    runtime_cache = _load_runtime_cache(RUNTIME_CACHE_PATH)
+    cache_dirty = False
 
     results: List[Dict[str, object]] = []
+    label_order = [_hardware_label(i, path) for i, path in enumerate(hw_config_paths)]
 
     if args.plot_only:
-        try:
-            results = load_results_from_report(REPORT_OUTPUT_PATH)
-        except FileNotFoundError as exc:
-            print(str(exc))
-            return
+        for hw_path in hw_config_paths:
+            tag = Path(hw_path).stem if len(hw_config_paths) > 1 else None
+            report_path = _tagged_output_path(REPORT_OUTPUT_PATH, tag) if tag else REPORT_OUTPUT_PATH
+            try:
+                results = load_results_from_report(report_path)
+            except FileNotFoundError as exc:
+                print(str(exc))
+                continue
 
-        if not results:
-            print(f"No entries found in {REPORT_OUTPUT_PATH}; nothing to plot.")
-            return
+            if not results:
+                print(f"No entries found in {report_path}; nothing to plot.")
+                continue
 
-        best = min(results, key=lambda item: item["runtime"])
-        print(f"Loaded {len(results)} configuration(s) from {REPORT_OUTPUT_PATH}")
-        print("\nBest configuration (lowest runtime):")
-        print("  Parallelism: {}".format(best["parallelism"]))
-        print("  GPUs: {}".format(best["num_gpus"]))
-        print("  Runtime: {:.4f} s".format(best["runtime"]))
-        print("  Performance (1/s): {:.4f}".format(best["performance"]))
-        print("  Total FLOPs: {:.3e}".format(best["total_flops"]))
-        print("  MFU: {:.3f}".format(best["mfu"]))
-        if best["memory_exceeded"]:
-            print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
+            best = min(results, key=lambda item: item["runtime"])
+            print(f"[{hw_path}] Loaded {len(results)} configuration(s) from {report_path}")
+            print("\nBest configuration (lowest runtime):")
+            print("  Parallelism: {}".format(best["parallelism"]))
+            print("  GPUs: {}".format(best["num_gpus"]))
+            print("  Runtime: {:.4f} s".format(best["runtime"]))
+            print("  Performance (1/s): {:.4f}".format(best["performance"]))
+            print("  Total FLOPs: {:.3e}".format(best["total_flops"]))
+            print("  MFU: {:.3f}".format(best["mfu"]))
+            if best["memory_exceeded"]:
+                print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
+            plot_path = _tagged_output_path(PLOT_OUTPUT_PATH, tag) if tag else PLOT_OUTPUT_PATH
+            plot_results(results, plot_path)
+        return
+
+    gpu_axes = list(PARALLELISM_SWEEP.keys())
+    other_axes = list(OTHER_PARALLELISM_OPTIONS.keys())
+    gpu_combos = list(cartesian_product(PARALLELISM_SWEEP))
+    other_combos = list(cartesian_product(OTHER_PARALLELISM_OPTIONS))
+    task_items = _build_tasks(gpu_combos, other_combos)
+    print("Enumerating {} parallelism combinations: {}".format(len(task_items), ", ".join(gpu_axes)))
+
+    filtered_tasks: List[Tuple[Tuple[str, object], ...]] = []
+    skipped_out_of_range = 0
+    skipped_square_constraint = 0
+    for items in task_items:
+        settings = dict(items)
+        num_gpus = total_gpu_count(settings)
+        if enforce_square and not tp_cp_product_is_power_of_two_square(settings.get("tp"), settings.get("cp")):
+            skipped_square_constraint += 1
+            continue
+        if TP_CP_PRODUCT_MIN is not None or TP_CP_PRODUCT_MAX is not None:
+            tp_cp_prod = int(settings.get("tp", 1)) * int(settings.get("cp", 1))
+            if TP_CP_PRODUCT_MIN is not None and tp_cp_prod < TP_CP_PRODUCT_MIN:
+                skipped_out_of_range += 1
+                continue
+            if TP_CP_PRODUCT_MAX is not None and tp_cp_prod > TP_CP_PRODUCT_MAX:
+                skipped_out_of_range += 1
+                continue
+        if GPU_COUNT_MIN <= num_gpus <= GPU_COUNT_MAX:
+            filtered_tasks.append(items)
+        else:
+            skipped_out_of_range += 1
+
+    if not filtered_tasks:
+        print("No configurations within GPU count bounds.")
+        return
+    if enforce_square and skipped_square_constraint:
+        print(f"Skipped {skipped_square_constraint} configuration(s) due to tp*cp square constraint.")
+
+    available_cpus = max(1, os.cpu_count() or 1)
+    if MAX_WORKERS is None or MAX_WORKERS <= 0:
+        worker_limit = max(1, available_cpus - 1)
     else:
-        base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
-        mode = determine_model_mode(MODEL_CONFIG_PATH)
+        worker_limit = min(MAX_WORKERS, max(1, available_cpus - 1))
+    worker_count = max(1, worker_limit)
+    print(f"Using {worker_count} worker process(es) (out of {available_cpus} CPUs).")
 
-        gpu_axes = list(PARALLELISM_SWEEP.keys())
-        other_axes = list(OTHER_PARALLELISM_OPTIONS.keys())
-        gpu_combos = list(cartesian_product(PARALLELISM_SWEEP))
-        other_combos = list(cartesian_product(OTHER_PARALLELISM_OPTIONS))
-        task_items = _build_tasks(gpu_combos, other_combos)
-        print("Enumerating {} parallelism combinations: {}".format(len(task_items), ", ".join(gpu_axes)))
+    best_runtime_entries: List[Dict[str, object]] = []
+    best_runtime_by_gpu_count: Dict[int, List[Dict[str, object]]] = {}
 
-        skipped_out_of_range = 0
+    for hw_index, hw_path in enumerate(hw_config_paths):
+        tag = Path(hw_path).stem if len(hw_config_paths) > 1 else None
+        report_path = _tagged_output_path(REPORT_OUTPUT_PATH, tag) if tag else REPORT_OUTPUT_PATH
+        plot_path = _tagged_output_path(PLOT_OUTPUT_PATH, tag) if tag else PLOT_OUTPUT_PATH
+        hw_label = label_order[hw_index] if hw_index < len(label_order) else Path(hw_path).stem
+        print(f"\n=== Evaluating hardware config: {hw_path} ===")
+
+        results = []
+        results_from_report = False
         skipped_errors = 0
+        skipped_memory = 0
         error_messages: List[str] = []
         evaluated = 0
 
-        filtered_tasks: List[Tuple[Tuple[str, object], ...]] = []
-        skipped_square_constraint = 0
-        for items in task_items:
-            settings = dict(items)
-            num_gpus = total_gpu_count(settings)
-            if enforce_square and not tp_cp_product_is_power_of_two_square(settings.get("tp"), settings.get("cp")):
-                skipped_square_constraint += 1
-                continue
-            if GPU_COUNT_MIN <= num_gpus <= GPU_COUNT_MAX:
-                filtered_tasks.append(items)
-            else:
-                skipped_out_of_range += 1
+        if os.path.exists(report_path):
+            try:
+                loaded = load_results_from_report(report_path)
+                if loaded:
+                    results = loaded
+                    results_from_report = True
+                    print(f"Found existing TSV report at {report_path}; using cached results.")
+                else:
+                    print(f"Existing TSV report at {report_path} is empty; running sweep.")
+            except Exception as exc:
+                print(f"Warning: failed to load existing TSV report {report_path}: {exc}; running sweep.")
 
-        if not filtered_tasks:
-            print("No configurations within GPU count bounds.")
-            return
-        if enforce_square and skipped_square_constraint:
-            print(f"Skipped {skipped_square_constraint} configuration(s) due to tp*cp square constraint.")
+        if not results_from_report:
+            base_hw_dict = read_yaml(hw_path)
+            model_config_path, model_cache_id = _model_config_with_overrides(MODEL_CONFIG_PATH, hw_path)
 
-        available_cpus = max(1, os.cpu_count() or 1)
-        if MAX_WORKERS is None or MAX_WORKERS <= 0:
-            worker_limit = max(1, available_cpus - 1)
-        else:
-            worker_limit = min(MAX_WORKERS, max(1, available_cpus - 1))
-        worker_count = max(1, worker_limit)
-        print(f"Using {worker_count} worker process(es) (out of {available_cpus} CPUs).")
-
-        if worker_count > 1 and len(filtered_tasks) > 1:
-            with ProcessPoolExecutor(
-                max_workers=worker_count,
-                initializer=_worker_init,
-                initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
-            ) as executor:
-                futures = {executor.submit(_worker_task, items): items for items in filtered_tasks}
-                with tqdm(total=len(filtered_tasks), desc="Evaluating", unit="config") as progress:
-                    for future in as_completed(futures):
-                        progress.update(1)
-                        result = future.result()
-                        settings = result["parallelism"]
-                        num_gpus = total_gpu_count(settings)
-                        if result["status"] != "ok":
-                            skipped_errors += 1
-                            msg = result.get("error") or "unknown error"
-                            error_messages.append(f"{settings}: {msg}")
-                            continue
-                        metrics = result["metrics"]
-                        evaluated += 1
-                        entry = {
-                            "parallelism": settings,
-                            "num_gpus": num_gpus,
-                            "runtime": metrics["runtime"],
-                            "performance": metrics["performance"],
-                            "total_flops": metrics["total_flops"],
-                            "achieved_flops": metrics["achieved_flops"],
-                            "peak_flops": metrics["peak_flops"],
-                            "mfu": metrics["mfu"],
-                            "memory_exceeded": metrics["memory_exceeded"],
-                            "memory_violation_gb": metrics["memory_violation_gb"],
-                        }
-                        results.append(entry)
-        else:
-            model_config_obj = config.parse_config(MODEL_CONFIG_PATH, config_type=mode)
-            with tqdm(total=len(filtered_tasks), desc="Evaluating", unit="config") as progress:
+            try:
+                tasks_to_eval: List[Tuple[Tuple[str, object], ...]] = []
                 for items in filtered_tasks:
                     settings = dict(items)
                     num_gpus = total_gpu_count(settings)
-                    progress.update(1)
-                    try:
-                        metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
-                    except Exception as exc:
-                        skipped_errors += 1
-                        error_messages.append(f"{settings}: {exc}")
+                    key = _cache_key(hw_path, model_cache_id, settings)
+                    cached_entry = runtime_cache.get(key)
+                    if cached_entry is None:
+                        tasks_to_eval.append(items)
                         continue
-
-                    evaluated += 1
                     entry = {
                         "parallelism": settings,
                         "num_gpus": num_gpus,
-                        "runtime": metrics["runtime"],
-                        "performance": metrics["performance"],
-                        "total_flops": metrics["total_flops"],
-                        "achieved_flops": metrics["achieved_flops"],
-                        "peak_flops": metrics["peak_flops"],
-                        "mfu": metrics["mfu"],
-                        "memory_exceeded": metrics["memory_exceeded"],
-                        "memory_violation_gb": metrics["memory_violation_gb"],
+                        "runtime": float(cached_entry.get("runtime", float("nan"))),
+                        "performance": float(cached_entry.get("performance", float("nan"))),
+                        "total_flops": float(cached_entry.get("total_flops", float("nan"))),
+                        "achieved_flops": float(cached_entry.get("achieved_flops", float("nan"))),
+                        "peak_flops": float(cached_entry.get("peak_flops", float("nan"))),
+                        "mfu": float(cached_entry.get("mfu", float("nan"))),
+                        "memory_exceeded": bool(cached_entry.get("memory_exceeded", False)),
+                        "memory_violation_gb": float(cached_entry.get("memory_violation_gb", 0.0) or 0.0),
                     }
                     results.append(entry)
 
-        total_skipped = skipped_out_of_range + skipped_errors
+                if worker_count > 1 and len(tasks_to_eval) > 1:
+                    with ProcessPoolExecutor(
+                        max_workers=worker_count,
+                        initializer=_worker_init,
+                        initargs=(base_hw_dict, model_config_path, mode),
+                    ) as executor:
+                        futures = {executor.submit(_worker_task, items): items for items in tasks_to_eval}
+                        with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
+                            for future in as_completed(futures):
+                                progress.update(1)
+                                result = future.result()
+                                settings = result["parallelism"]
+                                num_gpus = total_gpu_count(settings)
+                                if result["status"] != "ok":
+                                    skipped_errors += 1
+                                    msg = result.get("error") or "unknown error"
+                                    error_messages.append(f"{settings}: {msg}")
+                                    continue
+                                metrics = result["metrics"]
+                                entry = {
+                                    "parallelism": settings,
+                                    "num_gpus": num_gpus,
+                                    "runtime": metrics["runtime"],
+                                    "performance": metrics["performance"],
+                                    "total_flops": metrics["total_flops"],
+                                    "achieved_flops": metrics["achieved_flops"],
+                                    "peak_flops": metrics["peak_flops"],
+                                    "mfu": metrics["mfu"],
+                                    "memory_exceeded": metrics["memory_exceeded"],
+                                    "memory_violation_gb": metrics["memory_violation_gb"],
+                                }
+                                key = _cache_key(hw_path, model_cache_id, settings)
+                                runtime_cache[key] = {
+                                    "hardware_config": str(Path(hw_path).resolve()),
+                                    "model_config": model_cache_id,
+                                    "parallelism": dict(settings),
+                                    "num_gpus": num_gpus,
+                                    "runtime": entry["runtime"],
+                                    "performance": entry["performance"],
+                                    "total_flops": entry["total_flops"],
+                                    "achieved_flops": entry["achieved_flops"],
+                                    "peak_flops": entry["peak_flops"],
+                                    "mfu": entry["mfu"],
+                                    "memory_exceeded": entry["memory_exceeded"],
+                                    "memory_violation_gb": entry["memory_violation_gb"],
+                                }
+                                cache_dirty = True
+
+                                if metrics.get("memory_exceeded"):
+                                    skipped_memory += 1
+                                    results.append(entry)
+                                    continue
+                                evaluated += 1
+                                results.append(entry)
+                elif tasks_to_eval:
+                    model_config_obj = config.parse_config(model_config_path, config_type=mode)
+                    with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
+                        for items in tasks_to_eval:
+                            settings = dict(items)
+                            num_gpus = total_gpu_count(settings)
+                            progress.update(1)
+                            try:
+                                metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
+                            except Exception as exc:
+                                skipped_errors += 1
+                                error_messages.append(f"{settings}: {exc}")
+                                continue
+
+                            entry = {
+                                "parallelism": settings,
+                                "num_gpus": num_gpus,
+                                "runtime": metrics["runtime"],
+                                "performance": metrics["performance"],
+                                "total_flops": metrics["total_flops"],
+                                "achieved_flops": metrics["achieved_flops"],
+                                "peak_flops": metrics["peak_flops"],
+                                "mfu": metrics["mfu"],
+                                "memory_exceeded": metrics["memory_exceeded"],
+                                "memory_violation_gb": metrics["memory_violation_gb"],
+                            }
+                            key = _cache_key(hw_path, model_cache_id, settings)
+                            runtime_cache[key] = {
+                                "hardware_config": str(Path(hw_path).resolve()),
+                                "model_config": model_cache_id,
+                                "parallelism": dict(settings),
+                                "num_gpus": num_gpus,
+                                "runtime": metrics["runtime"],
+                                "performance": metrics["performance"],
+                                "total_flops": metrics["total_flops"],
+                                "achieved_flops": metrics["achieved_flops"],
+                                "peak_flops": metrics["peak_flops"],
+                                "mfu": metrics["mfu"],
+                                "memory_exceeded": metrics["memory_exceeded"],
+                                "memory_violation_gb": metrics["memory_violation_gb"],
+                            }
+                            cache_dirty = True
+
+                            if metrics.get("memory_exceeded"):
+                                skipped_memory += 1
+                                print(
+                                    f"Skipping configuration {settings} due to memory capacity violation "
+                                    f"({metrics.get('memory_violation_gb', 0.0):.3f} GB).",
+                                    file=sys.stderr,
+                                )
+                                results.append(entry)
+                                continue
+
+                            evaluated += 1
+                            results.append(entry)
+            finally:
+                if model_config_path != MODEL_CONFIG_PATH and os.path.exists(model_config_path):
+                    try:
+                        os.unlink(model_config_path)
+                    except Exception:
+                        pass
+
+        total_skipped = skipped_out_of_range + skipped_errors + skipped_memory
         if not results:
             print(
-                "No valid configurations evaluated ({} skipped: {} out-of-range, {} errors).".format(
-                    total_skipped, skipped_out_of_range, skipped_errors
+                "No valid configurations evaluated ({} skipped: {} out-of-range, {} errors, {} memory violations).".format(
+                    total_skipped, skipped_out_of_range, skipped_errors, skipped_memory
                 )
             )
             if error_messages:
                 print("Encountered errors for configurations:")
                 for msg in error_messages:
                     print(f"  {msg}")
-            return
+            continue
 
-        best = min(results, key=lambda item: item["runtime"])
-        print(
-            f"Evaluated {evaluated} configuration(s); skipped {total_skipped} "
-            f"(out_of_range={skipped_out_of_range}, errors={skipped_errors})."
-        )
-        if error_messages:
-            print("Some configurations failed:")
-            for msg in error_messages:
-                print(f"  {msg}")
+        if results_from_report:
+            print(f"Loaded {len(results)} configuration(s) from cached TSV; skipping sweep.")
+        else:
+            print(
+                f"Evaluated {evaluated} configuration(s); skipped {total_skipped} "
+                f"(out_of_range={skipped_out_of_range}, errors={skipped_errors}, memory={skipped_memory})."
+            )
+            if error_messages:
+                print("Some configurations failed:")
+                for msg in error_messages:
+                    print(f"  {msg}")
+
+        best_candidates = [
+            item for item in results
+            if not item.get("memory_exceeded") and math.isfinite(item.get("runtime", float("nan")))
+        ]
+        if not best_candidates:
+            print(
+                "No valid (non-memory-violating) configurations for best-runtime selection; "
+                "skipping best/runtime summary for this hardware.",
+                file=sys.stderr,
+            )
+            continue
+
+        # Track best runtime per GPU count for this hardware (exclude memory violations).
+        per_gpu_best: Dict[int, float] = {}
+        for item in best_candidates:
+            num_gpus = int(item.get("num_gpus", 0))
+            runtime_val = float(item.get("runtime", float("nan")))
+            if not math.isfinite(runtime_val):
+                continue
+            current = per_gpu_best.get(num_gpus)
+            if current is None or runtime_val < current:
+                per_gpu_best[num_gpus] = runtime_val
+
+        best = min(best_candidates, key=lambda item: item["runtime"])
         print("\nBest configuration (lowest runtime):")
         print("  Parallelism: {}".format(best["parallelism"]))
         print("  GPUs: {}".format(best["num_gpus"]))
@@ -1000,19 +1549,37 @@ def main():
         print("  MFU: {:.3f}".format(best["mfu"]))
         if best["memory_exceeded"]:
             print("  Memory capacity exceeded by {:.3f} GB".format(best["memory_violation_gb"]))
+        best_runtime_entries.append({"label": hw_label, "runtime": best["runtime"]})
+        for num_gpus, runtime_val in per_gpu_best.items():
+            best_runtime_by_gpu_count.setdefault(num_gpus, []).append(
+                {"label": hw_label, "runtime": runtime_val}
+            )
 
-        try:
-            write_report(results, REPORT_OUTPUT_PATH)
-            print("Wrote detailed report to {}".format(REPORT_OUTPUT_PATH))
-        except Exception as exc:
-            print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
+        if not results_from_report:
+            try:
+                write_report(results, report_path)
+                print("Wrote detailed report to {}".format(report_path))
+            except Exception as exc:
+                print("Warning: failed to write report: {}".format(exc), file=sys.stderr)
 
-    if not results:
-        return
-
-    plot_results(results, PLOT_OUTPUT_PATH)
+        if results:
+            plot_results(results, plot_path)
     # plot_mfu(results, PLOT_MFU_OUTPUT_PATH)
 
+    if best_runtime_entries:
+        plot_best_runtimes(best_runtime_entries, BEST_RUNTIME_PLOT_PATH, label_order)
+    if best_runtime_by_gpu_count:
+        plot_best_runtimes_per_gpu(best_runtime_by_gpu_count, BEST_RUNTIME_PER_GPU_DIR, label_order)
+        plot_best_runtimes_per_gpu_combined(best_runtime_by_gpu_count, BEST_RUNTIME_PER_GPU_COMBINED_PATH, label_order)
+        plot_speedup_per_gpu_combined(
+            best_runtime_by_gpu_count,
+            BEST_SPEEDUP_PER_GPU_COMBINED_PATH,
+            label_order,
+            base_label=HW_LABELS[0] if HW_LABELS else "Base",
+            omit_gpu_counts=[64],
+        )
+    if cache_dirty:
+        _save_runtime_cache(runtime_cache, RUNTIME_CACHE_PATH)
 
 if __name__ == "__main__":
     main()

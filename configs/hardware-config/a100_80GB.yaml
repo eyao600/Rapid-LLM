@@ -111,7 +111,7 @@ network:
       size: auto
       topology:
         type: Ring 
-        bandwidth: 25 GB
+        bandwidth: 25 GB # SPLIT INTO BW_PER_GPU, BW_TOTAL. BW TOTAL IS ONLY ALLOWED IF PREV DIM is 2D.
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
@@ -133,7 +133,7 @@ execution_backend:
   model: astra # analytical | astra
   astra:
     backend: astra
-    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_hierarchical  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d

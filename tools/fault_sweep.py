@@ -19,6 +19,7 @@ import signal
 import shlex
 import sys
 import threading
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -67,9 +68,9 @@ def _quantize_weight(value: float, decimals: int = 2) -> float:
 # Fault sweep configuration
 # -----------------------------------------------------------------------------
 
-TARGET_NUM_GPUS = 64
-SAMPLE_COUNT = 10
-FAULT_ITER = 25
+TARGET_NUM_GPUS = 128
+SAMPLE_COUNT = 50
+FAULT_ITER = 200
 FAULT_WORKERS = 100
 FAULT_MAG = [0.5, 0.1]  # May also be a (mean, std) tuple
 NUM_FAULTS = [1]
@@ -145,6 +146,232 @@ TOPOLOGIES_WITH_FAULTY_LINK_SUPPORT = {
     "mesh2d",
     "kingmesh2d",
 }
+
+_TOPOLOGIES_EXPAND_TO_2D = {"mesh2d", "torus2d"}
+
+
+def _normalize_topology_name(raw: object) -> str:
+    if raw is None:
+        return ""
+    return str(raw).strip().lower().replace("-", "").replace("_", "")
+
+
+def _infer_non_recursive_from(dimensions: Sequence[object]) -> int:
+    if not dimensions:
+        return 0
+    first = dimensions[0]
+    topo = ""
+    if isinstance(first, dict):
+        topo_dict = first.get("topology")
+        if isinstance(topo_dict, dict):
+            topo = _normalize_topology_name(topo_dict.get("type", ""))
+    return 2 if topo in _TOPOLOGIES_EXPAND_TO_2D else 0
+
+
+def _expanded_start_indices(dimensions: Sequence[object]) -> List[int]:
+    starts: List[int] = []
+    cursor = 0
+    for dim in dimensions:
+        starts.append(cursor)
+        topo = ""
+        if isinstance(dim, dict):
+            topo_dict = dim.get("topology")
+            if isinstance(topo_dict, dict):
+                topo = _normalize_topology_name(topo_dict.get("type", ""))
+        cursor += 2 if topo in _TOPOLOGIES_EXPAND_TO_2D else 1
+    return starts
+
+
+def _parallelism_product(names: Iterable[object], parallelism: Dict[str, object]) -> int:
+    product = 1
+    for entry in names:
+        axis = str(entry).strip().lower()
+        if not axis:
+            continue
+        value = parallelism.get(axis, 1)
+        try:
+            factor = int(value)
+        except (TypeError, ValueError):
+            factor = 1
+        product *= max(1, factor)
+    return max(1, product)
+
+
+def _resolve_dimension_size(dim: dict, parallelism: Dict[str, object]) -> int:
+    size_raw = dim.get("size", "auto")
+    if isinstance(size_raw, str):
+        normalized = size_raw.strip().lower()
+        if normalized == "auto":
+            return _parallelism_product(dim.get("parallelisms", []) or [], parallelism)
+        if normalized.startswith("(") and normalized.endswith(")"):
+            inner = normalized[1:-1].strip()
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
+            if len(parts) == 2:
+                try:
+                    return max(1, int(parts[0]) * int(parts[1]))
+                except (TypeError, ValueError):
+                    return 1
+        try:
+            return max(1, int(normalized))
+        except (TypeError, ValueError):
+            return 1
+    if isinstance(size_raw, (list, tuple)):
+        if len(size_raw) == 2:
+            try:
+                return max(1, int(size_raw[0]) * int(size_raw[1]))
+            except (TypeError, ValueError):
+                return 1
+        if len(size_raw) == 1:
+            try:
+                return max(1, int(size_raw[0]))
+            except (TypeError, ValueError):
+                return 1
+    try:
+        return max(1, int(size_raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _dimension_sizes(dimensions: Sequence[object], parallelism: Dict[str, object]) -> List[int]:
+    sizes: List[int] = []
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            sizes.append(1)
+            continue
+        sizes.append(_resolve_dimension_size(dim, parallelism))
+    return sizes
+
+
+def _pair_set(pairs: Iterable[Tuple[int, int]]) -> set[Tuple[int, int]]:
+    normalized = set()
+    for a, b in pairs:
+        lo, hi = (a, b) if a <= b else (b, a)
+        normalized.add((int(lo), int(hi)))
+    return normalized
+
+
+def _collect_possible_fault_links(hw_dict: Dict[str, object]) -> set[Tuple[int, int]]:
+    network = hw_dict.get("network")
+    if not isinstance(network, dict):
+        return set()
+    dimensions = network.get("dimensions")
+    if not isinstance(dimensions, list):
+        return set()
+    parallelism = hw_dict.get("parallelism")
+    if not isinstance(parallelism, dict):
+        parallelism = {}
+    dim_sizes = _dimension_sizes(dimensions, parallelism)
+    expanded_starts = _expanded_start_indices(dimensions)
+    non_recursive_from = _infer_non_recursive_from(dimensions)
+    possible: set[Tuple[int, int]] = set()
+    for dim_index, dim in enumerate(dimensions):
+        if not isinstance(dim, dict):
+            continue
+        topology = dim.get("topology")
+        topo_type = ""
+        if isinstance(topology, dict):
+            topo_type = _normalize_topology_name(topology.get("type", ""))
+        if topo_type not in TOPOLOGIES_WITH_FAULTY_LINK_SUPPORT:
+            continue
+        dim_size = dim_sizes[dim_index] if dim_index < len(dim_sizes) else 1
+        if dim_size < 2:
+            continue
+        neighbor_map = _neighbors_for_topology(topo_type, dim_size)
+        stride = 1
+        for idx in range(dim_index):
+            if idx < len(dim_sizes):
+                stride *= max(1, int(dim_sizes[idx]))
+        stride = max(1, stride)
+        expanded_start = expanded_starts[dim_index] if dim_index < len(expanded_starts) else dim_index
+        non_recursive_dim = expanded_start >= non_recursive_from
+        if non_recursive_dim or stride <= 1:
+            offsets = [0]
+        else:
+            offsets = list(range(stride))
+        for offset in offsets:
+            for src, neighbors in enumerate(neighbor_map):
+                for dst in neighbors:
+                    src_id = offset + int(src) * stride
+                    dst_id = offset + int(dst) * stride
+                    possible.add((min(src_id, dst_id), max(src_id, dst_id)))
+    return possible
+
+
+def _run_fault_injection_self_test() -> None:
+    mesh2d_ring_hw = {
+        "parallelism": {"tp": 2, "cp": 2, "dp": 2, "lp": 1},
+        "network": {
+            "dimensions": [
+                {
+                    "id": "dim0",
+                    "topology": {"type": "Mesh2D"},
+                    "size": "auto",
+                    "parallelisms": ["tp", "cp"],
+                },
+                {
+                    "id": "dim1",
+                    "topology": {"type": "Ring"},
+                    "size": "auto",
+                    "parallelisms": ["dp"],
+                },
+            ]
+        },
+    }
+    mesh2d_ring_expected = _pair_set(
+        [
+            (0, 1), (0, 2), (1, 3), (2, 3),
+            (4, 5), (4, 6), (5, 7), (6, 7),
+            (0, 4),
+        ]
+    )
+
+    ring_ring_hw = {
+        "parallelism": {"tp": 4, "cp": 1, "dp": 4, "lp": 1},
+        "network": {
+            "dimensions": [
+                {
+                    "id": "dim0",
+                    "topology": {"type": "Ring"},
+                    "size": "auto",
+                    "parallelisms": ["tp"],
+                },
+                {
+                    "id": "dim1",
+                    "topology": {"type": "Ring"},
+                    "size": "auto",
+                    "parallelisms": ["dp"],
+                },
+            ]
+        },
+    }
+    ring_ring_expected = _pair_set(
+        [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (8, 9), (9, 10), (10, 11), (11, 8),
+            (12, 13), (13, 14), (14, 15), (15, 12),
+            (0, 4), (4, 8), (8, 12), (12, 0),
+        ]
+    )
+
+    cases = [
+        ("mesh2d_ring_2x2_plus_ring2", mesh2d_ring_hw, mesh2d_ring_expected),
+        ("ring_ring_4x4", ring_ring_hw, ring_ring_expected),
+    ]
+
+    for label, hw_dict, expected in cases:
+        observed = _collect_possible_fault_links(hw_dict)
+        if not observed:
+            raise RuntimeError(f"[self-test] {label}: no candidate fault links generated.")
+        extras = observed - expected
+        if extras:
+            extras_sorted = ", ".join(f"{a}-{b}" for a, b in sorted(extras))
+            raise RuntimeError(
+                f"[self-test] {label}: observed links outside expected set: {extras_sorted}"
+            )
+
+    banner = "=" * 72
+    print(f"\n{banner}\nCHECKMARK: FAULT INJECTION SELF-TEST PASSED\n{banner}\n")
 
 def _build_ring_neighbors(node_count: int) -> List[List[int]]:
     if node_count <= 0:
@@ -390,7 +617,7 @@ def _select_representative_vectors(candidates: List[Tuple[int, int, int, int]], 
     return selected[:count]
 
 
-def generate_parallelism_samples(num_gpus: int, sample_count: int) -> List[Dict[str, int]]:
+def _filtered_parallelism_vectors(num_gpus: int) -> List[Tuple[int, int, int, int]]:
     tuples = _enumerate_parallelism_vectors(num_gpus)
     filtered: List[Tuple[int, int, int, int]] = []
     for tp, cp, dp, lp in tuples:
@@ -405,20 +632,104 @@ def generate_parallelism_samples(num_gpus: int, sample_count: int) -> List[Dict[
         if ENFORCE_SQUARE_TP_CP and not tp_cp_product_is_power_of_two_square(tp, cp):
             continue
         filtered.append((tp, cp, dp, lp))
-    tuples = filtered
-    chosen = _select_representative_vectors(tuples, sample_count)
-    samples: List[Dict[str, int]] = []
-    for tp, cp, dp, lp in chosen:
-        settings = {
-            "tp": tp,
-            "cp": cp,
-            "dp": dp,
-            "lp": lp,
-            "mb": max(lp, 1),
-            "tp_sp": True,
-        }
-        samples.append(settings)
-    return samples
+    return filtered
+
+
+def _make_parallelism_settings(tp: int, cp: int, dp: int, lp: int) -> Dict[str, int]:
+    return {
+        "tp": tp,
+        "cp": cp,
+        "dp": dp,
+        "lp": lp,
+        "mb": 1 if lp == 1 else lp,
+        "tp_sp": True,
+    }
+
+
+def generate_parallelism_samples(
+    num_gpus: int,
+    sample_count: int,
+    base_hw_dict: Dict[str, object],
+    model_config_obj: object,
+    mode: str,
+    workers: Optional[int] = None,
+) -> List[Dict[str, int]]:
+    vectors = _filtered_parallelism_vectors(num_gpus)
+    if not vectors:
+        return []
+    # Keep ordering stable but cover space by using representative sampling.
+    prioritized = deque(_select_representative_vectors(vectors, len(vectors)))
+    selected: List[Dict[str, int]] = []
+
+    worker_count = max(1, int(workers) if workers is not None else 1)
+    worker_count = min(worker_count, max(1, os.cpu_count() or 1))
+
+    print(f"Choosing out of {len(vectors)} candidate parallelism configurations...")
+
+    if worker_count <= 1:
+        while prioritized and len(selected) < sample_count:
+            tp, cp, dp, lp = prioritized.popleft()
+            settings = _make_parallelism_settings(tp, cp, dp, lp)
+            try:
+                metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(
+                    f"Warning: failed to evaluate parallelism {settings} during sampling: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            if bool(metrics.get("memory_exceeded", False)):
+                continue
+            selected.append(settings)
+    else:
+        backlog_target = worker_count * 3
+        in_flight: Dict[object, Dict[str, int]] = {}
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_parallelism_worker_init,
+            initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+        ) as executor:
+            while (prioritized or in_flight) and len(selected) < sample_count:
+                while (
+                    prioritized
+                    and len(in_flight) < backlog_target
+                    and len(selected) + len(in_flight) < sample_count + backlog_target
+                ):
+                    tp, cp, dp, lp = prioritized.popleft()
+                    settings = _make_parallelism_settings(tp, cp, dp, lp)
+                    fut = executor.submit(_sampling_worker, settings)
+                    in_flight[fut] = settings
+                if not in_flight:
+                    break
+                completed = next(as_completed(list(in_flight.keys())))
+                settings = in_flight.pop(completed, None)
+                try:
+                    result = completed.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    print(
+                        f"Warning: failed to evaluate parallelism {settings} during sampling: {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if result.get("error"):
+                    print(
+                        f"Warning: failed to evaluate parallelism {settings} during sampling: {result.get('error')}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if bool(result.get("memory_exceeded", False)):
+                    continue
+                if settings is not None:
+                    selected.append(settings)
+                    print(f"Selected parallelism configuration: {settings}")
+
+    if len(selected) < sample_count and not prioritized:
+        print(
+            f"Warning: only {len(selected)} parallelism configuration(s) fit in memory "
+            f"out of requested {sample_count}.",
+            file=sys.stderr,
+        )
+    return selected
 
 
 # -----------------------------------------------------------------------------
@@ -449,6 +760,12 @@ def make_fault_mutator(fault_specs: Sequence[Tuple[int, float, int]]):
         dimensions = network.get("dimensions")
         if not isinstance(dimensions, list):
             return
+        parallelism = hw_dict.get("parallelism")
+        if not isinstance(parallelism, dict):
+            parallelism = {}
+        dim_sizes = _dimension_sizes(dimensions, parallelism)
+        expanded_starts = _expanded_start_indices(dimensions)
+        non_recursive_from = _infer_non_recursive_from(dimensions)
         fault_entries: List[FlowSeq] = []
         for dimension_index, weight, node_count in fault_specs:
             if not (0 <= dimension_index < len(dimensions)):
@@ -461,7 +778,7 @@ def make_fault_mutator(fault_specs: Sequence[Tuple[int, float, int]]):
             if isinstance(topology, dict):
                 topo_raw = topology.get("type", "")
                 if isinstance(topo_raw, str):
-                    topo_type = topo_raw.strip().lower()
+                    topo_type = _normalize_topology_name(topo_raw)
             supports_faulty_links = topo_type in TOPOLOGIES_WITH_FAULTY_LINK_SUPPORT
             if not supports_faulty_links:
                 label = dim.get("label", f"dim{dimension_index}")
@@ -469,14 +786,15 @@ def make_fault_mutator(fault_specs: Sequence[Tuple[int, float, int]]):
                     f"Topology '{topo_type or 'unknown'}' on network dimension '{label}' "
                     "does not support faulty_links injection."
                 )
-            if node_count < 2:
+            dim_size = dim_sizes[dimension_index] if dimension_index < len(dim_sizes) else node_count
+            if dim_size < 2:
                 continue
             try:
-                neighbor_map = _neighbors_for_topology(topo_type, node_count)
+                neighbor_map = _neighbors_for_topology(topo_type, dim_size)
             except ValueError as exc:
                 raise ValueError(
                     f"Unable to determine neighbors for topology '{topo_type or 'unknown'}' "
-                    f"with node_count={node_count}: {exc}"
+                    f"with node_count={dim_size}: {exc}"
                 ) from exc
             valid_sources = [idx for idx, neigh in enumerate(neighbor_map) if neigh]
             if not valid_sources:
@@ -484,6 +802,18 @@ def make_fault_mutator(fault_specs: Sequence[Tuple[int, float, int]]):
             src = random.choice(valid_sources)
             dst_candidates = neighbor_map[src]
             dst = random.choice(dst_candidates)
+            stride = 1
+            for idx in range(dimension_index):
+                if idx < len(dim_sizes):
+                    stride *= max(1, int(dim_sizes[idx]))
+            stride = max(1, stride)
+            expanded_start = expanded_starts[dimension_index] if dimension_index < len(expanded_starts) else dimension_index
+            non_recursive_dim = expanded_start >= non_recursive_from
+            lower_offset = 0
+            if not non_recursive_dim and stride > 1:
+                lower_offset = random.randrange(stride)
+            src = lower_offset + int(src) * stride
+            dst = lower_offset + int(dst) * stride
             weight_clamped = float(max(0.0, min(1.0, weight)))
             weight_clamped = _quantize_weight(weight_clamped)
             dim.pop("faulty_links", None)
@@ -520,6 +850,7 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
     key = task.get("key")
     settings_key = tuple(task.get("settings_key", ()))
     task_id = task.get("task_id")
+    fault_iter = task.get("fault_iter")
     try:
         mutator = None
         if kind == "fault":
@@ -535,6 +866,7 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
             settings,
             hw_mutator=mutator,
         )
+        mem_violation = metrics.get("memory_violation_gb", 0.0) or 0.0
         result: Dict[str, object] = {
             "status": "ok",
             "kind": kind,
@@ -544,7 +876,11 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
             "runtime": float(metrics["runtime"]),
             "hw_yaml": metrics.get("hw_yaml"),
             "task_id": task_id,
+            "memory_exceeded": bool(metrics.get("memory_exceeded", False)),
+            "memory_violation_gb": float(mem_violation),
         }
+        if fault_iter is not None:
+            result["fault_iter"] = int(fault_iter)
         if kind == "fault":
             result.update(
                 {
@@ -573,6 +909,20 @@ def _parallelism_worker_task(task: Dict[str, object]) -> Dict[str, object]:
     return _execute_parallelism_task(_WORKER_HW_DICT, _WORKER_MODEL_CONFIG, _WORKER_MODE, task)
 
 
+def _sampling_worker(settings: Dict[str, int]) -> Dict[str, object]:
+    if _WORKER_HW_DICT is None or _WORKER_MODEL_CONFIG is None or _WORKER_MODE is None:
+        raise RuntimeError("Worker initialisation missing before task execution.")
+    try:
+        metrics = evaluate_parallelism(_WORKER_HW_DICT, _WORKER_MODEL_CONFIG, _WORKER_MODE, settings)
+        return {
+            "settings": settings,
+            "memory_exceeded": bool(metrics.get("memory_exceeded", False)),
+            "error": None,
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"settings": settings, "memory_exceeded": True, "error": str(exc)}
+
+
 def _parallelism_key(settings: Dict[str, object]) -> Tuple[Tuple[str, object], ...]:
     return tuple(sorted(settings.items()))
 
@@ -598,11 +948,14 @@ def _task_identifier(
     *,
     faults: Sequence[Tuple[int, float, int]] | None = None,
     num_faults: int | None = None,
+    fault_iter: Optional[int] = None,
 ) -> str:
     payload: Dict[str, object] = {
         "kind": kind,
         "settings_key": _serialize_settings_key(settings_key),
     }
+    if fault_iter is not None:
+        payload["fault_iter"] = int(fault_iter)
     if kind == "fault":
         effective_faults = faults or ()
         payload["num_faults"] = int(num_faults if num_faults is not None else len(effective_faults))
@@ -632,8 +985,12 @@ def _record_partial_result(results_store: Dict[str, Dict[str, object]], entry: D
         "kind": entry.get("kind"),
         "settings_key": _serialize_settings_key(tuple(entry.get("settings_key", ()))),
         "runtime": entry.get("runtime"),
+        "memory_exceeded": bool(entry.get("memory_exceeded", False)),
+        "memory_violation_gb": float(entry.get("memory_violation_gb", 0.0) or 0.0),
     }
     if entry.get("kind") == "fault":
+        if "fault_iter" in entry:
+            results_store[task_id]["fault_iter"] = int(entry.get("fault_iter"))
         results_store[task_id]["num_faults"] = int(entry.get("num_faults", 0))
         results_store[task_id]["faults"] = _normalise_faults_raw(entry.get("faults", []))
     tmp_path = RESULTS_JSON_PATH.with_suffix(".tmp")
@@ -981,6 +1338,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
 
     set_astrasim_cache_mode(ASTRA_CACHE_MODE)
     _install_signal_handlers()
+    _run_fault_injection_self_test()
 
     base_hw_dict = read_yaml(HARDWARE_CONFIG_PATH)
     mode = determine_model_mode(MODEL_CONFIG_PATH)
@@ -991,15 +1349,17 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
         print(f"Loaded {len(existing_results)} cached result entries from {RESULTS_JSON_PATH}")
     results_store: Dict[str, Dict[str, object]] = dict(existing_results)
 
-    parallelism_samples = generate_parallelism_samples(TARGET_NUM_GPUS, SAMPLE_COUNT)
+    parallelism_samples = generate_parallelism_samples(
+        TARGET_NUM_GPUS, SAMPLE_COUNT, base_hw_dict, model_config_obj, mode, workers=FAULT_WORKERS
+    )
     if not parallelism_samples:
         print("Unable to generate parallelism samples.", file=sys.stderr)
         return
 
     records: List[Dict[str, object]] = []
     records_by_key: Dict[Tuple[Tuple[str, object], ...], Dict[str, object]] = {}
-    task_queue: List[Dict[str, object]] = []
-    total_fault_tasks = 0
+    baseline_task_queue: List[Dict[str, object]] = []
+    debug_task_queue: Optional[List[Dict[str, object]]] = [] if DEBUG_MODE else None
 
     for settings in parallelism_samples:
         settings_copy = dict(settings)
@@ -1015,6 +1375,8 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
             "baseline_runtime": None,
             "fault_runtimes": [],
             "fault_details": [],
+            "memory_exceeded": False,
+            "memory_violation_gb": 0.0,
         }
 
         baseline_task_id = _task_identifier("baseline", settings_key)
@@ -1023,8 +1385,13 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
             runtime = baseline_cached.get("runtime")
             if runtime is not None:
                 records_by_key[key]["baseline_runtime"] = float(runtime)
+            mem_flag = bool(baseline_cached.get("memory_exceeded", False))
+            records_by_key[key]["memory_exceeded"] = mem_flag
+            records_by_key[key]["memory_violation_gb"] = float(
+                baseline_cached.get("memory_violation_gb", 0.0) or 0.0
+            )
         else:
-            task_queue.append(
+            baseline_task_queue.append(
                 {
                     "kind": "baseline",
                     "settings": settings_copy,
@@ -1033,62 +1400,49 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                     "task_id": baseline_task_id,
                 }
             )
+        if debug_task_queue is not None:
+            for num_faults in NUM_FAULTS:
+                repeats = max(1, int(num_faults))
+                for fault_iter in range(FAULT_ITER):
+                    fault_specs: List[Tuple[int, float, int]] = []
+                    for _ in range(repeats):
+                        fault_value = sample_fault_magnitude()
+                        dim_choice, node_count = random.choice(candidates_for_config)
+                        fault_specs.append((dim_choice, fault_value, node_count))
 
-        for num_faults in NUM_FAULTS:
-            repeats = max(1, int(num_faults))
-            for _ in range(FAULT_ITER):
-                fault_specs: List[Tuple[int, float, int]] = []
-                for _ in range(repeats):
-                    fault_value = sample_fault_magnitude()
-                    dim_choice, node_count = random.choice(candidates_for_config)
-                    fault_specs.append((dim_choice, fault_value, node_count))
-
-                fault_task_id = _task_identifier(
-                    "fault",
-                    settings_key,
-                    faults=fault_specs,
-                    num_faults=repeats,
-                )
-                cached_fault = existing_results.get(fault_task_id)
-                if cached_fault is not None:
-                    runtime = cached_fault.get("runtime")
-                    if runtime is not None:
-                        records_by_key[key]["fault_runtimes"].append(float(runtime))
-                        cached_faults = _normalise_faults_raw(cached_fault.get("faults", []))
-                        records_by_key[key]["fault_details"].append(
-                            {
-                                "num_faults": cached_fault.get("num_faults"),
-                                "faults": cached_faults,
-                            }
-                        )
-                    continue
-                total_fault_tasks += 1
-                task_queue.append(
-                    {
-                        "kind": "fault",
-                        "settings": settings_copy,
-                        "key": key,
-                        "settings_key": settings_key,
-                        "task_id": fault_task_id,
-                        "faults": fault_specs,
-                        "num_faults": repeats,
-                    }
-                )
-
-    if not task_queue:
-        print("No new evaluation tasks; reusing cached results.")
-    else:
-        print(
-            f"Prepared {len(task_queue)} evaluation task(s) across "
-            f"{len(parallelism_samples)} configuration(s) "
-            f"(fault tasks: {total_fault_tasks})."
-        )
+                    fault_task_id = _task_identifier(
+                        "fault",
+                        settings_key,
+                        faults=fault_specs,
+                        num_faults=repeats,
+                        fault_iter=fault_iter,
+                    )
+                    cached_fault = existing_results.get(fault_task_id)
+                    if cached_fault is not None:
+                        continue
+                    debug_task_queue.append(
+                        {
+                            "kind": "fault",
+                            "settings": settings_copy,
+                            "key": key,
+                            "settings_key": settings_key,
+                            "task_id": fault_task_id,
+                            "faults": fault_specs,
+                            "num_faults": repeats,
+                            "fault_iter": fault_iter,
+                        }
+                    )
 
     if DEBUG_MODE:
-        if not task_queue:
+        debug_tasks: List[Dict[str, object]] = []
+        if baseline_task_queue:
+            debug_tasks.extend(baseline_task_queue)
+        if debug_task_queue:
+            debug_tasks.extend(debug_task_queue)
+        if not debug_tasks:
             print("Debug mode enabled but no evaluation tasks were generated.")
         else:
-            for task in task_queue:
+            for task in debug_tasks:
                 yaml_text = _generate_hw_yaml_from_task(base_hw_dict, task)
                 debug_entry = {
                     "kind": task.get("kind"),
@@ -1125,6 +1479,20 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
             return
         kind = result.get("kind")
         runtime = float(result.get("runtime", float("nan")))
+        memory_exceeded = bool(result.get("memory_exceeded", False))
+        memory_violation = float(result.get("memory_violation_gb", 0.0) or 0.0)
+        if memory_exceeded:
+            already_marked = rec.get("memory_exceeded", False)
+            rec["memory_exceeded"] = True
+            rec["memory_violation_gb"] = memory_violation
+            if not already_marked:
+                print(
+                    f"Skipping configuration {result.get('settings')} due to memory capacity violation "
+                    f"({memory_violation:.3f} GB).",
+                    file=sys.stderr,
+                )
+            _record_partial_result(results_store, result)
+            return
         if kind == "baseline":
             rec["baseline_runtime"] = runtime
         else:
@@ -1138,43 +1506,302 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
         _record_partial_result(results_store, result)
         _dump_debug_hw_config(result)
 
-    if task_queue:
-        if FAULT_WORKERS and FAULT_WORKERS > 1:
-            available_cpus = max(1, os.cpu_count() or 1)
-            worker_count = min(max(1, FAULT_WORKERS), len(task_queue), available_cpus)
-            print(f"Launching ProcessPoolExecutor with {worker_count} worker(s).")
-            executor = ProcessPoolExecutor(
-                max_workers=worker_count,
-                initializer=_parallelism_worker_init,
-                initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
-            )
-            try:
-                global _ACTIVE_EXECUTOR
-                _ACTIVE_EXECUTOR = executor
-                futures = [executor.submit(_parallelism_worker_task, task) for task in task_queue]
-                for fut in tqdm(as_completed(futures), total=len(futures), desc="Evaluations", unit="task"):
-                    try:
-                        result = fut.result()
-                    except Exception as exc:  # pragma: no cover - defensive
-                        print(f"Warning: parallel task raised an exception: {exc}", file=sys.stderr)
-                        continue
-                    handle_task_result(result)
-            finally:
-                _terminate_active_executor()
-        else:
-            print("Running tasks sequentially (FAULT_WORKERS <= 1).")
-            for task in tqdm(task_queue, desc="Evaluations", unit="task"):
+    def run_task_queue(
+        task_queue: List[Dict[str, object]],
+        desc: str,
+        executor: Optional[ProcessPoolExecutor] = None,
+    ) -> List[Dict[str, object]]:
+        if not task_queue:
+            return []
+        results: List[Dict[str, object]] = []
+        if executor is not None:
+            global _ACTIVE_EXECUTOR
+            _ACTIVE_EXECUTOR = executor
+            futures = [executor.submit(_parallelism_worker_task, task) for task in task_queue]
+            for fut in tqdm(as_completed(futures), total=len(futures), desc=desc, unit="task"):
                 try:
-                    result = _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task)
+                    result = fut.result()
                 except Exception as exc:  # pragma: no cover - defensive
-                    print(f"Warning: sequential task raised an exception: {exc}", file=sys.stderr)
+                    print(f"Warning: parallel task raised an exception: {exc}", file=sys.stderr)
                     continue
-                handle_task_result(result)
+                results.append(result)
+        else:
+            if FAULT_WORKERS and FAULT_WORKERS > 1:
+                available_cpus = max(1, os.cpu_count() or 1)
+                worker_count = min(max(1, FAULT_WORKERS), len(task_queue), available_cpus)
+                print(f"Launching ProcessPoolExecutor with {worker_count} worker(s) for {desc}.")
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    initializer=_parallelism_worker_init,
+                    initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+                )
+                try:
+                    _ACTIVE_EXECUTOR = executor
+                    futures = [executor.submit(_parallelism_worker_task, task) for task in task_queue]
+                    for fut in tqdm(as_completed(futures), total=len(futures), desc=desc, unit="task"):
+                        try:
+                            result = fut.result()
+                        except Exception as exc:  # pragma: no cover - defensive
+                            print(f"Warning: parallel task raised an exception: {exc}", file=sys.stderr)
+                            continue
+                        results.append(result)
+                finally:
+                    _terminate_active_executor()
+            else:
+                print(f"Running {desc} sequentially (FAULT_WORKERS <= 1).")
+                for task in tqdm(task_queue, desc=desc, unit="task"):
+                    try:
+                        result = _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        print(f"Warning: sequential task raised an exception: {exc}", file=sys.stderr)
+                        continue
+                    results.append(result)
+        return results
+
+    if baseline_task_queue:
+        print(f"Prepared {len(baseline_task_queue)} baseline task(s).")
+        baseline_results = run_task_queue(baseline_task_queue, "Baseline evaluations")
+        for result in baseline_results:
+            handle_task_result(result)
+    else:
+        print("No new baseline tasks; using cached results where available.")
+
+    # Fault evaluation with fairness: all configs share the same fault iteration index.
+    if not NUM_FAULTS or FAULT_ITER <= 0:
+        print("No fault iterations configured; skipping fault evaluations.")
+    else:
+        print("Beginning fault evaluations with fairness policy (max retries per iteration: 10).")
+
+    eligible_configs = []
+    for settings in parallelism_samples:
+        key = _parallelism_key(settings)
+        state = records_by_key.get(key) or {}
+        if state.get("memory_exceeded") or state.get("baseline_runtime") is None:
+            continue
+        candidates_for_config = _candidate_fault_dimensions(settings)
+        if not candidates_for_config:
+            continue
+        eligible_configs.append((settings, key, candidates_for_config))
+
+    fault_executor: Optional[ProcessPoolExecutor] = None
+    fault_worker_count = 0
+    progress_bar = None
+    try:
+        if eligible_configs and FAULT_WORKERS and FAULT_WORKERS > 1:
+            available_cpus = max(1, os.cpu_count() or 1)
+            fault_worker_count = min(max(1, FAULT_WORKERS), FAULT_ITER, available_cpus)
+            if fault_worker_count > 1:
+                print(f"Initializing shared ProcessPoolExecutor with {fault_worker_count} worker(s) for fault iterations.")
+                fault_executor = ProcessPoolExecutor(
+                    max_workers=fault_worker_count,
+                    initializer=_parallelism_worker_init,
+                    initargs=(base_hw_dict, MODEL_CONFIG_PATH, mode),
+                )
+                _ACTIVE_EXECUTOR = fault_executor
+
+        def _build_fault_iteration(iter_idx: int, repeats: int) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+            fault_task_queue: List[Dict[str, object]] = []
+            pending_results: List[Dict[str, object]] = []
+            for settings, key, candidates_for_config in eligible_configs:
+                fault_specs: List[Tuple[int, float, int]] = []
+                for _ in range(repeats):
+                    fault_value = sample_fault_magnitude()
+                    dim_choice, node_count = random.choice(candidates_for_config)
+                    fault_specs.append((dim_choice, fault_value, node_count))
+
+                fault_task_id = _task_identifier(
+                    "fault",
+                    key,
+                    faults=fault_specs,
+                    num_faults=repeats,
+                    fault_iter=iter_idx,
+                )
+                cached_fault = existing_results.get(fault_task_id)
+                if cached_fault is not None:
+                    if bool(cached_fault.get("memory_exceeded", False)):
+                        pending_results.append(
+                            {
+                                "status": "error",
+                                "kind": "fault",
+                                "key": key,
+                                "settings": settings,
+                                "settings_key": key,
+                                "task_id": fault_task_id,
+                                "memory_exceeded": True,
+                                "memory_violation_gb": cached_fault.get("memory_violation_gb", 0.0),
+                            }
+                        )
+                        continue
+                    runtime = cached_fault.get("runtime")
+                    if runtime is not None:
+                        pending_results.append(
+                            {
+                                "status": "ok",
+                                "kind": "fault",
+                                "key": key,
+                                "settings": settings,
+                                "settings_key": key,
+                                "task_id": fault_task_id,
+                                "runtime": float(runtime),
+                                "faults": cached_fault.get("faults", fault_specs),
+                                "num_faults": cached_fault.get("num_faults", repeats),
+                                "fault_iter": iter_idx,
+                                "memory_exceeded": False,
+                                "memory_violation_gb": float(cached_fault.get("memory_violation_gb", 0.0) or 0.0),
+                            }
+                        )
+                    continue
+
+                fault_task_queue.append(
+                    {
+                        "kind": "fault",
+                        "settings": settings,
+                        "key": key,
+                        "settings_key": key,
+                        "task_id": fault_task_id,
+                        "faults": fault_specs,
+                        "num_faults": repeats,
+                        "fault_iter": iter_idx,
+                    }
+                )
+            return fault_task_queue, pending_results
+
+        def _start_fault_iteration(iter_idx: int, repeats: int, attempt: int) -> None:
+            task_queue, cached_results = _build_fault_iteration(iter_idx, repeats)
+            if not task_queue and not cached_results:
+                if progress_bar is not None:
+                    progress_bar.update(1)
+                return
+            iteration_key = (iter_idx, repeats)
+            iteration_state[iteration_key] = {
+                "attempt": attempt,
+                "remaining": len(task_queue),
+                "results": list(cached_results),
+            }
+            if not task_queue:
+                _finalise_iteration(iteration_key)
+                return
+            for task in task_queue:
+                if fault_executor is not None:
+                    fut = fault_executor.submit(_parallelism_worker_task, task)
+                    in_flight[fut] = iteration_key
+                else:
+                    try:
+                        result = _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        result = {
+                            "status": "error",
+                            "kind": "fault",
+                            "key": task.get("key"),
+                            "settings": task.get("settings"),
+                            "settings_key": task.get("settings_key"),
+                            "task_id": task.get("task_id"),
+                            "error": str(exc),
+                        }
+                    iteration_state[iteration_key]["results"].append(result)
+                    iteration_state[iteration_key]["remaining"] -= 1
+            if fault_executor is None:
+                _finalise_iteration(iteration_key)
+
+        def _finalise_iteration(iteration_key: Tuple[int, int]) -> None:
+            state = iteration_state.get(iteration_key)
+            if state is None or state["remaining"] > 0:
+                return
+            iter_idx, repeats = iteration_key
+            all_results = state.get("results", [])
+            failed = any((res.get("status") != "ok") or bool(res.get("memory_exceeded", False)) for res in all_results)
+            if failed:
+                last_error = None
+                for res in reversed(all_results):
+                    if (res.get("status") != "ok") or bool(res.get("memory_exceeded", False)):
+                        if res.get("error"):
+                            last_error = str(res.get("error"))
+                            _dump_failure_hw_config(base_hw_dict, res, res.get("error"))
+                        elif res.get("memory_exceeded"):
+                            last_error = (
+                                f"memory exceeded ({float(res.get('memory_violation_gb', 0.0) or 0.0):.3f} GB over)"
+                            )
+                        else:
+                            last_error = "unknown error"
+                        break
+                attempt = state.get("attempt", 1)
+                if attempt >= 10:
+                    msg = (
+                        f"Omitting fault iteration {iter_idx} for num_faults={repeats} across all configs "
+                        f"after {attempt} failed attempt(s)."
+                    )
+                    if last_error:
+                        msg += f" Last error: {last_error}"
+                    print(msg, file=sys.stderr)
+                    if progress_bar is not None:
+                        progress_bar.update(1)
+                else:
+                    pending_iterations.append((iter_idx, repeats, attempt + 1))
+                iteration_state.pop(iteration_key, None)
+                return
+            for res in all_results:
+                handle_task_result(res)
+            iteration_state.pop(iteration_key, None)
+            if progress_bar is not None:
+                progress_bar.update(1)
+
+        if eligible_configs and NUM_FAULTS and FAULT_ITER > 0:
+            pending_iterations: deque[Tuple[int, int, int]] = deque()
+            for num_faults in NUM_FAULTS:
+                repeats = max(1, int(num_faults))
+                for iter_idx in range(FAULT_ITER):
+                    pending_iterations.append((iter_idx, repeats, 1))
+
+            in_flight: Dict[object, Tuple[int, int]] = {}
+            iteration_state: Dict[Tuple[int, int], Dict[str, object]] = {}
+            backlog_target = max(1, (fault_worker_count or 1) * 4)
+            total_iterations = len(pending_iterations)
+            progress_bar = tqdm(total=total_iterations, desc="Fault iterations", unit="iter")
+
+            while pending_iterations or in_flight:
+                while pending_iterations and (fault_executor is None or len(in_flight) < backlog_target):
+                    iter_idx, repeats, attempt = pending_iterations.popleft()
+                    _start_fault_iteration(iter_idx, repeats, attempt)
+
+                if fault_executor is None:
+                    if not pending_iterations:
+                        break
+                    continue
+
+                if not in_flight:
+                    continue
+                try:
+                    next_future = next(as_completed(list(in_flight.keys()), timeout=None))
+                except StopIteration:
+                    continue
+                iteration_key = in_flight.pop(next_future, None)
+                if iteration_key is None:
+                    continue
+                try:
+                    result = next_future.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    result = {"status": "error", "error": str(exc)}
+                state = iteration_state.get(iteration_key)
+                if state is not None:
+                    state["results"].append(result)
+                    state["remaining"] = max(0, int(state["remaining"]) - 1)
+                    _finalise_iteration(iteration_key)
+    finally:
+        try:
+            if progress_bar is not None:
+                progress_bar.close()
+        except Exception:
+            pass
+        if fault_executor is not None:
+            _ACTIVE_EXECUTOR = fault_executor
+            _terminate_active_executor()
 
     for settings in parallelism_samples:
         key = _parallelism_key(settings)
         state = records_by_key.get(key)
         if not state:
+            continue
+        if state.get("memory_exceeded"):
             continue
         baseline_runtime = state.get("baseline_runtime")
         if baseline_runtime is None:
