@@ -1418,6 +1418,8 @@ class LLMExecutionDispatcher:
             "persist_artifacts": self.time_calc.persist_astrasim_artifacts,
             "faulty_links_override": pipeline_fault_override,
         }
+        # Inference runs force AstraSim dp_override=1; use run_type here to keep
+        # transformer durations scalar without threading override through call sites.
         run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
         effective_dp = 1 if run_type == "inference" else max(1, getattr(self.time_calc, "dp", 1))
         if run_type == "inference":
@@ -1712,7 +1714,11 @@ class LLMExecutionDispatcher:
         else:
             roots = [self.pipeline_root]
 
-        dp_count = max(1, getattr(self.time_calc, "dp", 1))
+        run_type = str(getattr(getattr(self.time_calc, "model", None), "run_type", "training")).lower()
+        if run_type == "inference":
+            dp_count = 1
+        else:
+            dp_count = max(1, getattr(self.time_calc, "dp", 1))
 
         for root in roots:
             self._assign_transformer_durations(
