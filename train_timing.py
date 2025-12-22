@@ -610,10 +610,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             ]
             if mem_delta < 0:
                 info_lines.append(
-                    f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB"
+                    f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.2f} GiB"
                 )
             else:
-                info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GiB")
+                info_lines.append(f"Remaining memory headroom: {mem_delta:.2f} GiB")
             info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
             with open(info_path, "w", encoding="utf-8") as info_file:
                 info_file.write("\n".join(info_lines) + "\n")

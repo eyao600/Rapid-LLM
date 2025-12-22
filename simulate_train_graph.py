@@ -1459,7 +1459,7 @@ class Graph:
                         self._log_paths[gpu_idx] = log_path
                         log_file = open(log_path, "w", encoding="utf-8")
                         log_file.write(
-                            "timestamp_s | action               | delta_gib   | current_gib | peak_gib    | details\n"
+                            "timestamp_s | action               | delta_gib   | static_gib  | current_gib | peak_gib    | details\n"
                         )
                         self._log_files[gpu_idx] = log_file
 
@@ -1497,8 +1497,8 @@ class Graph:
                     getattr(node, "op_id", "N/A"),
                     getattr(node, "fwd", "N/A"),
                 )
-                self._record_change(gpu_id, action, size_bytes, timestamp, details=details)
                 self._update_peak(gpu_id)
+                self._record_change(gpu_id, action, size_bytes, timestamp, details=details)
 
             def release_activation(
                 self,
@@ -1576,12 +1576,14 @@ class Graph:
                     return
 
                 delta_gib = delta_bytes / BYTES_PER_GIB
+                static_gib = self.static[gpu_id] / BYTES_PER_GIB
                 current_gib = self.current[gpu_id] / BYTES_PER_GIB
                 peak_gib = self.peak[gpu_id] / BYTES_PER_GIB
-                line = "{:.6f} | {:<20} | {:>+.6f} | {:>+.6f} | {:>+.6f}".format(
+                line = "{:.6f} | {:<20} | {:>+.6f} | {:>+.6f} | {:>+.6f} | {:>+.6f}".format(
                     timestamp,
                     action,
                     delta_gib,
+                    static_gib,
                     current_gib,
                     peak_gib,
                 )

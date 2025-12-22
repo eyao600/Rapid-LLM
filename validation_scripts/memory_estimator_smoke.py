@@ -11,11 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(PROJECT_ROOT))
 
 import config
-import llm_util
-from inference_timing import TimeCalculationLLM
+import memory_estimation
 
 HARDWARE_CONFIG = PROJECT_ROOT / "configs" / "hardware-config" / "a100_80GB.yaml"
-MODEL_CONFIG = PROJECT_ROOT / "configs" / "model-config" / "Llama2-7B.yaml"
+TRAINING_MODEL_CONFIG = PROJECT_ROOT / "configs" / "model-config" / "Llama2-7B.yaml"
+INFERENCE_MODEL_CONFIG = PROJECT_ROOT / "configs" / "model-config" / "Llama2-7B_inf.yaml"
 OUTPUT_DIR = PROJECT_ROOT / "output" / "memory_estimator_smoke"
 MODE = "LLM"
 
@@ -45,7 +45,8 @@ SKIP_INFERENCE = False
 @dataclass(frozen=True)
 class SmokeConfig:
     hardware_config: str = str(HARDWARE_CONFIG)
-    model_config: str = str(MODEL_CONFIG)
+    training_model_config: str = str(TRAINING_MODEL_CONFIG)
+    inference_model_config: str = str(INFERENCE_MODEL_CONFIG)
     mode: str = MODE
     output_dir: str = str(OUTPUT_DIR)
     seq_len: Optional[int] = SEQ_LEN
@@ -135,9 +136,16 @@ def _configure_full_recompute(hw_cfg, enabled: bool) -> None:
         sw_cfg.full_recomputation = bool(enabled)
 
 
-def _load_configs(cfg: SmokeConfig, *, flash_enabled: bool, full_recompute: bool):
+def _load_configs(
+    cfg: SmokeConfig,
+    *,
+    flash_enabled: bool,
+    full_recompute: bool,
+    model_config_path: Optional[str] = None,
+):
     exp_hw_path = os.path.expandvars(os.path.expanduser(cfg.hardware_config))
-    exp_model_path = os.path.expandvars(os.path.expanduser(cfg.model_config))
+    model_config_path = model_config_path or cfg.training_model_config
+    exp_model_path = os.path.expandvars(os.path.expanduser(model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     exp_model_config = config.parse_config(exp_model_path, config_type=cfg.mode)
 
@@ -154,10 +162,13 @@ def _load_configs(cfg: SmokeConfig, *, flash_enabled: bool, full_recompute: bool
 
 def _run_inference_case(cfg: SmokeConfig, *, flash_enabled: bool, full_recompute: bool, label: str):
     exp_hw_config, exp_model_config = _load_configs(
-        cfg, flash_enabled=flash_enabled, full_recompute=full_recompute
+        cfg,
+        flash_enabled=flash_enabled,
+        full_recompute=full_recompute,
+        model_config_path=cfg.inference_model_config,
     )
     output_dir = os.path.join(cfg.output_dir, label)
-    summary = llm_util._test_mem_req_total(
+    summary = memory_estimation.estimate_inference_memory(
         exp_hw_config,
         exp_model_config,
         mode=cfg.mode,
@@ -180,16 +191,23 @@ def _run_inference_case(cfg: SmokeConfig, *, flash_enabled: bool, full_recompute
 
 def _run_training_case(cfg: SmokeConfig, *, flash_enabled: bool, full_recompute: bool, label: str):
     exp_hw_config, exp_model_config = _load_configs(
-        cfg, flash_enabled=flash_enabled, full_recompute=full_recompute
+        cfg,
+        flash_enabled=flash_enabled,
+        full_recompute=full_recompute,
+        model_config_path=cfg.training_model_config,
     )
     output_dir = os.path.join(cfg.output_dir, label)
-    tc = TimeCalculationLLM(exp_hw_config, exp_model_config, cfg.mode, output_dir=output_dir)
-    tc.calc_time_llm()
-    peak = float(getattr(tc, "memory_peak_gb", 0.0) or 0.0)
+    summary = memory_estimation.estimate_training_memory(
+        exp_hw_config,
+        exp_model_config,
+        mode=cfg.mode,
+        output_dir=output_dir,
+    )
+    peak = float(summary.get("peak_gb", 0.0) or 0.0)
     print(f"[training] {label}")
     print(f"  Peak (per gpu): {peak:.2f} GiB")
-    capacity = getattr(tc, "memory_capacity_per_device_gb", None)
-    headroom = getattr(tc, "memory_headroom_gb", None)
+    capacity = summary.get("capacity_gb")
+    headroom = summary.get("headroom_gb")
     if capacity is None:
         print("  Capacity (per gpu): unknown")
     else:

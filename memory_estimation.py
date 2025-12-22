@@ -266,3 +266,58 @@ class MemoryEstimator:
             mode=mode,
             filename=filename,
         )
+
+
+def estimate_inference_memory(
+    exp_hw_config,
+    exp_model_config,
+    *,
+    mode: str = "LLM",
+    output_dir: Optional[str] = None,
+    **overrides,
+) -> Dict[str, Any]:
+    return llm_util.estimate_inference_memory(
+        exp_hw_config,
+        exp_model_config,
+        mode=mode,
+        output_dir=output_dir,
+        **overrides,
+    )
+
+
+def estimate_training_memory(
+    exp_hw_config,
+    exp_model_config,
+    *,
+    mode: str = "LLM",
+    output_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    from inference_timing import TimeCalculationLLM
+
+    tc = TimeCalculationLLM(exp_hw_config, exp_model_config, mode, output_dir=output_dir)
+    return tc.estimate_memory_only()
+
+
+def estimate_memory(
+    exp_hw_config,
+    exp_model_config,
+    *,
+    mode: str = "LLM",
+    output_dir: Optional[str] = None,
+    **overrides,
+) -> Dict[str, Any]:
+    run_type = str(getattr(exp_model_config.model_config, "run_type", "training")).lower()
+    if run_type == "inference":
+        return estimate_inference_memory(
+            exp_hw_config,
+            exp_model_config,
+            mode=mode,
+            output_dir=output_dir,
+            **overrides,
+        )
+    return estimate_training_memory(
+        exp_hw_config,
+        exp_model_config,
+        mode=mode,
+        output_dir=output_dir,
+    )

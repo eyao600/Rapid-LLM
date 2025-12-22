@@ -218,7 +218,7 @@ def get_embedding_weight_mem(
     output_head = 0 if tied_embeddings else per_matrix * param_replica_factor
     return input_embed + output_head
     
-def _test_mem_req_total(exp_hw_config, exp_model_config, **kwargs):
+def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
     """Run graph-based memory estimation for prefill + final decode peaks."""
     mode = kwargs.get("mode", "LLM")
     output_dir = kwargs.get(
@@ -407,6 +407,10 @@ def _test_mem_req_total(exp_hw_config, exp_model_config, **kwargs):
     }
 
 
+def _test_mem_req_total(exp_hw_config, exp_model_config, **kwargs):
+    return estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs)
+
+
 # ====================================================================
 # DECODE-SPECIFIC UTILITIES FOR AUTOREGRESSIVE INFERENCE
 # ====================================================================
@@ -541,7 +545,7 @@ if __name__ == "__main__":
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
     exp_model_config = config.parse_config(exp_model_path, config_type="LLM")
-    summary = _test_mem_req_total(
+    summary = estimate_inference_memory(
         exp_hw_config,
         exp_model_config,
     )

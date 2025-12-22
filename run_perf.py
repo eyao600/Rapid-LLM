@@ -6,6 +6,7 @@ import sys
 import config
 import time
 import atexit
+from typing import Dict
 from astrasim_lib import ensure_chakra_available
 import pandas as pd
 import yaml
@@ -17,6 +18,7 @@ from tile import TiledGEMM, formatBytes
 from base_timing import TimeCalculation
 from inference_timing import TimeCalculationLLM
 from train_timing import TimeCalculationLLMInference
+from memory_estimation import estimate_memory
 
 # Cache handling policy for AstraSim integration.
 # Options: "NO CACHE", "CACHE READONLY", "CACHE READWRITE"
@@ -35,6 +37,13 @@ DEFAULT_OUTPUT_DIR = "output"
 
 # Global wall-clock timer: report total program runtime at exit
 _program_start_time = time.perf_counter()
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized not in {"", "0", "false", "no"}
 
 def _report_total_wall_time() -> None:
     try:
@@ -78,6 +87,27 @@ def _validate_astrasim_dependencies(hw_config) -> None:
             "Hardware configuration requests the AstraSim execution backend, but the Chakra protobuf dependencies "
             "are not available. Install or build the AstraSim externals before running with execution_backend.model='astra'."
         ) from exc
+
+def _emit_memory_summary(run_type: str, summary: Dict[str, object]) -> None:
+    run_type = str(run_type or "training").lower()
+    if run_type == "inference":
+        print("Memory-only inference estimation")
+        print(f"  Prefill peak (per gpu): {float(summary.get('prefill_peak_gb', 0.0)):.2f} GiB")
+        print(f"  Final decode peak (per gpu): {float(summary.get('decode_peak_gb', 0.0)):.2f} GiB")
+        print(f"  Max peak (per gpu): {float(summary.get('max_peak_gb', 0.0)):.2f} GiB")
+    else:
+        print("Memory-only training estimation")
+        print(f"  Peak (per gpu): {float(summary.get('peak_gb', 0.0)):.2f} GiB")
+    capacity = summary.get("capacity_gb")
+    headroom = summary.get("headroom_gb")
+    if capacity is None:
+        print("  Capacity (per gpu): unknown")
+    else:
+        print(f"  Capacity (per gpu): {float(capacity):.2f} GiB")
+    if headroom is None:
+        print("  Headroom: unknown")
+    else:
+        print(f"  Headroom: {float(headroom):.2f} GiB")
 
 def run_GEMM(
     exp_hw_config_path,
@@ -154,11 +184,21 @@ def run_LLM(
     exp_hw_path = os.path.expandvars(os.path.expanduser(exp_hw_config_path))
     exp_model_path = os.path.expandvars(os.path.expanduser(exp_model_config_path))
     exp_hw_config = config.parse_config(exp_hw_path, config_type="hardware")
+    mem_only = _env_flag("RAPID_MEM_ONLY")
     _validate_astrasim_dependencies(exp_hw_config)
     exp_model_config = config.parse_config(exp_model_path, config_type=mode)
     config.validate_configs(exp_hw_config, exp_model_config)
 
     llm_run_type = getattr(exp_model_config.model_config, "run_type", "training")
+    if mem_only:
+        summary = estimate_memory(
+            exp_hw_config,
+            exp_model_config,
+            mode=mode,
+            output_dir=exp_dir,
+        )
+        _emit_memory_summary(llm_run_type, summary)
+        return
     if str(llm_run_type).lower() == "inference":
         _run_llm_inference(exp_hw_config, exp_model_config, exp_dir, mode)
         return

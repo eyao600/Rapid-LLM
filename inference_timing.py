@@ -2741,9 +2741,7 @@ class TimeCalculationLLM(TimeCalculation):
             interconnect_params,
         )
 
-    def calc_time_llm(self):
-        """Calculate time for LLM model."""
-        # Extract model parameters
+    def _build_training_graphs_and_memory_data(self):
         batch_size = self._effective_transformer_batch()
         vocab_size = self.vocab_size
         hidden_dim = self.hidden_dim
@@ -2751,7 +2749,7 @@ class TimeCalculationLLM(TimeCalculation):
         num_heads = self.num_heads
         intermediate_size = self.intermediate_size
         kv_heads = self.kv_heads
-        
+
         # ZeRO data-parallel stages:
         #   stage 0 – identical to DDP (replicated params/grads/optimizer)
         #   stage 1 – shard optimizer state only (communication unchanged)
@@ -2889,6 +2887,12 @@ class TimeCalculationLLM(TimeCalculation):
         self.pipeline_graph_no_dp = pipeline_graph_obj_no_dp
         self.pipeline_root_no_dp = graph_root_no_dp
 
+        return mem_estimator, memory_data
+
+    def calc_time_llm(self):
+        """Calculate time for LLM model."""
+        mem_estimator, memory_data = self._build_training_graphs_and_memory_data()
+
         mode = self.execution_mode
         time_fw_bw_no_dp: Optional[float] = None
         if self.gradient_accumulation_steps > 1:
@@ -2951,6 +2955,36 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             self.tot_time = time_fw_bw
         return self.tot_time
+
+    def estimate_memory_only(self) -> Dict[str, Any]:
+        mem_estimator, memory_data = self._build_training_graphs_and_memory_data()
+
+        dispatcher = LLMExecutionDispatcher(
+            time_calc=self,
+            pipeline_graph=self.pipeline_graph,
+            pipeline_root=self.pipeline_root,
+            interconnect_params=self.pipeline_interconnect,
+            transformer_graph=self.transformer_graph,
+            transformer_forward_root=self.transformer_forward_root,
+            transformer_backward_root=self.transformer_backward_root,
+            no_data_parallel=False,
+        )
+        memory_root = dispatcher.build_flattened_root_for_memory()
+        _, training_peak_gb = mem_estimator.simulate_peak(
+            memory_root,
+            memory_data,
+            mode="training",
+            filename="memory_graph_training",
+        )
+
+        return {
+            "peak_gb": float(training_peak_gb),
+            "capacity_gb": getattr(self, "memory_capacity_per_device_gb", None),
+            "headroom_gb": getattr(self, "memory_headroom_gb", None),
+            "capacity_exceeded": bool(getattr(self, "memory_capacity_exceeded", False)),
+            "capacity_violation_gb": float(getattr(self, "memory_capacity_violation_gb", 0.0) or 0.0),
+            "output_dir": self.output_dir,
+        }
         
     def _simulate_with_memory( 
         self,
@@ -2986,7 +3020,7 @@ class TimeCalculationLLM(TimeCalculation):
             info_lines = [
                 f"Simulation mode: {mode}",
                 f"Hardware memory capacity (per gpu): {hardware_mem_gib:.2f} GiB",
-                f"Simulated peak memory usage(per gpu): {peak_mem:.2} GiB",
+                f"Simulated peak memory usage(per gpu): {peak_mem:.2f} GiB",
             ]
             if self.zero_stage >= 3 and self.zero3_ephemeral_peak_bytes:
                 info_lines.append(
@@ -2995,11 +3029,11 @@ class TimeCalculationLLM(TimeCalculation):
                     )
                 )
             if mem_delta < 0:
-                info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.6f} GiB")
+                info_lines.append(f"[WARN] Peak memory exceeds capacity by {abs(mem_delta):.2f} GiB")
                 self.memory_capacity_exceeded = True
                 self.memory_capacity_violation_gb = max(self.memory_capacity_violation_gb, abs(mem_delta))
             else:
-                info_lines.append(f"Remaining memory headroom: {mem_delta:.6f} GiB")
+                info_lines.append(f"Remaining memory headroom: {mem_delta:.2f} GiB")
             info_path = os.path.join(memory_dir, "memory_capacity_comparison.txt")
             with open(info_path, "w", encoding="utf-8") as info_file:
                 info_file.write("\n".join(info_lines) + "\n")
