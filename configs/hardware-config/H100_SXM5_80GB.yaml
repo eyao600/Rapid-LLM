@@ -15,20 +15,16 @@ sw_param:
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
     # For FP32 or other formats they need to be manually adjusted.
     # The following are equivalent: (tensor_format: 2.0, tensor_format: fp16, tensor_format: bf16).
-    tensor_format: bf16  # baseline storage width for activations/gradients.
-    # mixed_precision: true | false
-    # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes.
-    # -> true enables AMP-style FP32 accumulations/optimizer states depending on param_storage_mode.
-    # if true, optimizer states and stats are always FP32.
-    mixed_precision: true
-    # param_storage_mode: as_tensor_format | tensor_plus_fp32_master | fp32_params.
-    # -> as_tensor_format makes weights/gradients use tensor_format bytes.
-    # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
-    #    keeps a separate FP32 master copy for weights.
-    # -> fp32_params makes weights *and* gradients use FP32 bytes without a master copy.
-    param_storage_mode: as_tensor_format
-    # kv_cache precision may be set as bytes, dtype string, or "as_tensor_format".
-    kv_cache: as_tensor_format
+    tensor_format: bf16  # baseline storage width for activations
+    # Each field accepts: numeric byte counts, dtype strings (fp8/fp16/bf16/fp32), or "as_tensor_format"
+    kv_cache: as_tensor_format # KV cache precision. WIP - currently ignored.
+    parameters: as_tensor_format  # Model parameter precision
+    gradients: as_tensor_format  # Accumulated gradients 
+    grad_microbatch: as_tensor_format  # Ephemeral per-microbatch gradients 
+    grad_communication: as_tensor_format  # Gradient communication precision 
+    optimizer_states: as_tensor_format  # Optimizer states 
+    stats: as_tensor_format  # Normalization statistics 
+    master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
   h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
   # DP gradient sync frequency: every_mb (default) or last_mb (sync only on final microbatch; ZeRO-3 stays per-mb)
   dp_microbatch: last_mb

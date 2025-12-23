@@ -9,20 +9,16 @@ sw_param:
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
     # For FP32 or other formats they need to be manually adjusted.
     # The following are equivalent: (tensor_format: 2.0, tensor_format: fp16, tensor_format: bf16).
-    tensor_format: bf16  # baseline storage width for activations/gradients.
-    # mixed_precision: true | false
-    # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes.
-    # -> true enables AMP-style FP32 accumulations/optimizer states depending on param_storage_mode.
-    # if true, optimizer states and stats are always FP32.
-    mixed_precision: true
-    # param_storage_mode: as_tensor_format | tensor_plus_fp32_master | fp32_params.
-    # -> as_tensor_format makes weights/gradients use tensor_format bytes.
-    # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
-    #    keeps a separate FP32 master copy for weights.
-    # -> fp32_params makes weights *and* gradients use FP32 bytes without a master copy.
-    param_storage_mode: as_tensor_format
-    # kv_cache precision may be set as bytes, dtype string, or "as_tensor_format".
-    kv_cache: as_tensor_format
+    tensor_format: bf16  # baseline storage width for activations
+    # Each field accepts: numeric byte counts, dtype strings (fp8/fp16/bf16/fp32), or "as_tensor_format"
+    kv_cache: as_tensor_format # KV cache precision. WIP - currently ignored.
+    parameters: as_tensor_format  # Model parameter precision
+    gradients: as_tensor_format  # Accumulated gradients 
+    grad_microbatch: as_tensor_format  # Ephemeral per-microbatch gradients 
+    grad_communication: as_tensor_format  # Gradient communication precision 
+    optimizer_states: as_tensor_format  # Optimizer states 
+    stats: as_tensor_format  # Normalization statistics 
+    master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
   h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
   # DP gradient sync frequency: every_mb (default) or last_mb (sync only on final microbatch; ZeRO-3 stays per-mb)
   dp_microbatch: last_mb
@@ -42,7 +38,7 @@ tech_param:
     bandwidth: 1986 GB     # (/s)
     dynamic_energy_per_bit: 4.5e-12     # (J)
     latency: 100e-9     # (s)
-    util: 1
+    util: 1.0
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB
@@ -87,9 +83,9 @@ parallelism:
 
 network:
   overlap:
-    tp_overlap: 0.6
-    tp_sp_overlap: 0.63
-    cp_overlap: 1.0
+    tp_overlap: 0.63
+    tp_sp_overlap: 0.6
+    cp_overlap: 0.0
   # Global faulty links apply to the active AstraSim dimension: [[src, dst, weight]]
   # faulty_links: [[0,1,0.6],[16,17,0.1]]
   dimensions:
@@ -146,6 +142,7 @@ execution_backend:
       endpoint_delay: 5
       active_chunks_per_dimension: 32 # Higher value means significantly slower astrasim runtime, but more accurate especially for tensor parallelism
       preferred_dataset_splits: 4 # Should be same as active_chunks_per_dimension
+      collective_arbitration: last_resort  
 
 inference:
   kvcache_type: hbm_only # Only supported mode for now.

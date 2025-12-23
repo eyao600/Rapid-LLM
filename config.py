@@ -19,8 +19,6 @@ _PRECISION_DTYPE_BYTES = {
 @dataclass(frozen=True)
 class PrecisionConfig:
     tensor: float
-    mixed_precision: bool
-    param_storage_mode: str
     kv_cache: float
     parameters: float
     gradients: float
@@ -64,50 +62,65 @@ def _coerce_precision_value(value, *, tensor_bytes: Optional[float] = None, allo
 
 
 def _parse_precision_block(spec: dict) -> PrecisionConfig:
+    """Parse precision configuration by directly reading each precision type.
+
+    Each field can be:
+    - A numeric byte count (e.g., 2.0, 4.0)
+    - A dtype string (e.g., "fp16", "bf16", "fp32")
+    - "as_tensor_format" (only for kv_cache, parameters, gradients, grad_microbatch, grad_communication)
+    """
     tensor_bytes = _coerce_precision_value(spec["tensor_format"])
-    mixed = bool(spec["mixed_precision"])
 
-    raw_mode = str(spec["param_storage_mode"]).strip().lower()
-    if raw_mode not in {"as_tensor_format", "tensor_plus_fp32_master", "fp32_params"}:
-        raise ValueError(
-            "sw_param.precision.param_storage_mode must be one of 'as_tensor_format', "
-            "'tensor_plus_fp32_master', or 'fp32_params'"
-        )
-    if raw_mode == "tensor_plus_fp32_master" and not mixed:
-        raise ValueError("tensor_plus_fp32_master requires mixed_precision=true")
-
+    # Parse each precision field directly
     kv_cache_bytes = _coerce_precision_value(
         spec["kv_cache"],
         tensor_bytes=tensor_bytes,
         allow_as_tensor=True,
     )
 
-    if not mixed:
-        parameter_bytes = tensor_bytes
-        gradient_bytes = tensor_bytes
-        grad_comm_bytes = tensor_bytes
-        optimizer_bytes = tensor_bytes
-        stats_bytes = tensor_bytes
-        effective_mode = "as_tensor_format"
+    parameter_bytes = _coerce_precision_value(
+        spec.get("parameters", "as_tensor_format"),
+        tensor_bytes=tensor_bytes,
+        allow_as_tensor=True,
+    )
+
+    gradient_bytes = _coerce_precision_value(
+        spec.get("gradients", "fp32"),  # Default to FP32 for accumulated gradients
+        tensor_bytes=tensor_bytes,
+        allow_as_tensor=True,
+    )
+
+    grad_comm_bytes = _coerce_precision_value(
+        spec.get("grad_communication", "as_tensor_format"),
+        tensor_bytes=tensor_bytes,
+        allow_as_tensor=True,
+    )
+
+    optimizer_bytes = _coerce_precision_value(
+        spec.get("optimizer_states", "fp32"),  # Default to FP32 for optimizer states
+        tensor_bytes=tensor_bytes,
+        allow_as_tensor=True,
+    )
+
+    stats_bytes = _coerce_precision_value(
+        spec.get("stats", "fp32"),  # Default to FP32 for stats
+        tensor_bytes=tensor_bytes,
+        allow_as_tensor=True,
+    )
+
+    # master_parameters can be 0 (no master copy) or a positive value
+    master_raw = spec.get("master_parameters", 0.0)
+    if isinstance(master_raw, (int, float)) and master_raw == 0.0:
         master_bytes = 0.0
     else:
-        effective_mode = raw_mode
-        optimizer_bytes = 4.0 # FP32
-        stats_bytes = 4.0 # FP32
-        master_bytes = 4.0 if raw_mode == "tensor_plus_fp32_master" else 0.0
-        if raw_mode == "fp32_params":
-            parameter_bytes = 4.0 # FP32
-            gradient_bytes = 4.0 # FP32
-            grad_comm_bytes = 4.0 # FP32
-        else:
-            parameter_bytes = tensor_bytes
-            gradient_bytes = tensor_bytes
-            grad_comm_bytes = tensor_bytes
+        master_bytes = _coerce_precision_value(
+            master_raw,
+            tensor_bytes=tensor_bytes,
+            allow_as_tensor=False,
+        )
 
     return PrecisionConfig(
         tensor=tensor_bytes,
-        mixed_precision=mixed,
-        param_storage_mode=effective_mode,
         kv_cache=kv_cache_bytes,
         parameters=parameter_bytes,
         gradients=gradient_bytes,

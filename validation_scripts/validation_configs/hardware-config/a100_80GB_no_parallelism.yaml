@@ -13,19 +13,22 @@ sw_param:
     # For FP32 or other formats they need to be manually adjusted.
     # The following are equivalent: (tensor_format: 2.0, tensor_format: fp16, tensor_format: bf16).
     tensor_format: bf16  # baseline storage width for activations/gradients.
-    # mixed_precision: true | false
-    # -> false forces all activations/weights/gradients/optimizer states/stats to use tensor_format bytes.
-    # -> true enables AMP-style FP32 accumulations/optimizer states depending on param_storage_mode.
-    # if true, optimizer states and stats are always FP32.
-    mixed_precision: false
-    # param_storage_mode: as_tensor_format | tensor_plus_fp32_master | fp32_params.
-    # -> as_tensor_format makes weights/gradients use tensor_format bytes.
-    # -> tensor_plus_fp32_master makes weights/gradients use tensor_format bytes and
-    #    keeps a separate FP32 master copy for weights.
-    # -> fp32_params makes weights *and* gradients use FP32 bytes without a master copy.
-    param_storage_mode: as_tensor_format
     # kv_cache precision may be set as bytes, dtype string, or "as_tensor_format".
     kv_cache: as_tensor_format
+    # Model parameter precision
+    parameters: as_tensor_format
+    # Accumulated gradients (BF16, no FP32 accumulation)
+    gradients: as_tensor_format
+    # Ephemeral per-microbatch gradients
+    grad_microbatch: as_tensor_format
+    # Gradient communication precision
+    grad_communication: as_tensor_format
+    # Optimizer states (BF16)
+    optimizer_states: as_tensor_format
+    # Training statistics (BF16)
+    stats: as_tensor_format
+    # FP32 master weight copy (0 = disabled)
+    master_parameters: 0.0
   h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
   # DP gradient sync frequency: every_mb (default) or last_mb (sync only on final microbatch; ZeRO-3 stays per-mb)
   dp_microbatch: last_mb
