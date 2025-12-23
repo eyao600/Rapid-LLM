@@ -21,10 +21,12 @@ import json
 import math
 import os
 import random
+import traceback
 import shutil
 import sys
 import tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stdout, redirect_stderr
 from typing import Dict, Iterable, List, Tuple
 from pathlib import Path
@@ -60,10 +62,10 @@ MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-405B.yaml"
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
 # Keys should match the entries under the YAML "parallelism" section.
 PARALLELISM_SWEEP = {
-    "tp": [2**i for i in range(0, 9)],
-    "cp": [2**i for i in range(0, 9)],
-    "dp": [2**i for i in range(0, 9)],
-    "lp": [2**i for i in range(0, 9)],
+    "tp": [2**i for i in range(0, 6)],
+    "cp": [2**i for i in range(0, 6)],
+    "dp": [2**i for i in range(0, 11)],
+    "lp": [2**i for i in range(0, 5)],
 }
 
 # Optional knobs that still live inside the parallelism section but do not
@@ -74,10 +76,10 @@ OTHER_PARALLELISM_OPTIONS = {
 
 # GPU count filter: only evaluate combinations whose TP*CP*DP*LP fall inside
 # this inclusive range.
-GPU_COUNT_MIN = 64
-GPU_COUNT_MAX = 1024
-TP_CP_PRODUCT_MIN = None  # Optional: set to int to filter tp*cp below this threshold.
-TP_CP_PRODUCT_MAX = None  # Optional: set to int to filter tp*cp above this threshold.
+GPU_COUNT_MIN = 128
+GPU_COUNT_MAX = 2048
+TP_CP_PRODUCT_MIN = 1  # Optional: set to int to filter tp*cp below this threshold.
+TP_CP_PRODUCT_MAX = 128  # Optional: set to int to filter tp*cp above this threshold.
 
 # When True, discard configurations whose tp*cp product is not a square power of two.
 ENFORCE_SQUARE_TP_CP = False
@@ -91,6 +93,9 @@ PLOT_METRIC = "runtime"
 PLOT_JITTER_SEED = 1234
 # Maximum absolute horizontal jitter (in GPU units).
 PLOT_JITTER_WIDTH = 0.175
+# Swarm/point styling for better visibility.
+PLOT_POINT_SIZE = 5.0
+PLOT_POINT_EDGE = 0.2
 
 # Default output artefacts
 PLOT_OUTPUT_PATH = "tools/parallelism_sweep.png"
@@ -108,9 +113,12 @@ ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWR
 
 # Plotting behaviour toggles
 MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in plots.
+EVALUATE_MEMORY_EXCEEDED = False  # When True, still compute runtime even if memory limits are exceeded (may crash).
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 20
+MAX_WORKERS = 55
+# When True, use a thread pool instead of a process pool (more stable, avoids worker crashes at the cost of GIL contention).
+USE_THREADPOOL = True
 
 
 # -----------------------------------------------------------------------------
@@ -530,7 +538,7 @@ def evaluate_parallelism(hw_dict, model_config_obj, mode, parallel_settings, hw_
         calculator = TimeCalculationLLM(hw_config, model_config_obj, mode, output_dir=temp_dir)
         mem_exceeded = bool(getattr(calculator, "memory_capacity_exceeded", False))
         mem_violation = float(getattr(calculator, "memory_capacity_violation_gb", 0.0) or 0.0)
-        if mem_exceeded:
+        if mem_exceeded and not EVALUATE_MEMORY_EXCEEDED:
             total_flops = compute_total_flops(calculator)
             peak_flops = gpu_peak_flops(hw_config)
             num_gpus = total_gpu_count(parallel_settings)
@@ -808,11 +816,35 @@ def plot_results(results, output_path):
         y=metric_key,
         hue="row_id",
         palette=palette,   # per-point RGBA
-        size=3.75,
-        linewidth=0,
+        size=PLOT_POINT_SIZE,
+        linewidth=PLOT_POINT_EDGE,
+        edgecolor="black",
         dodge=False,
         legend=False
     )
+    has_points = False
+    for coll in ax.collections:
+        get_offsets = getattr(coll, "get_offsets", None)
+        offsets = get_offsets() if callable(get_offsets) else None
+        if offsets is not None and len(offsets):
+            has_points = True
+            break
+    if not has_points:
+        ax.clear()
+        rng = np.random.RandomState(PLOT_JITTER_SEED)
+        x_base = df["gpu_exp_cat"].cat.codes.to_numpy(dtype=float)
+        jitter = rng.uniform(-0.28, 0.28, size=len(df))
+        xs = x_base + jitter
+        ys = df[metric_key].to_numpy(dtype=float)
+        colors = [palette[rid] for rid in df["row_id"]]
+        ax.scatter(
+            xs,
+            ys,
+            s=PLOT_POINT_SIZE ** 2,
+            c=colors,
+            edgecolor="black",
+            linewidth=PLOT_POINT_EDGE,
+        )
     # add_rgb_ternary_legend(
     #     ax,
     #     corner_labels=("R = log2(tp+cp)", "G = log2(lp)", "B = log2(dp)"),
@@ -837,7 +869,11 @@ def plot_results(results, output_path):
     ax.set_xlabel("Number of GPUs")
     if metric_key == "runtime":
         ax.set_ylabel("Runtime (s)")
-        ax.set_yscale("log")
+        min_metric = float(df[metric_key].min())
+        if min_metric > 0:
+            ax.set_yscale("log")
+        else:
+            print("Warning: non-positive runtime values; using linear scale.", file=sys.stderr)
     else:
         ax.set_ylabel("Performance (1 / s)")
 
@@ -1210,12 +1246,28 @@ def _worker_task(parallel_items: Tuple[Tuple[str, object], ...]):
             "parallelism": parallel_settings,
             "metrics": metrics,
         }
-    except Exception as exc:
+    except BaseException as exc:
         return {
             "status": "error",
             "parallelism": parallel_settings,
-            "error": str(exc),
+            "error": f"{exc.__class__.__name__}: {exc}",
+            "traceback": traceback.format_exc(),
         }
+
+
+def _run_task_in_isolated_process(
+    parallel_items: Tuple[Tuple[str, object], ...],
+    hw_dict,
+    model_config_path: str,
+    mode: str,
+):
+    with ProcessPoolExecutor(
+        max_workers=1,
+        initializer=_worker_init,
+        initargs=(hw_dict, model_config_path, mode),
+    ) as executor:
+        future = executor.submit(_worker_task, parallel_items)
+        return future.result()
 
 
 def _build_tasks(
@@ -1331,9 +1383,57 @@ def main():
         results = []
         results_from_report = False
         skipped_errors = 0
-        skipped_memory = 0
+        memory_violations = 0
         error_messages: List[str] = []
         evaluated = 0
+
+        def _consume_worker_result(result: Dict[str, object]) -> None:
+            nonlocal skipped_errors, memory_violations, evaluated, cache_dirty
+            settings = result.get("parallelism", {})
+            num_gpus = total_gpu_count(settings)
+            if result.get("status") != "ok":
+                skipped_errors += 1
+                msg = result.get("error") or "unknown error"
+                tb = result.get("traceback")
+                if tb:
+                    error_messages.append(f"{settings}: {msg}\n{tb}")
+                else:
+                    error_messages.append(f"{settings}: {msg}")
+                return
+            metrics = result.get("metrics", {})
+            entry = {
+                "parallelism": settings,
+                "num_gpus": num_gpus,
+                "runtime": metrics["runtime"],
+                "performance": metrics["performance"],
+                "total_flops": metrics["total_flops"],
+                "achieved_flops": metrics["achieved_flops"],
+                "peak_flops": metrics["peak_flops"],
+                "mfu": metrics["mfu"],
+                "memory_exceeded": metrics["memory_exceeded"],
+                "memory_violation_gb": metrics["memory_violation_gb"],
+            }
+            key = _cache_key(hw_path, model_cache_id, settings)
+            runtime_cache[key] = {
+                "hardware_config": str(Path(hw_path).resolve()),
+                "model_config": model_cache_id,
+                "parallelism": dict(settings),
+                "num_gpus": num_gpus,
+                "runtime": entry["runtime"],
+                "performance": entry["performance"],
+                "total_flops": entry["total_flops"],
+                "achieved_flops": entry["achieved_flops"],
+                "peak_flops": entry["peak_flops"],
+                "mfu": entry["mfu"],
+                "memory_exceeded": entry["memory_exceeded"],
+                "memory_violation_gb": entry["memory_violation_gb"],
+            }
+            cache_dirty = True
+
+            if metrics.get("memory_exceeded"):
+                memory_violations += 1
+            evaluated += 1
+            results.append(entry)
 
         if os.path.exists(report_path):
             try:
@@ -1376,59 +1476,107 @@ def main():
                     results.append(entry)
 
                 if worker_count > 1 and len(tasks_to_eval) > 1:
-                    with ProcessPoolExecutor(
-                        max_workers=worker_count,
-                        initializer=_worker_init,
-                        initargs=(base_hw_dict, model_config_path, mode),
-                    ) as executor:
-                        futures = {executor.submit(_worker_task, items): items for items in tasks_to_eval}
-                        with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
-                            for future in as_completed(futures):
-                                progress.update(1)
-                                result = future.result()
-                                settings = result["parallelism"]
-                                num_gpus = total_gpu_count(settings)
-                                if result["status"] != "ok":
-                                    skipped_errors += 1
-                                    msg = result.get("error") or "unknown error"
-                                    error_messages.append(f"{settings}: {msg}")
-                                    continue
-                                metrics = result["metrics"]
-                                entry = {
-                                    "parallelism": settings,
-                                    "num_gpus": num_gpus,
-                                    "runtime": metrics["runtime"],
-                                    "performance": metrics["performance"],
-                                    "total_flops": metrics["total_flops"],
-                                    "achieved_flops": metrics["achieved_flops"],
-                                    "peak_flops": metrics["peak_flops"],
-                                    "mfu": metrics["mfu"],
-                                    "memory_exceeded": metrics["memory_exceeded"],
-                                    "memory_violation_gb": metrics["memory_violation_gb"],
-                                }
-                                key = _cache_key(hw_path, model_cache_id, settings)
-                                runtime_cache[key] = {
-                                    "hardware_config": str(Path(hw_path).resolve()),
-                                    "model_config": model_cache_id,
-                                    "parallelism": dict(settings),
-                                    "num_gpus": num_gpus,
-                                    "runtime": entry["runtime"],
-                                    "performance": entry["performance"],
-                                    "total_flops": entry["total_flops"],
-                                    "achieved_flops": entry["achieved_flops"],
-                                    "peak_flops": entry["peak_flops"],
-                                    "mfu": entry["mfu"],
-                                    "memory_exceeded": entry["memory_exceeded"],
-                                    "memory_violation_gb": entry["memory_violation_gb"],
-                                }
-                                cache_dirty = True
+                    futures = {}
+                    processed_futures = set()
+                    pending_items: List[Tuple[Tuple[str, object], ...]] = []
+                    pool_broken = False
 
-                                if metrics.get("memory_exceeded"):
-                                    skipped_memory += 1
-                                    results.append(entry)
+                    def _retry_isolated(items: Tuple[Tuple[str, object], ...]) -> None:
+                        nonlocal skipped_errors
+                        try:
+                            result = _run_task_in_isolated_process(items, base_hw_dict, model_config_path, mode)
+                        except BrokenProcessPool as exc2:
+                            skipped_errors += 1
+                            error_messages.append(f"{dict(items)}: isolated worker died ({exc2})")
+                            return
+                        except BaseException as exc2:
+                            skipped_errors += 1
+                            error_messages.append(
+                                f"{dict(items)}: isolated retry crashed ({exc2.__class__.__name__}: {exc2})\n"
+                                f"{traceback.format_exc()}"
+                            )
+                            return
+                        _consume_worker_result(result)
+
+                    try:
+                        if USE_THREADPOOL:
+                            Executor = ThreadPoolExecutor
+                            executor_kwargs = {"max_workers": worker_count}
+                            # Threads share process memory; seed globals once.
+                            _worker_init(base_hw_dict, model_config_path, mode)
+                        else:
+                            Executor = ProcessPoolExecutor
+                            executor_kwargs = {
+                                "max_workers": worker_count,
+                                "initializer": _worker_init,
+                                "initargs": (base_hw_dict, model_config_path, mode),
+                            }
+
+                        with Executor(**executor_kwargs) as executor:
+                            futures = {executor.submit(_worker_task, items): items for items in tasks_to_eval}
+                            with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
+                                for future in as_completed(futures):
+                                    items = futures[future]
+                                    progress.update(1)
+                                    try:
+                                        result = future.result()
+                                    except BrokenProcessPool as exc:
+                                        pool_broken = True
+                                        skipped_errors += 1
+                                        error_messages.append(f"{dict(items)}: worker process died ({exc})")
+                                        processed_futures.add(future)
+                                        _retry_isolated(items)
+                                        break
+                                    except Exception as exc:
+                                        skipped_errors += 1
+                                        error_messages.append(f"{dict(items)}: {exc}")
+                                        processed_futures.add(future)
+                                        _retry_isolated(items)
+                                        continue
+                                    processed_futures.add(future)
+                                    _consume_worker_result(result)
+                    except BrokenProcessPool as exc:
+                        pool_broken = True
+                        skipped_errors += 1
+                        error_messages.append(f"worker pool terminated early: {exc}")
+
+                    if pool_broken:
+                        if not futures:
+                            pending_items = list(tasks_to_eval)
+                        else:
+                            for future, items in futures.items():
+                                if future in processed_futures:
                                     continue
-                                evaluated += 1
-                                results.append(entry)
+                                if future.done():
+                                    try:
+                                        result = future.result()
+                                    except Exception as exc:
+                                        skipped_errors += 1
+                                        error_messages.append(f"{dict(items)}: {exc}")
+                                        continue
+                                    _consume_worker_result(result)
+                                else:
+                                    pending_items.append(items)
+
+                        if pending_items:
+                            print(
+                                "Worker pool broke; retrying remaining configs in isolated workers.",
+                                file=sys.stderr,
+                            )
+                            for items in pending_items:
+                                try:
+                                    result = _run_task_in_isolated_process(
+                                        items, base_hw_dict, model_config_path, mode
+                                    )
+                                except BrokenProcessPool as exc:
+                                    skipped_errors += 1
+                                    error_messages.append(f"{dict(items)}: worker process died ({exc})")
+                                    continue
+                                except Exception as exc:
+                                    skipped_errors += 1
+                                    error_messages.append(f"{dict(items)}: {exc}")
+                                    continue
+                                _consume_worker_result(result)
                 elif tasks_to_eval:
                     model_config_obj = config.parse_config(model_config_path, config_type=mode)
                     with tqdm(total=len(tasks_to_eval), desc="Evaluating", unit="config") as progress:
@@ -1473,14 +1621,12 @@ def main():
                             cache_dirty = True
 
                             if metrics.get("memory_exceeded"):
-                                skipped_memory += 1
+                                memory_violations += 1
                                 print(
-                                    f"Skipping configuration {settings} due to memory capacity violation "
+                                    f"Memory capacity exceeded for configuration {settings} "
                                     f"({metrics.get('memory_violation_gb', 0.0):.3f} GB).",
                                     file=sys.stderr,
                                 )
-                                results.append(entry)
-                                continue
 
                             evaluated += 1
                             results.append(entry)
@@ -1491,11 +1637,11 @@ def main():
                     except Exception:
                         pass
 
-        total_skipped = skipped_out_of_range + skipped_errors + skipped_memory
+        total_skipped = skipped_out_of_range + skipped_errors
         if not results:
             print(
-                "No valid configurations evaluated ({} skipped: {} out-of-range, {} errors, {} memory violations).".format(
-                    total_skipped, skipped_out_of_range, skipped_errors, skipped_memory
+                "No valid configurations evaluated ({} skipped: {} out-of-range, {} errors; memory violations: {}).".format(
+                    total_skipped, skipped_out_of_range, skipped_errors, memory_violations
                 )
             )
             if error_messages:
@@ -1509,7 +1655,8 @@ def main():
         else:
             print(
                 f"Evaluated {evaluated} configuration(s); skipped {total_skipped} "
-                f"(out_of_range={skipped_out_of_range}, errors={skipped_errors}, memory={skipped_memory})."
+                f"(out_of_range={skipped_out_of_range}, errors={skipped_errors}); "
+                f"memory violations={memory_violations}."
             )
             if error_messages:
                 print("Some configurations failed:")

@@ -1322,6 +1322,7 @@ class ExecutionBackendAstraSysOptions:
     endpoint_delay: Optional[int] = None
     active_chunks_per_dimension: Optional[int] = None
     preferred_dataset_splits: Optional[int] = None
+    collective_arbitration: Optional[str] = None
 
     @classmethod
     def from_dict(cls, sys_dict: Optional[Dict[str, object]]) -> Optional["ExecutionBackendAstraSysOptions"]:
@@ -1331,10 +1332,20 @@ class ExecutionBackendAstraSysOptions:
         endpoint_delay = sys_dict.get("endpoint_delay", None)
         active_chunks = sys_dict.get("active_chunks_per_dimension", None)
         preferred_splits = sys_dict.get("preferred_dataset_splits", None)
+        collective_arbitration = sys_dict.get("collective_arbitration", None)
+        if collective_arbitration is not None:
+            collective_arbitration = str(collective_arbitration).strip().lower()
+            allowed = {"off", "last_resort", "best_effort", "strict", "on", "true", "false", "0", "1"}
+            if collective_arbitration not in allowed:
+                raise ValueError(
+                    "execution_backend.astra.sys_options.collective_arbitration "
+                    f"must be one of {sorted(allowed)} (got {collective_arbitration!r})"
+                )
         return cls(
             endpoint_delay=None if endpoint_delay is None else _coerce_int(endpoint_delay, "execution_backend.astra.sys_options.endpoint_delay", min_value=0),
             active_chunks_per_dimension=None if active_chunks is None else _coerce_int(active_chunks, "execution_backend.astra.sys_options.active_chunks_per_dimension", min_value=1),
             preferred_dataset_splits=None if preferred_splits is None else _coerce_int(preferred_splits, "execution_backend.astra.sys_options.preferred_dataset_splits", min_value=1),
+            collective_arbitration=collective_arbitration,
         )
 
 

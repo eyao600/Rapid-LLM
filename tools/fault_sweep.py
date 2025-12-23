@@ -39,15 +39,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
 
 from parallelism_sweep import (  # noqa: E402
-    HARDWARE_CONFIG_PATH,
     MODEL_CONFIG_PATH,
     ASTRA_CACHE_MODE,
     determine_model_mode,
     evaluate_parallelism,
+    make_temp_hw_config,
     read_yaml,
     set_astrasim_cache_mode,
     tp_cp_product_is_power_of_two_square,
 )
+import memory_estimation  # noqa: E402
 
 
 class FlowSeq(list):
@@ -68,21 +69,24 @@ def _quantize_weight(value: float, decimals: int = 2) -> float:
 # Fault sweep configuration
 # -----------------------------------------------------------------------------
 
-TARGET_NUM_GPUS = 128
+HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
+MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
+
+TARGET_NUM_GPUS = 64
 SAMPLE_COUNT = 50
-FAULT_ITER = 200
-FAULT_WORKERS = 100
+FAULT_ITER = 125
+FAULT_WORKERS = 75
 FAULT_MAG = [0.5, 0.1]  # May also be a (mean, std) tuple
 NUM_FAULTS = [1]
 
-MIN_ALLOWED_TP = 1
-MAX_ALLOWED_TP = 128
+MIN_ALLOWED_TP = 4
+MAX_ALLOWED_TP = 16
 MIN_ALLOWED_CP = 1
-MAX_ALLOWED_CP = 128
+MAX_ALLOWED_CP = 1
 MIN_ALLOWED_DP = 1
 MAX_ALLOWED_DP = 128
 MIN_ALLOWED_LP = 1
-MAX_ALLOWED_LP = 128
+MAX_ALLOWED_LP = 16
 ALLOWED_FAULT_DIMS: Optional[List[int]] = None
 
 PLOT_OUTPUT_PATH = "tools/fault_sweep.png"
@@ -97,7 +101,7 @@ _OLD_SIGINT_HANDLER = None
 _OLD_SIGTERM_HANDLER = None
 
 # When True, discard configurations whose tp*cp product is not a square power of two.
-ENFORCE_SQUARE_TP_CP = True
+ENFORCE_SQUARE_TP_CP = False
 
 # Debug dumping controls
 DEBUG_MODE = False
@@ -671,14 +675,15 @@ def generate_parallelism_samples(
             tp, cp, dp, lp = prioritized.popleft()
             settings = _make_parallelism_settings(tp, cp, dp, lp)
             try:
-                metrics = evaluate_parallelism(base_hw_dict, model_config_obj, mode, settings)
+                # Use fast memory check instead of full evaluation
+                mem_check = check_memory_capacity(base_hw_dict, model_config_obj, mode, settings)
             except Exception as exc:  # pragma: no cover - defensive
                 print(
-                    f"Warning: failed to evaluate parallelism {settings} during sampling: {exc}",
+                    f"Warning: failed to check memory for parallelism {settings} during sampling: {exc}",
                     file=sys.stderr,
                 )
                 continue
-            if bool(metrics.get("memory_exceeded", False)):
+            if bool(mem_check.get("memory_exceeded", False)):
                 continue
             selected.append(settings)
     else:
@@ -828,6 +833,69 @@ def make_fault_mutator(fault_specs: Sequence[Tuple[int, float, int]]):
 
 
 # -----------------------------------------------------------------------------
+# Fast memory checking using new memory estimation API
+# -----------------------------------------------------------------------------
+
+def check_memory_capacity(base_hw_dict, model_config_obj, mode, parallel_settings, hw_mutator=None):
+    """
+    Fast memory capacity check using the new memory estimation API.
+
+    Returns a dictionary with:
+        - memory_exceeded: bool indicating if capacity is violated
+        - memory_violation_gb: float indicating how much over capacity (if exceeded)
+        - summary: the full memory estimation summary dict
+
+    This is much faster than running full timing calculations.
+    """
+    hw_config, _ = make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=hw_mutator)
+
+    try:
+        # Use the dispatcher function which automatically determines inference vs training
+        summary = memory_estimation.estimate_memory(
+            hw_config,
+            model_config_obj,
+            mode=mode,
+            output_dir=None,  # Don't write outputs for fast checks
+        )
+
+        # Check if this is training (has capacity_exceeded key) or inference (has max_peak_gb key)
+        if 'capacity_exceeded' in summary:
+            # Training workload
+            capacity_exceeded = bool(summary.get('capacity_exceeded', False))
+            violation = float(summary.get('capacity_violation_gb', 0.0) or 0.0)
+            return {
+                "memory_exceeded": capacity_exceeded,
+                "memory_violation_gb": violation,
+                "summary": summary,
+            }
+        else:
+            # Inference workload - check if max_peak exceeds capacity
+            max_peak = summary.get('max_peak_gb', 0.0)
+            capacity = summary.get('capacity_gb')
+            if capacity is not None and max_peak > capacity:
+                violation = max_peak - capacity
+                return {
+                    "memory_exceeded": True,
+                    "memory_violation_gb": violation,
+                    "summary": summary,
+                }
+            return {
+                "memory_exceeded": False,
+                "memory_violation_gb": 0.0,
+                "summary": summary,
+            }
+    except Exception as exc:
+        # If memory check fails, return conservatively (assume no violation)
+        # The full evaluate_parallelism will catch any real errors
+        print(f"Warning: fast memory check failed: {exc}", file=sys.stderr)
+        return {
+            "memory_exceeded": False,
+            "memory_violation_gb": 0.0,
+            "summary": {},
+        }
+
+
+# -----------------------------------------------------------------------------
 # Multiprocessing helpers
 # -----------------------------------------------------------------------------
 
@@ -851,14 +919,19 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
     settings_key = tuple(task.get("settings_key", ()))
     task_id = task.get("task_id")
     fault_iter = task.get("fault_iter")
+    faults: List[Tuple[int, float, int]] = []
+    num_faults = 0
+    if kind == "fault":
+        raw_faults = task.get("faults", [])
+        try:
+            faults = [tuple(spec) for spec in raw_faults]
+        except Exception:
+            faults = []
+        num_faults = int(task.get("num_faults", len(faults)))
     try:
         mutator = None
         if kind == "fault":
-            raw_faults = task.get("faults", [])
-            faults = [tuple(spec) for spec in raw_faults]
             mutator = make_fault_mutator(faults)
-        else:
-            faults = []
         metrics = evaluate_parallelism(
             base_hw_dict,
             model_config_obj,
@@ -885,14 +958,14 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
             result.update(
                 {
                     "faults": faults,
-                    "num_faults": int(task.get("num_faults", len(faults))),
+                    "num_faults": num_faults,
                 }
             )
         else:
             result.update({"faults": [], "num_faults": 0})
         return result
     except Exception as exc:
-        return {
+        error_result = {
             "status": "error",
             "kind": kind,
             "key": key,
@@ -901,6 +974,13 @@ def _execute_parallelism_task(base_hw_dict, model_config_obj, mode, task: Dict[s
             "task_id": task_id,
             "error": str(exc),
         }
+        if fault_iter is not None:
+            error_result["fault_iter"] = int(fault_iter)
+        if kind == "fault":
+            error_result.update({"faults": faults, "num_faults": num_faults})
+        else:
+            error_result.update({"faults": [], "num_faults": 0})
+        return error_result
 
 
 def _parallelism_worker_task(task: Dict[str, object]) -> Dict[str, object]:
@@ -913,10 +993,11 @@ def _sampling_worker(settings: Dict[str, int]) -> Dict[str, object]:
     if _WORKER_HW_DICT is None or _WORKER_MODEL_CONFIG is None or _WORKER_MODE is None:
         raise RuntimeError("Worker initialisation missing before task execution.")
     try:
-        metrics = evaluate_parallelism(_WORKER_HW_DICT, _WORKER_MODEL_CONFIG, _WORKER_MODE, settings)
+        # Use fast memory check instead of full evaluation during sampling
+        mem_check = check_memory_capacity(_WORKER_HW_DICT, _WORKER_MODEL_CONFIG, _WORKER_MODE, settings)
         return {
             "settings": settings,
-            "memory_exceeded": bool(metrics.get("memory_exceeded", False)),
+            "memory_exceeded": bool(mem_check.get("memory_exceeded", False)),
             "error": None,
         }
     except Exception as exc:  # pragma: no cover - defensive
@@ -1263,11 +1344,11 @@ def plot_fault_sensitivity(records: List[Dict[str, object]], output_path: str, n
         if math.isfinite(fmin) and math.isfinite(fmax):
             plt.fill_between([x - 0.22, x + 0.22], [fmin, fmin], [fmax, fmax], color="#fdd0a2", alpha=0.4)
 
-    plt.xticks(xs, config_labels, rotation=45, ha="right")
-    plt.ylabel("Runtime (s)")
-    plt.title(f"Fault Sensitivity Across Parallelism Configurations (Num GPUs = {num_gpus})")
+    plt.xticks(xs, config_labels, rotation=45, ha="right", fontsize=16)
+    plt.ylabel("Runtime (s)", fontsize=19)
+    plt.title(f"Fault Sensitivity Across Parallelism Configurations (Num GPUs = {num_gpus})", fontsize=18)
     plt.grid(alpha=0.3, axis="y")
-    plt.legend()
+    plt.legend(fontsize=16)
     plt.tight_layout()
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -1344,9 +1425,10 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     mode = determine_model_mode(MODEL_CONFIG_PATH)
     model_config_obj = config.parse_config(MODEL_CONFIG_PATH, config_type=mode)
 
-    existing_results = _load_existing_results(RESULTS_JSON_PATH)
-    if existing_results:
-        print(f"Loaded {len(existing_results)} cached result entries from {RESULTS_JSON_PATH}")
+    # existing_results = _load_existing_results(RESULTS_JSON_PATH)
+    # if existing_results:
+    #     print(f"Loaded {len(existing_results)} cached result entries from {RESULTS_JSON_PATH}")
+    existing_results = {}
     results_store: Dict[str, Dict[str, object]] = dict(existing_results)
 
     parallelism_samples = generate_parallelism_samples(
@@ -1814,7 +1896,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
             "fault_min": fault_min,
             "fault_max": fault_max,
             "fault_mean": fault_mean,
-            "label": f"tp{settings['tp']}-cp{settings['cp']}-dp{settings['dp']}-lp{settings['lp']}",
+            "label": f"tp{settings['tp']}-cp{settings['cp']}-dp{settings['dp']}-pp{settings['lp']}",
         }
         records.append(record)
 

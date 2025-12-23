@@ -102,6 +102,7 @@ def _sys_options_from_hw(hw_obj) -> Optional[Dict[str, Any]]:
             "endpoint_delay": getattr(sys_opts, "endpoint_delay", None),
             "active_chunks_per_dimension": getattr(sys_opts, "active_chunks_per_dimension", None),
             "preferred_dataset_splits": getattr(sys_opts, "preferred_dataset_splits", None),
+            "collective_arbitration": getattr(sys_opts, "collective_arbitration", None),
         }
     filtered = {k: v for k, v in opts_dict.items() if v is not None}
     return filtered or None

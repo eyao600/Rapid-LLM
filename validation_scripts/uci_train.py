@@ -200,7 +200,7 @@ def _plot_results(rows: List[Dict[str, object]], title: str, path: Path) -> Opti
         colors.append(color_map.get(variant.upper(), "#888888"))
 
     fig_w = max(6.0, 0.65 * len(labels))
-    fig, ax = plt.subplots(figsize=(fig_w, 4))
+    fig, ax = plt.subplots(figsize=(fig_w, 5))
     bars = ax.bar(range(len(errors)), errors, color=colors)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=9)

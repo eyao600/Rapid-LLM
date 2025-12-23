@@ -526,6 +526,8 @@ def generate_astrasim_configs_from_hw(
             if isinstance(pds, (list, tuple)):
                 pds = pds[0] if pds else 1
             system["preferred-dataset-splits"] = int(pds)
+        if getattr(sys_opts, "collective_arbitration", None) is not None:
+            system["collective-arbitration"] = sys_opts.collective_arbitration
 
     _save_json(sys_json, system)
 
