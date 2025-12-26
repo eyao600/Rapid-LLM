@@ -67,7 +67,7 @@ def _parse_precision_block(spec: dict) -> PrecisionConfig:
     Each field can be:
     - A numeric byte count (e.g., 2.0, 4.0)
     - A dtype string (e.g., "fp16", "bf16", "fp32")
-    - "as_tensor_format" (only for kv_cache, parameters, gradients, grad_microbatch, grad_communication)
+    - "as_tensor_format" (only for kv_cache, parameters, gradients, grad_communication)
     """
     tensor_bytes = _coerce_precision_value(spec["tensor_format"])
 
@@ -360,7 +360,7 @@ class NetworkDimensionLayout:
     label: str
     size: int
     topology_type: str
-    bandwidth: float
+    bandwidth: object
     util: float
     latency: float
     size_2d: Optional[Tuple[int, int]] = None
@@ -425,7 +425,37 @@ class NetworkDimensionLayout:
 
         if "bandwidth" not in topo_dict:
             raise ValueError(f"network dimension '{label}' topology missing required 'bandwidth'")
-        bandwidth = parse_bandwidth_string(topo_dict["bandwidth"])
+        bandwidth_raw = topo_dict["bandwidth"]
+        bandwidth = parse_bandwidth_string(bandwidth_raw)
+        normalized_topo = topo_type.lower().replace("-", "").replace("_", "")
+        is_2d_topo = normalized_topo in {"mesh2d", "torus2d", "kingmesh2d", "fcring2d"}
+        if isinstance(bandwidth, (list, tuple)):
+            if not is_2d_topo:
+                raise ValueError(
+                    f"network dimension '{label}' bandwidth tuple is only supported for 2D topologies"
+                )
+            if len(bandwidth) != 2:
+                raise ValueError(
+                    f"network dimension '{label}' bandwidth tuple must have exactly two entries"
+                )
+            for entry in bandwidth:
+                if entry is None:
+                    raise ValueError(
+                        f"network dimension '{label}' bandwidth tuple entries must be numeric"
+                    )
+                if float(entry) <= 0:
+                    raise ValueError(
+                        f"network dimension '{label}' bandwidth tuple entries must be > 0"
+                    )
+        else:
+            if bandwidth is None:
+                raise ValueError(
+                    f"network dimension '{label}' bandwidth must be numeric"
+                )
+            if float(bandwidth) <= 0:
+                raise ValueError(
+                    f"network dimension '{label}' bandwidth must be > 0"
+                )
 
         try:
             util = float(topo_dict.get("util", 1.0))
@@ -465,11 +495,11 @@ class NetworkDimensionLayout:
             )
         optimize_2dmap = bool(raw_optimize)
         if optimize_2dmap:
-            normalized_topo = topo_type.lower()
-            if normalized_topo not in {"mesh2d", "torus2d", "kingmesh2d"}:
+            normalized_topo = topo_type.lower().replace("-", "").replace("_", "")
+            if normalized_topo not in {"mesh2d", "torus2d", "kingmesh2d", "fcring2d"}:
                 raise ValueError(
                     f"network dimension '{label}' sets optimize_2dmap but topology type '{topo_type}'"
-                    " is not Mesh2D/Torus2D/KingMesh2D"
+                    " is not Mesh2D/Torus2D/KingMesh2D/FC-Ring2D"
                 )
 
         collectives_raw = raw.get("collective_override")
@@ -530,23 +560,32 @@ class NetworkDimensionLayout:
                             )
                         resolved[idx] = None
                         continue
-                    if normalized not in parallelism_params:
-                        alias = alias_map.get(normalized, normalized)
-                        raise ValueError(
-                            f"network dimension '{label}' 2D size references parallelism '{alias}' "
-                            "which is not defined in parallelism"
-                        )
+                    if normalized in parallelism_params:
+                        try:
+                            factor = int(parallelism_params[normalized])
+                        except (TypeError, ValueError) as exc:
+                            alias = alias_map.get(normalized, normalized)
+                            raise ValueError(
+                                f"network dimension '{label}' 2D size parallelism '{alias}' must be an integer"
+                            ) from exc
+                        if factor < 1:
+                            alias = alias_map.get(normalized, normalized)
+                            raise ValueError(
+                                f"network dimension '{label}' 2D size parallelism '{alias}' must be >= 1"
+                            )
+                        resolved[idx] = factor
+                        continue
                     try:
-                        factor = int(parallelism_params[normalized])
+                        factor = int(entry)
                     except (TypeError, ValueError) as exc:
                         alias = alias_map.get(normalized, normalized)
                         raise ValueError(
-                            f"network dimension '{label}' 2D size parallelism '{alias}' must be an integer"
+                            f"network dimension '{label}' 2D size entry '{alias}' must be an integer, "
+                            "parallelism name, or 'auto'"
                         ) from exc
                     if factor < 1:
-                        alias = alias_map.get(normalized, normalized)
                         raise ValueError(
-                            f"network dimension '{label}' 2D size parallelism '{alias}' must be >= 1"
+                            f"network dimension '{label}' 2D size entries must be >= 1"
                         )
                     resolved[idx] = factor
                 else:
@@ -641,7 +680,12 @@ class NetworkDimensionLayout:
 
     @property
     def effective_bandwidth(self) -> float:
-        return float(self.bandwidth) * float(self.util)
+        bw = self.bandwidth
+        if isinstance(bw, (list, tuple)):
+            if not bw:
+                return 0.0
+            return float(bw[0]) * float(self.util)
+        return float(bw) * float(self.util)
 
 
 def _validate_dimension_parallelisms(
@@ -743,7 +787,7 @@ def _parse_network_layout(
     for idx, dim in enumerate(dimensions):
         topo_name = str(getattr(dim, "topology_type", "")).strip().lower()
         topo_name = topo_name.replace("-", "").replace("_", "")
-        if idx > 0 and topo_name in {"mesh2d", "torus2d", "kingmesh2d"}:
+        if idx > 0 and topo_name in {"mesh2d", "torus2d", "kingmesh2d", "fcring2d"}:
             raise ValueError(
                 f"2D topology '{dim.topology_type}' is only supported on the first network dimension."
             )
@@ -1235,6 +1279,7 @@ class SWConfig:
     dp_zero_stage: int
     full_recomputation: bool
     dp_microbatch: str
+    const_mem_offset: float
 
     @classmethod
     def from_dict(cls, sw_block: Dict[str, object]) -> "SWConfig":
@@ -1252,6 +1297,16 @@ class SWConfig:
         dp_microbatch = str(dp_microbatch_raw).strip().lower()
         if dp_microbatch not in {"every_mb", "last_mb"}:
             raise ValueError("sw_param.dp_microbatch must be 'every_mb' or 'last_mb'")
+        const_mem_offset_raw = sw_block.get("const_mem_offset", 0.0)
+        if const_mem_offset_raw is None:
+            const_mem_offset = 0.0
+        else:
+            try:
+                const_mem_offset = float(const_mem_offset_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"sw_param.const_mem_offset must be a float-compatible value (got {const_mem_offset_raw!r})"
+                ) from exc
         return cls(
             kernel_launch_overhead=kernel_launch_overhead,
             precision=precision_config,
@@ -1259,6 +1314,7 @@ class SWConfig:
             dp_zero_stage=dp_zero_stage,
             full_recomputation=full_recomputation,
             dp_microbatch=dp_microbatch,
+            const_mem_offset=const_mem_offset,
         )
 
 
@@ -1558,6 +1614,8 @@ def parse_bandwidth_string(value):
     """
     if value is None:
         return None
+    if isinstance(value, (list, tuple)):
+        return tuple(parse_bandwidth_string(item) for item in value)
 
     if not isinstance(value, str):
         return float(value)
@@ -1712,6 +1770,16 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             )
         if model.decode_len is not None and model.decode_len > model.seq_len:
             raise ValueError("model_param.decode_len must be <= seq_len for inference")
+
+    if (
+        model.gradient_accumulation_steps > 1
+        and getattr(hw_config.sw_config, "dp_zero_stage", 0) >= 2
+    ):
+        # ZeRO-2/3 do funky things with DP comms and aren't captured by the current
+        # no-DP + DP step model for gradient accumulation.
+        raise ValueError(
+            "Gradient accumulation steps > 1 is not supported with ZeRO-2/3 (dp_zero_stage >= 2)."
+        )
 
     if model.global_batch_size % model.gradient_accumulation_steps != 0:
         raise ValueError(

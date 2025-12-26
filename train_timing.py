@@ -643,6 +643,35 @@ class TimeCalculationLLM(TimeCalculation):
             except ValueError as exc:
                 raise ValueError(f"Unknown GEMM type: {gemm_type!r}") from exc
         raise TypeError(f"Unsupported gemm type specifier: {gemm_type!r}")
+
+    def _grad_accum_time(self, elements: float, name: str) -> float:
+        if elements <= 0:
+            return 0.0
+        if getattr(self, "gradient_accumulation_steps", 1) <= 1:
+            return 0.0
+        mem_bytes = float(elements) * (
+            2.0 * float(self.precision.gradients) + float(self.precision.grad_communication)
+        )
+        return self.roofline(0, mem_bytes, name=name, mem_level=self.num_levels - 1)
+
+    def _grad_accum_elems_for_gemm(
+        self,
+        gemm_type: Optional[GemmType],
+        *,
+        k: int,
+        n: int,
+        shard_k: int,
+        shard_n: int,
+    ) -> int:
+        if getattr(self, "gradient_accumulation_steps", 1) <= 1:
+            return 0
+        if gemm_type is None:
+            return int(k * n)
+        if gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.LINEAR_SOFTMAX):
+            return int(k * shard_n)
+        if gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):
+            return int(shard_k * n)
+        return 0
     
     # assuming no context parallelism for now
     def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Any:
@@ -693,6 +722,14 @@ class TimeCalculationLLM(TimeCalculation):
             grad_time_act = self.get_gemm_time(m, n, k, name)[0]
             grad_time_wt = self.get_gemm_time(k, m, n, name)[0]
         gemm_time = grad_time_act + grad_time_wt
+        grad_accum_elems = self._grad_accum_elems_for_gemm(
+            gemm_type,
+            k=k,
+            n=n,
+            shard_k=k,
+            shard_n=n,
+        )
+        gemm_time += self._grad_accum_time(grad_accum_elems, f"{name}_grad_accum")
         return gemm_time, 0, 0
         
     def _tensor_context_hybrid_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Tuple[float, float]:
@@ -955,6 +992,14 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
+        grad_accum_elems = self._grad_accum_elems_for_gemm(
+            gemm_type,
+            k=shard_spec.k,
+            n=shard_spec.n,
+            shard_k=shard_spec.shard_k,
+            shard_n=shard_spec.shard_n,
+        )
+        gemm_time += self._grad_accum_time(grad_accum_elems, f"{name}_grad_accum")
         if total_bytes > 0:
             reduction_time = self.network_model.collective(
             kind=kind,
@@ -1153,6 +1198,14 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
+        grad_accum_elems = self._grad_accum_elems_for_gemm(
+            gemm_type,
+            k=shard_spec.k,
+            n=shard_spec.n,
+            shard_k=shard_spec.shard_k,
+            shard_n=shard_spec.shard_n,
+        )
+        gemm_time += self._grad_accum_time(grad_accum_elems, f"{name}_grad_accum")
         reduction_time = 0
         if act_bytes > 0:
             total_bytes = act_bytes #total bytes for all reduce
@@ -1303,6 +1356,14 @@ class TimeCalculationLLM(TimeCalculation):
         else:
             raise ValueError(f"Unsupported gemm type: {gemm_type}")
         gemm_time = grad_time_act + grad_time_wt
+        grad_accum_elems = self._grad_accum_elems_for_gemm(
+            gemm_type,
+            k=shard_spec.k,
+            n=shard_spec.n,
+            shard_k=shard_spec.shard_k,
+            shard_n=shard_spec.shard_n,
+        )
+        gemm_time += self._grad_accum_time(grad_accum_elems, f"{name}_grad_accum")
         if total_bytes > 0:
             reduction_time = self.network_model.collective(
                 kind=kind,
@@ -1345,6 +1406,8 @@ class TimeCalculationLLM(TimeCalculation):
         grad_time_act = self.get_gemm_time(m, n, k, name)[0] * self.experts_per_gpu
         grad_time_wt = self.get_gemm_time(k, m, n, name)[0] * self.experts_per_gpu
         gemm_time = grad_time_act + grad_time_wt
+        grad_accum_elems = int(k * n * self.experts_per_gpu)
+        gemm_time += self._grad_accum_time(grad_accum_elems, f"{name}_grad_accum")
 
         if gemm_type == GemmType.FFN1:
             per_rank_bytes = math.ceil(self.precision.activations * m * k * self.experts_per_gpu)
@@ -1668,6 +1731,7 @@ class TimeCalculationLLM(TimeCalculation):
             name="pointwise-layernorm-b",
             mem_level=self.num_levels - 1,
         ) + 4 * self.O
+        compute_time += self._grad_accum_time(2 * d_model, "layernorm_grad_accum")
         if self.use_moe and type == GemmType.LAYER_NORM_1:  # communication after layernorm
             per_rank_bytes = self.precision.grad_communication * elements * self.moe_top_k
             total_bytes = int(math.ceil(per_rank_bytes * self.tp * self.cp))
@@ -1763,6 +1827,8 @@ class TimeCalculationLLM(TimeCalculation):
             name="embedding_b",
             mem_level=self.num_levels - 1,
         ) + self.O
+        embedding_params = math.ceil((vocab_size * hidden_dim) / max(1, self.tp))
+        embedding_mem_time += self._grad_accum_time(embedding_params, "embedding_grad_accum")
 
         if self.debug:
             print("(gr) Embedding_mem: {:,}".format(int(embedding_mem / 1e9)))

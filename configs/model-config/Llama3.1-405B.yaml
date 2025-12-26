@@ -5,7 +5,7 @@ model_param:
   model_type: "llama"  # gpt assumes dense-style architecture with GELU; llama assumes llama-style architecture with SwiGLU
   global_batch_size: 1024  # Global batch size
   gradient_accumulation_steps: 1  # Gradient accumulation steps (only for training)
-  seq_len: 2048  # Sequence length (tokens per sequence)
+  seq_len: 4096  # Sequence length (tokens per sequence)
   hidden_dim: 16384 # Transformer hidden dimension
   attention: # Attention-related parameters
     attention_type: "gqa"  # Supported attention types: "mha" or "gqa" ("mla" not implemented)

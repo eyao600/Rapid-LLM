@@ -6,10 +6,10 @@
 
 sw_param:
   full_recomputation: false # Enable full activation recompute during backward instead of selective recomputation
-  kernel_launch_overhead: 9e-6   # (s)
+  kernel_launch_overhead: 1e-4   # (s)
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1
-  dp_zero_stage: 3
+  dp_zero_stage: 1
   precision:
     # tensor_format accepts numeric byte counts or dtype strings (fp16, bf16, fp32).
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
@@ -21,10 +21,11 @@ sw_param:
     parameters: as_tensor_format  # Model parameter precision
     gradients: fp32  # Accumulated gradients 
     grad_communication: as_tensor_format  # Gradient communication precision 
-    optimizer_states: as_tensor_format  # Optimizer states 
-    stats: as_tensor_format  # Normalization statistics 
-    master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
+    optimizer_states: fp32  # Optimizer states 
+    stats: fp32  # Normalization statistics 
+    master_parameters: 0  # master weight copy in bytes (0 = disabled)
   h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
+  const_mem_offset: 0 GB # added to mem prediction
   # DP gradient sync frequency: every_mb (default) or last_mb (sync only on final microbatch; ZeRO-3 stays per-mb)
   dp_microbatch: last_mb
 tech_param:
@@ -110,7 +111,7 @@ network:
       topology:
         type: Ring 
         bandwidth: 25 GB
-        latency: 5e-6
+        latency: 1e-5
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0  # fully utilized
       collective_override: {} # overrides execution_backend.collectives when provided
@@ -121,9 +122,9 @@ network:
       topology:
         type: Ring
         bandwidth: 25 GB
-        latency: 5e-6
+        latency: 1e-5
         energy_per_bit: 8e-12 # (J/bit)
-        util: 0.30  # calibrated from HF bench (pp>=4 median ratio)
+        util: 1.0  # fully utilized
       parallelisms: []
       collective_override: {} # overrides execution_backend.collectives when provided
 

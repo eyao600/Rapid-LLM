@@ -54,15 +54,34 @@ HW_CONFIG_PATH = CALIBRATED_HW_CONFIG_PATH if USE_CALIBRATED_HW else BASE_HW_CON
 OUTPUT_DIR = PROJECT_ROOT / "output" / "validation" / "huggingface"
 
 # Execution mode: "mem_only", "perf_only", "both"
-MODE = "mem_only"
+MODE = "both"
+# Memory error target: "res" (reserved) or "alloc" (allocated)
+MEMORY_ERROR_TARGET = "res"
 
 # Parallel execution
-NUM_WORKERS = 95
+NUM_WORKERS = 100
 
 # Filtering options
 ASSUME_BF16 = True          # Treat empty dtype as bfloat16
 FILTER_PP_FIX = False       # Only use rows where after_pp_fix=True
-MAX_ROWS = None             # Limit rows for testing (None = all)
+MAX_ROWS = 1200             # Limit rows for testing (None = all)
+
+# Selective runs: only execute the listed config IDs (ignore cache).
+# IDs can be row_index values (as strings) or config labels
+# (see _format_config_label / BenchmarkRow.label).
+SELECTIVE_RUN = False
+# add these: 1171, 1371, 1377, 32, 39, 47, 50, 198
+SELECTIVE_RUN_IDS: Sequence[str] = (
+    "1171",
+    "1377",
+    "32",
+    "39",
+    "47",
+    "50",
+    "198",
+)
+SELECTIVE_RUN_OUTPUT_DIR = OUTPUT_DIR / "selective_runs"
+SELECTIVE_DUMP_HW_CONFIGS = False
 
 # Model options
 USE_FLASH_ATTENTION = True
@@ -81,13 +100,16 @@ DUMP_FIRST_ROW_HW_CONFIG = False
 DUMP_FIRST_ROW_HW_CONFIG_NAME = "first_row_hw_config.yaml"
 
 # Chunked execution / caching to limit peak memory
-CHUNK_SIZE = 345               # Process rows in chunks (None or <=0 disables)
+CHUNK_SIZE = 600               # Process rows in chunks (None or <=0 disables)
 ENABLE_RESULT_CACHE = True
 CACHE_PATH = OUTPUT_DIR / "validation_cache.jsonl"
-CACHE_KEY_VERSION = 7
+CACHE_KEY_VERSION = 12
 HARD_CLEANUP_BETWEEN_CHUNKS = True
 # Cache-only rebuild mode (skip RAPID execution)
 REBUILD_FROM_CACHE_ONLY = False
+# Fast mode: enforce per-row worker timeouts (best-effort)
+FAST_MODE = True
+FAST_MODE_TIMEOUT_S = 50.0
 
 # AstraSim isolation (avoid cache contention / temp spam in repo root)
 ASTRA_CACHE_MODE: Optional[str] = "NO_CACHE"  # NO_CACHE | CACHE_READONLY | CACHE_READWRITE | None (keep env)
@@ -105,7 +127,7 @@ TOKS_PER_GPU_DENOM = "num_gpus"
 USE_DERIVED_MICROBATCH_COUNT = True
 MB_GRAPH_CAP: Optional[int] = None  # cap microbatch count in graph to keep runs fast (None disables)
 PIPELINE_MEM_SCHEDULE = "1f1b"   # "gpipe" to disable, "1f1b"/"auto" to scale activations
-PIPELINE_ACTIVATION_WINDOW_MULT = 1.0  # effective in-flight window = ceil(lp * multiplier)
+PIPELINE_ACTIVATION_WINDOW_MULT = 2.0  # effective in-flight window = ceil(lp * multiplier)
 
 # Category plotting
 CATEGORY_RUN: Optional[Sequence[str] | str] = "all"  # "auto", "default", "all", or list of category names
@@ -113,7 +135,7 @@ CATEGORY_MIN_ROWS = 10
 CATEGORY_OUTPUT_DIR = OUTPUT_DIR / "categories"
 CATEGORY_AUTO_TOP_K = 5
 CATEGORY_AUTO_MIN_ROWS = 5
-CATEGORY_AUTO_METRICS: Sequence[str] = ("tok_s", "mem_res")
+CATEGORY_AUTO_METRICS: Sequence[str] = ("tok_s", "mem")
 CATEGORY_PRESETS: Dict[str, Sequence[str]] = {
     "default": (
         "pp=1",
@@ -361,7 +383,20 @@ def _category_definitions() -> List[CategoryDef]:
 
 
 def _sanitize_category_name(name: str) -> str:
-    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
+    normalized = name.strip()
+    replacements = (
+        (">=", "ge"),
+        ("<=", "le"),
+        ("!=", "ne"),
+        ("==", "eq"),
+        (">", "gr"),
+        ("<", "lt"),
+        ("=", "eq"),
+    )
+    for symbol, token in replacements:
+        normalized = normalized.replace(symbol, f"_{token}_")
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized)
+    sanitized = re.sub(r"_+", "_", sanitized)
     return sanitized.strip("_") or "category"
 
 
@@ -426,7 +461,9 @@ def _auto_select_categories(
         return [], {}
 
     metric_key_map = {
+        "mem": _memory_metric_key(),
         "mem_res": "mem_res",
+        "mem_alloc": "mem_alloc",
         "tok_s": "tok_s",
     }
     selected: List[str] = []
@@ -757,7 +794,6 @@ def build_hw_config_dict(
         'tp_sp': True,
     }
 
-    # Override ZeRO stage
     if 'sw_param' not in config:
         config['sw_param'] = {}
     config['sw_param']['dp_zero_stage'] = row.zero_stage
@@ -781,6 +817,8 @@ def build_hw_config_dict(
     tp_bw = _min_positive(
         [row.rs_inter, row.ag_inter] if tp_use_inter else [row.rs_intra, row.ag_intra]
     )
+    tp_bw_intra = _min_positive([row.rs_intra, row.ag_intra])
+    tp_bw_inter = _min_positive([row.rs_inter, row.ag_inter])
     lp_bw = _min_positive(
         [row.rs_inter, row.ag_inter] if lp_use_inter else [row.rs_intra, row.ag_intra]
     )
@@ -791,8 +829,25 @@ def build_hw_config_dict(
     dims = config.get('network', {}).get('dimensions', [])
     if len(dims) >= 1:
         dims[0]['parallelisms'] = ['tp', 'cp']
+        topo0 = dims[0].setdefault('topology', {})
         if tp_bw is not None and tp_bw > 0:
-            dims[0].setdefault('topology', {})['bandwidth'] = f"{int(round(tp_bw))} GB"
+            topo0['bandwidth'] = f"{int(round(tp_bw))} GB"
+        tp_total = 1
+        for axis in dims[0]['parallelisms']:
+            try:
+                tp_total *= int(config['parallelism'].get(axis, 1))
+            except (TypeError, ValueError):
+                tp_total *= 1
+        if tp_total > 8:
+            topo0['type'] = 'FC-Ring2D'
+            dims[0]['size'] = (8, 'auto')
+            tp_intra = tp_bw_intra if tp_bw_intra and tp_bw_intra > 0 else tp_bw
+            tp_inter = tp_bw_inter if tp_bw_inter and tp_bw_inter > 0 else tp_bw
+            if tp_intra is not None and tp_inter is not None:
+                topo0['bandwidth'] = (
+                    f"{int(round(tp_intra))} GB",
+                    f"{int(round(tp_inter))} GB",
+                )
     if len(dims) >= 2:
         dims[1]['parallelisms'] = ['lp']
         if lp_bw is not None and lp_bw > 0:
@@ -905,7 +960,9 @@ def _pipeline_activation_window_factor(row: BenchmarkRow, tc: Any) -> float:
     lp = max(1, int(getattr(tc, "lp", 1)))
     if mb_actual <= 1 or lp <= 1 or mb_graph <= 0:
         return 1.0
-    window = max(1, int(math.ceil(lp * PIPELINE_ACTIVATION_WINDOW_MULT)))
+    # window = max(1, int(math.ceil(lp * PIPELINE_ACTIVATION_WINDOW_MULT)))
+    # try pp * mult and also (pp*mult*2-2)
+    window = max(1, int(math.ceil(lp * PIPELINE_ACTIVATION_WINDOW_MULT * 2 - 2)))
     window = min(window, mb_actual)
     return float(window) / float(mb_graph)
 
@@ -1250,6 +1307,37 @@ def _pct_error(predicted: float, actual: float) -> Optional[float]:
     return ((predicted - actual) / actual) * 100.0
 
 
+def _memory_metric_key() -> str:
+    target = str(MEMORY_ERROR_TARGET or "res").strip().lower()
+    if target in ("alloc", "allocated", "allocation", "mem_alloc"):
+        return "mem_alloc"
+    return "mem_res"
+
+
+def _memory_metric_label() -> str:
+    return "Alloc" if _memory_metric_key() == "mem_alloc" else "Res"
+
+
+def _memory_error_value(result: ComparisonResult) -> Optional[float]:
+    return result.mem_alloc_error_pct if _memory_metric_key() == "mem_alloc" else result.mem_res_error_pct
+
+
+def _memory_actual_value(row: BenchmarkRow) -> float:
+    return row.mem_alloc_gb if _memory_metric_key() == "mem_alloc" else row.mem_res_gb
+
+
+def _matches_selective_id(row: BenchmarkRow, token: str) -> bool:
+    token_norm = str(token or "").strip()
+    if not token_norm:
+        return False
+    if token_norm.isdigit() and int(token_norm) == row.row_index:
+        return True
+    config_id = _format_config_label(row)
+    if token_norm == config_id or token_norm == row.label:
+        return True
+    return False
+
+
 def compute_comparison(
     row: BenchmarkRow,
     rapid_result: RAPIDResult,
@@ -1260,6 +1348,8 @@ def compute_comparison(
 
     if mode in ('mem_only', 'both'):
         if rapid_result.peak_gb is not None:
+            if row.mem_alloc_gb > 0:
+                result.mem_alloc_error_pct = _pct_error(rapid_result.peak_gb, row.mem_alloc_gb)
             if row.mem_res_gb > 0:
                 result.mem_res_error_pct = _pct_error(rapid_result.peak_gb, row.mem_res_gb)
 
@@ -1314,10 +1404,16 @@ def compute_aggregate_stats(
     stats = {}
 
     if mode in ('mem_only', 'both'):
-        res_errors = [c.mem_res_error_pct for c in comparisons
-                      if c.mem_res_error_pct is not None and not math.isnan(c.mem_res_error_pct)]
-        if res_errors:
-            stats['mem_res'] = _compute_stats('Memory vs Res Error', res_errors)
+        mem_errors = [
+            _memory_error_value(c) for c in comparisons
+            if _memory_error_value(c) is not None and not math.isnan(_memory_error_value(c))
+        ]
+        if mem_errors:
+            memory_key = _memory_metric_key()
+            stats[memory_key] = _compute_stats(
+                f"Memory vs {_memory_metric_label()} Error",
+                mem_errors,
+            )
 
     if mode in ('perf_only', 'both'):
         tok_errors = [c.tok_s_error_pct for c in comparisons
@@ -1344,14 +1440,16 @@ def generate_plots(
     plot_paths = []
 
     if mode in ('mem_only', 'both'):
-        res_errors = [c.mem_res_error_pct for c in comparisons
-                      if c.mem_res_error_pct is not None and not math.isnan(c.mem_res_error_pct)]
-        if res_errors:
+        mem_errors = [
+            _memory_error_value(c) for c in comparisons
+            if _memory_error_value(c) is not None and not math.isnan(_memory_error_value(c))
+        ]
+        if mem_errors:
             fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-            ax.hist(res_errors, bins=50, edgecolor='black', alpha=0.7)
+            ax.hist(mem_errors, bins=50, edgecolor='black', alpha=0.7)
             ax.set_xlabel('Error (%)')
             ax.set_ylabel('Count')
-            title = f"Memory vs Mem Res (n={len(res_errors)})"
+            title = f"Memory vs Mem {_memory_metric_label()} (n={len(mem_errors)})"
             if title_suffix:
                 title += f" - {title_suffix}"
             ax.set_title(title)
@@ -1529,7 +1627,7 @@ def generate_category_outputs(
             "",
             "Metric summary (error %):",
         ]
-        metric_order = ("mem_res", "tok_s")
+        metric_order = (_memory_metric_key(), "tok_s")
         for metric in metric_order:
             stat = stats.get(metric)
             if not stat:
@@ -1620,8 +1718,12 @@ def export_results_csv(
             'rapid_success': c.rapid_result.success,
             'rapid_error': c.rapid_result.error,
             'predicted_peak_gb': c.rapid_result.peak_gb,
+            'actual_mem_alloc_gb': c.row.mem_alloc_gb,
+            'mem_alloc_error_pct': c.mem_alloc_error_pct,
             'actual_mem_res_gb': c.row.mem_res_gb,
             'mem_res_error_pct': c.mem_res_error_pct,
+            'actual_mem_target_gb': _memory_actual_value(c.row),
+            'mem_error_pct': _memory_error_value(c),
             'predicted_tok_s_gpu': c.rapid_result.tok_s_gpu,
             'actual_tok_s_gpu': c.row.tok_s_gpu,
             'tok_s_error_pct': c.tok_s_error_pct,
@@ -1647,41 +1749,40 @@ def _format_config_label(row: BenchmarkRow) -> str:
     )
 
 
+def _sanitize_filename(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+
+
+def _write_yaml_with_header(path: Path, header_lines: Sequence[str], payload: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        for line in header_lines:
+            handle.write(f"# {line}\n")
+        if header_lines:
+            handle.write("\n")
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
 def export_results_short_csv(
     comparisons: List[ComparisonResult],
     output_path: Path,
 ) -> None:
-    """Export a compact, human-readable results CSV."""
+    """Export a compact results-only CSV."""
+    def _fmt_pct(value: Optional[float]) -> Optional[float]:
+        if value is None or math.isnan(value):
+            return None
+        return round(float(value), 1)
+
     rows = []
     for c in comparisons:
-        attention_type = _attention_type(c.row)
         rows.append(
             {
-                "row_index": c.row.row_index,
-                "config": _format_config_label(c.row),
                 "label": c.row.label,
-                "dp": c.row.dp,
-                "tp": c.row.tp,
-                "pp": c.row.pp,
-                "zero_stage": c.row.zero_stage,
-                "gbs": c.row.gbs,
-                "mbs": c.row.mbs,
-                "batch_accum": c.row.batch_accum,
-                "seq_len": c.row.seq_len,
-                "hidden_size": c.row.hidden_size,
-                "num_layers": c.row.num_layers,
-                "attention_type": attention_type,
-                "dtype": c.row.dtype,
-                "status": c.row.status,
-                "oom_error": c.row.oom_error,
-                "after_pp_fix": c.row.after_pp_fix,
-                "rapid_success": c.rapid_result.success,
-                "predicted_tok_s_gpu": c.rapid_result.tok_s_gpu,
+                "actual_mem_target_gb": _memory_actual_value(c.row),
+                "predicted_mem_gb": c.rapid_result.peak_gb,
+                "mem_error_pct": _fmt_pct(_memory_error_value(c)),
                 "actual_tok_s_gpu": c.row.tok_s_gpu,
-                "tok_s_error_pct": c.tok_s_error_pct,
-                "predicted_peak_gb": c.rapid_result.peak_gb,
-                "actual_mem_res_gb": c.row.mem_res_gb,
-                "mem_res_error_pct": c.mem_res_error_pct,
+                "predicted_tok_s_gpu": c.rapid_result.tok_s_gpu,
+                "tok_s_error_pct": _fmt_pct(c.tok_s_error_pct),
             }
         )
     pd.DataFrame(rows).to_csv(output_path, index=False)
@@ -1728,6 +1829,8 @@ def _build_cache_key(
         'mb_graph_cap': MB_GRAPH_CAP,
         'pipeline_mem_schedule': PIPELINE_MEM_SCHEDULE,
         'pipeline_activation_window_mult': PIPELINE_ACTIVATION_WINDOW_MULT,
+        'fast_mode': FAST_MODE,
+        'fast_mode_timeout_s': FAST_MODE_TIMEOUT_S,
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
@@ -1882,10 +1985,13 @@ def _run_rows_parallel(
     if not rows:
         return False
 
+    import time
+
     ctx = multiprocessing.get_context('spawn')
     result_queue: multiprocessing.Queue = ctx.Queue()
     pending: Dict[int, Tuple[multiprocessing.Process, BenchmarkRow]] = {}
     completed: set = set()
+    start_times: Dict[int, float] = {}
 
     row_lookup: Dict[int, BenchmarkRow] = {r.row_index: r for r in rows}
     row_dicts = [asdict(r) for r in rows]
@@ -1905,6 +2011,7 @@ def _run_rows_parallel(
         )
         proc.start()
         pending[row.row_index] = (proc, row)
+        start_times[row.row_index] = time.monotonic()
         return True
 
     def _handle_result(result_data: Dict[str, Any], row: BenchmarkRow) -> None:
@@ -1926,6 +2033,30 @@ def _run_rows_parallel(
         while pending or len(completed) < len(rows):
             completed_ids = []
             for row_id, (proc, row) in list(pending.items()):
+                if FAST_MODE and proc.is_alive():
+                    elapsed = time.monotonic() - start_times.get(row_id, time.monotonic())
+                    if elapsed > FAST_MODE_TIMEOUT_S:
+                        proc.terminate()
+                        time.sleep(0.05)
+                        if proc.is_alive():
+                            try:
+                                proc.kill()
+                            except AttributeError:
+                                proc.terminate()
+                        proc.join(timeout=0.2)
+                        completed_ids.append(row_id)
+                        fail_result = {
+                            'row_index': row_id,
+                            'success': False,
+                            'error': f"Timed out after {FAST_MODE_TIMEOUT_S:.0f}s",
+                            'peak_gb': None,
+                            'capacity_exceeded': False,
+                            'training_time_s': None,
+                            'tok_s_gpu': None,
+                            'mfu': None,
+                        }
+                        _handle_result(fail_result, row)
+                        continue
                 if not proc.is_alive():
                     proc.join(timeout=0.1)
                     completed_ids.append(row_id)
@@ -1944,6 +2075,7 @@ def _run_rows_parallel(
 
             for row_id in completed_ids:
                 pending.pop(row_id, None)
+                start_times.pop(row_id, None)
 
             while True:
                 try:
@@ -1961,7 +2093,6 @@ def _run_rows_parallel(
                     break
 
             if pending:
-                import time
                 time.sleep(0.05)
 
     except KeyboardInterrupt:
@@ -2013,6 +2144,13 @@ def run(
     if rebuild_from_cache_only and not enable_cache:
         enable_cache = True
 
+    if SELECTIVE_RUN:
+        output_dir = SELECTIVE_RUN_OUTPUT_DIR
+        enable_cache = False
+        rebuild_from_cache_only = False
+        if category_output_dir == CATEGORY_OUTPUT_DIR:
+            category_output_dir = output_dir / "categories"
+
     # Load CSV data
     if emit_logs:
         print(f"Loading CSV: {csv_path}")
@@ -2022,8 +2160,21 @@ def run(
         print(f"Loaded {len(rows)} total rows")
 
     # Randomize order before filtering (e.g., when MAX_ROWS is set).
-    rng = random.Random(SHUFFLE_SEED)
-    rng.shuffle(rows)
+    if not SELECTIVE_RUN:
+        rng = random.Random(SHUFFLE_SEED)
+        rng.shuffle(rows)
+
+    if SELECTIVE_RUN:
+        ids = [str(entry).strip() for entry in SELECTIVE_RUN_IDS if str(entry).strip()]
+        if not ids:
+            raise ValueError("SELECTIVE_RUN is enabled but SELECTIVE_RUN_IDS is empty.")
+        selected = [row for row in rows if any(_matches_selective_id(row, token) for token in ids)]
+        missing = [token for token in ids if not any(_matches_selective_id(row, token) for row in rows)]
+        if emit_logs:
+            print(f"[selective] IDs requested: {len(ids)}, matched rows: {len(selected)}")
+            if missing:
+                print(f"[selective] WARNING: no match for IDs: {missing}")
+        rows = selected
 
     # Filter rows
     filtered_rows = filter_rows(rows, mode, assume_bf16, filter_pp_fix, max_rows)
@@ -2197,6 +2348,43 @@ def run(
     export_results_short_csv(comparisons, short_results_csv)
     if emit_logs:
         print(f"Saved short results CSV: {short_results_csv}")
+
+    if SELECTIVE_RUN and SELECTIVE_DUMP_HW_CONFIGS:
+        if comparisons:
+            base_hw_config = load_base_hw_config(hw_config_path)
+            dump_dir = output_dir / "hw_configs"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            model_dump_dir = output_dir / "model_configs"
+            model_dump_dir.mkdir(parents=True, exist_ok=True)
+            run_perf_path = PROJECT_ROOT / "run_perf.py"
+            for comp in comparisons:
+                hw_config_dict = build_hw_config_dict(base_hw_config, comp.row)
+                model_config_dict = build_model_config_dict(
+                    comp.row,
+                    flash_attention=USE_FLASH_ATTENTION,
+                    attention_tile_size=ATTENTION_TILE_SIZE,
+                )
+                label = _format_config_label(comp.row)
+                safe_label = _sanitize_filename(label)
+                dump_path = dump_dir / f"{comp.row.row_index}_{safe_label}.yaml"
+                model_dump_path = model_dump_dir / f"{comp.row.row_index}_{safe_label}.yaml"
+                cmd_lines = [
+                    "Debug run (from any dir):",
+                    (
+                        "RAPID_PERSIST_ASTRASIM_ARTIFACTS=1 "
+                        "RAPID_VISUALIZE_GRAPHS=1 "
+                        "RAPID_PERSIST_ARTIFACT_VIZ=1 "
+                        f"uv run \"{run_perf_path}\" --hardware_config \"{dump_path}\" --model_config \"{model_dump_path}\""
+                    ),
+                ]
+                _write_yaml_with_header(dump_path, cmd_lines, hw_config_dict)
+                with open(model_dump_path, "w", encoding="utf-8") as handle:
+                    yaml.safe_dump(model_config_dict, handle, sort_keys=False)
+            if emit_logs:
+                print(f"Saved {len(comparisons)} hardware configs to: {dump_dir}")
+                print(f"Saved {len(comparisons)} model configs to: {model_dump_dir}")
+        elif emit_logs:
+            print("Selective HW config dump requested, but no comparisons were produced.")
 
     return {
         'stats': stats,

@@ -21,6 +21,7 @@ sw_param:
     stats: as_tensor_format  # Normalization statistics 
     master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
   h2d_bandwidth: 13297674240    # Bytes/s; set -1 to disable H2D timing
+  const_mem_offset: 0 GB # default 0 GB. We will optimize it later.
 
   # DP gradient sync frequency: every_mb (default) or last_mb (sync only on final microbatch; ZeRO-3 stays per-mb)
   dp_microbatch: last_mb

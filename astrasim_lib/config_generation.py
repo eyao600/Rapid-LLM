@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from types import SimpleNamespace
 import math
 from hw_component import Network
@@ -42,24 +42,30 @@ def _ns_from_s(sec: float) -> float:
     return float(sec) * 1e9
 
 
+def _effective_bw_values(bandwidth: object, util: float) -> object:
+    if isinstance(bandwidth, (list, tuple)):
+        return tuple(float(val) * util for val in bandwidth)
+    return float(bandwidth) * util
+
+
+def _as_gbps(value: object) -> object:
+    if isinstance(value, (list, tuple)):
+        return tuple(round(_gbps_from_bps(float(v)), 6) for v in value)
+    return round(_gbps_from_bps(float(value)), 6)
+
+
 def choose_collective(alg: str, topo: str, op: str) -> str:
-    """Resolve ``auto`` policies for collective algorithms."""
+    """Resolve ``auto`` policies for collective algorithms (post-2D unpacking)."""
     if alg != "auto":
         return alg
     if topo == "FullyConnected":
         return "direct"
     if topo == "Switch":
         return "halvingDoubling"
-    if topo == "Torus2D":
-        return "torus2d"
     if topo == "Mesh":
         return "mesh"
-    if topo == "Mesh2D":
-        return "torus2d"
     if topo == "HyperCube":
         return "hypercube"
-    if topo == "KingMesh2D":
-        return "torus2d"
     return "ring"
 
 
@@ -81,12 +87,15 @@ def derive_topology_from_hw(hw_obj) -> str:
 
 def _normalize_topology_name(topo: str) -> str:
     topo_str = str(topo).lower()
+    topo_flat = topo_str.replace("-", "").replace("_", "")
     if topo_str in ("fc", "fullyconnected", "fully_connected", "fully-connected"):
         return "FullyConnected"
     if topo_str in ("ring",):
         return "Ring"
     if topo_str in ("switch",):
         return "Switch"
+    if topo_flat == "fcring2d":
+        return "FCRing2D"
     if topo_str in ("torus2d"):
         return "Torus2D"
     if topo_str in ("mesh",):
@@ -102,7 +111,83 @@ def _normalize_topology_name(topo: str) -> str:
 
 def _is_2d_topology(topo: str) -> bool:
     topo_str = str(topo).strip().lower().replace("-", "").replace("_", "")
-    return topo_str in {"mesh2d", "torus2d", "kingmesh2d"}
+    return topo_str in {"mesh2d", "torus2d", "kingmesh2d", "fcring2d"}
+
+
+def _resolve_2d_dims(
+    dims_value: Sequence[object],
+    axis_sizes: Mapping[str, int],
+    *,
+    dim_label: str,
+    product_size: int,
+) -> Tuple[int, int]:
+    if not isinstance(dims_value, (list, tuple)) or len(dims_value) != 2:
+        raise ValueError(
+            f"Network dimension '{dim_label}' 2D size must be a two-item sequence."
+        )
+    resolved: List[Optional[int]] = [None, None]
+    auto_idx: Optional[int] = None
+    for idx, entry in enumerate(dims_value):
+        if isinstance(entry, str):
+            normalized = entry.strip().lower()
+            if normalized == "auto":
+                if auto_idx is not None:
+                    raise ValueError(
+                        f"Network dimension '{dim_label}' 2D size may include at most one 'auto' entry."
+                    )
+                auto_idx = idx
+                continue
+            if normalized in axis_sizes:
+                resolved[idx] = int(axis_sizes[normalized])
+                continue
+            try:
+                resolved[idx] = int(entry)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Network dimension '{dim_label}' 2D size entries must be integers, "
+                    "parallelism names, or 'auto'."
+                ) from exc
+        else:
+            try:
+                resolved[idx] = int(entry)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Network dimension '{dim_label}' 2D size entries must be integers, "
+                    "parallelism names, or 'auto'."
+                ) from exc
+        if resolved[idx] is not None and resolved[idx] < 1:
+            raise ValueError(
+                f"Network dimension '{dim_label}' 2D size entries must be >= 1."
+            )
+
+    known_product = 1
+    for value in resolved:
+        if value is not None:
+            known_product *= value
+
+    if auto_idx is not None:
+        if known_product <= 0:
+            raise ValueError(
+                f"Network dimension '{dim_label}' 2D size known entries must be > 0."
+            )
+        if product_size % known_product != 0:
+            raise ValueError(
+                f"Network dimension '{dim_label}' 2D size mismatch: "
+                f"product {product_size} is not divisible by known entries {tuple(dims_value)}."
+            )
+        auto_value = product_size // known_product
+        if auto_value < 1:
+            raise ValueError(
+                f"Network dimension '{dim_label}' 2D size auto-resolved entry must be >= 1."
+            )
+        resolved[auto_idx] = auto_value
+
+    if resolved[0] is None or resolved[1] is None:
+        raise ValueError(
+            f"Network dimension '{dim_label}' 2D size could not be fully resolved."
+        )
+
+    return int(resolved[0]), int(resolved[1])
 
 
 def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -116,7 +201,53 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
         bw_value = entry.get("bandwidth")
         lat_value = entry.get("latency")
 
-        if isinstance(topo, str) and (topo.startswith("Torus") or topo.startswith("Mesh")):
+        if isinstance(topo, str) and topo.lower() == "fcring2d":
+            if dims_value is None:
+                raise ValueError("FC-Ring2D requires an explicit 2D size (e.g., size: [8, auto]).")
+            if not isinstance(dims_value, (list, tuple)) or len(dims_value) != 2:
+                raise ValueError("FC-Ring2D size must be a two-item tuple/list.")
+            bw_inner = bw_value
+            bw_outer = bw_value
+            if isinstance(bw_value, (list, tuple)):
+                if len(bw_value) != 2:
+                    raise ValueError("FC-Ring2D bandwidth tuple must have exactly two entries.")
+                bw_inner, bw_outer = bw_value
+            inner = int(dims_value[0])
+            outer = int(dims_value[1])
+            if inner < 1 or outer < 1:
+                raise ValueError("FC-Ring2D size entries must be >= 1.")
+            base = dict(entry)
+            base.pop("dims", None)
+            if inner > 1:
+                expanded.append(
+                    {
+                        **base,
+                        "topology": "FullyConnected",
+                        "npus": inner,
+                        "bandwidth": bw_inner,
+                        "latency": lat_value,
+                    }
+                )
+            if outer > 1:
+                ring_topo = "FullyConnected" if outer <= 2 else "Ring"
+                expanded.append(
+                    {
+                        **base,
+                        "topology": ring_topo,
+                        "npus": outer,
+                        "bandwidth": bw_outer,
+                        "latency": lat_value,
+                    }
+                )
+            if inner <= 1 and outer <= 1:
+                raise ValueError("FC-Ring2D requires at least one dimension with size > 1.")
+            continue
+
+        if isinstance(topo, str) and (
+            topo.startswith("Torus")
+            or topo.startswith("Mesh")
+            or topo.startswith("KingMesh")
+        ):
             dim_count: int
             if dims_value is not None and isinstance(dims_value, (list, tuple)):
                 dim_count = len(dims_value)
@@ -129,6 +260,8 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
             base_name = "Ring" if topo.startswith("Torus") else "Mesh"
             if dims_value is None and isinstance(npus_value, (list, tuple)) and len(npus_value) == dim_count:
                 dims_value = tuple(npus_value)
+            if isinstance(bw_value, (list, tuple)) and len(bw_value) != dim_count:
+                raise ValueError(f"bandwidth entries for topology {topo} must match dimension count {dim_count}.")
             for dim_idx in range(dim_count):
                 if dims_value is not None:
                     if not isinstance(dims_value, (list, tuple)) or len(dims_value) != dim_count:
@@ -145,13 +278,14 @@ def _expand_network_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str,
                         if root * root != int(curr_npu):
                             raise ValueError(f"npus ({curr_npu}) must be a perfect square for 2D topology {topo}.")
                         curr_npu = root
+                curr_bw = bw_value[dim_idx] if isinstance(bw_value, (list, tuple)) else bw_value
                 topology_name = "Mesh" if dim_count == 2 and curr_npu <= 2 else base_name
                 expanded.append(
                     {
                         **entry,
                         "topology": topology_name,
                         "npus": curr_npu,
-                        "bandwidth": bw_value,
+                        "bandwidth": curr_bw,
                         "latency": lat_value,
                     }
                 )
@@ -231,7 +365,14 @@ def generate_astrasim_configs_from_hw(
             base_dim = dimensions[0] if dimensions else None
         if base_dim is None:
             raise ValueError(f"Synthetic dimension requested but no dimensions found in hardware config. Info: Called with filter {axes_filter_original}, npus_count={npus_count}, axes_sizes={axis_sizes_full}.")
-        base_bw = float(getattr(base_dim, "effective_bandwidth", getattr(base_dim, "bandwidth", None)))
+        base_bw_values = _effective_bw_values(
+            getattr(base_dim, "bandwidth", None),
+            float(getattr(base_dim, "util", 1.0)),
+        )
+        if isinstance(base_bw_values, (list, tuple)):
+            base_bw = float(base_bw_values[0]) if base_bw_values else 0.0
+        else:
+            base_bw = float(base_bw_values)
         base_latency = float(getattr(base_dim, "latency", None))
         base_topology = getattr(base_dim, "topology_type", None)
         base_collectives = getattr(base_dim, "collective_override", {}) or {}
@@ -366,7 +507,12 @@ def generate_astrasim_configs_from_hw(
         dims_tuple: Optional[Tuple[int, int]] = None
         use_shape = dims_value is not None and product_size == full_size
         if use_shape:
-            dims_tuple = (int(dims_value[0]), int(dims_value[1]))  # type: ignore[index]
+            dims_tuple = _resolve_2d_dims(
+                dims_value,
+                axis_sizes,
+                dim_label=getattr(dim, "label", getattr(dim, "id", "<unnamed>")),
+                product_size=product_size,
+            )
             shape_product = dims_tuple[0] * dims_tuple[1]
             if shape_product != product_size:
                 raise ValueError(
@@ -387,17 +533,22 @@ def generate_astrasim_configs_from_hw(
             size = size
         if topo == "Ring" and size <= 2:
             topo = "FullyConnected"
-        effective_bw = float(getattr(dim, "effective_bandwidth", dim.bandwidth))
+        effective_bw = _effective_bw_values(
+            getattr(dim, "bandwidth", None),
+            float(getattr(dim, "util", 1.0)),
+        )
+        if transform_2d_to_1d and isinstance(effective_bw, (list, tuple)):
+            effective_bw = effective_bw[0] if effective_bw else 0.0
         latency_s = float(dim.latency)
         entry = {
             "dim": dim,
             "axes": axes_selected,
             "npus": size,
             "topology": topo,
-            "bandwidth": round(_gbps_from_bps(effective_bw), 6),
+            "bandwidth": _as_gbps(effective_bw),
             "latency": round(_ns_from_s(latency_s), 3),
         }
-        if dims_tuple is not None and topo in ["Torus2D", "Mesh2D", "KingMesh2D"]:
+        if dims_tuple is not None and topo in ["Torus2D", "Mesh2D", "KingMesh2D", "FCRing2D"]:
             entry["dims"] = dims_tuple
         network_entries.append(entry)
 
@@ -414,7 +565,7 @@ def generate_astrasim_configs_from_hw(
             first_dim = selected_dims[0][0]
             first_topo = _normalize_topology_name(first_dim.topology_type)
         if first_topo and _is_2d_topology(first_topo) and not transform_2d_to_1d:
-            if first_topo in {"Torus2D", "Mesh2D"}:
+            if first_topo not in {"KingMesh2D"}:
                 non_recursive_from = 2 # TORUS2D, MESH2D - ASSUME RECURSIVE INTERNAL
             else:
                 non_recursive_from = 1 # KINGMESH

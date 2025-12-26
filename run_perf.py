@@ -22,7 +22,7 @@ from memory_estimation import estimate_memory
 
 # Cache handling policy for AstraSim integration.
 # Options: "NO CACHE", "CACHE READONLY", "CACHE READWRITE"
-cache_handling = "CACHE READWRITE"
+cache_handling = "NO_CACHE"
 _CACHE_MODE_MAP = {
     "NO CACHE": "NO_CACHE",
     "CACHE READONLY": "CACHE_READONLY",

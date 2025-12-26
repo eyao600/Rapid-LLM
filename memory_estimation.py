@@ -120,9 +120,9 @@ class MemoryEstimator:
         (
             _total_params_per_rank,
             max_layer_params,
-            _params_per_layer_per_rank,
-            _embedding_params_per_rank,
-            _output_params_per_rank,
+            params_per_layer_per_rank,
+            embedding_params_per_rank,
+            output_params_per_rank,
         ) = tc._param_stats_per_rank(tc.hidden_dim, tc.intermediate_size, tc.vocab_size)
 
         if zero3_ephemeral_peak_bytes is None:
@@ -132,6 +132,120 @@ class MemoryEstimator:
                 zero3_ephemeral_peak_bytes = 0.0
 
         extra_static_bytes_per_device: Dict[int, float] = {}
+
+        bytes_per_param_weight = 0.0
+        bytes_per_param_grad = 0.0
+        bytes_per_param_opt = 0.0
+        if params_per_layer_per_rank:
+            denom = float(params_per_layer_per_rank)
+            bytes_per_param_weight = float(weight_memory_layer) / denom
+            if mode == "training":
+                bytes_per_param_grad = float(gradient_mem_layer) / denom
+                bytes_per_param_opt = float(optimizer_mem_layer) / denom
+
+        per_param_static_bytes = (
+            bytes_per_param_weight + bytes_per_param_grad + bytes_per_param_opt
+        )
+        embedding_static_bytes = float(embedding_params_per_rank) * per_param_static_bytes
+        lm_head_static_bytes = float(output_params_per_rank) * per_param_static_bytes
+        const_mem_offset_bytes = 0.0
+        hw_config = getattr(tc, "hw_config", None)
+        sw_config = getattr(hw_config, "sw_config", None) if hw_config is not None else None
+        if sw_config is not None:
+            const_mem_offset_bytes = float(getattr(sw_config, "const_mem_offset", 0.0) or 0.0)
+
+        def _build_rank_layout():
+            hw_config = getattr(tc, "hw_config", None)
+            layout = getattr(hw_config, "network_layout", None)
+            dimensions = getattr(layout, "dimensions", None) if layout is not None else None
+            if not dimensions:
+                return None
+
+            axis_sizes = {"tp": tp, "cp": cp, "lp": lp, "dp": dp}
+            axis_order = []
+            for dim in dimensions:
+                dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ()) or ()]
+                for name in dim_axes:
+                    if name not in axis_sizes:
+                        raise ValueError(
+                            f"Unsupported parallelism axis '{name}' in network layout. "
+                            "Supported axes for memory estimation are: tp, cp, lp, dp."
+                        )
+                    if name not in axis_order:
+                        axis_order.append(name)
+
+                declared = int(getattr(dim, "size", 1))
+                expected = 1
+                for axis_name in dim_axes:
+                    expected *= axis_sizes.get(axis_name, 1)
+                if expected != declared:
+                    raise ValueError(
+                        f"Network dimension '{getattr(dim, 'label', getattr(dim, 'id', '<unnamed>'))}' "
+                        f"size mismatch: declared {declared}, but parallelism factors imply {expected}."
+                    )
+
+            if not axis_order:
+                return None
+            if tp > 1 and "tp" not in axis_order:
+                raise ValueError("Network layout must include 'tp' when tensor parallelism > 1.")
+            if cp > 1 and "cp" not in axis_order:
+                raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
+            if lp > 1 and "lp" not in axis_order:
+                raise ValueError("Network layout must include 'lp' when pipeline parallelism > 1.")
+
+            axis_strides = {}
+            span = 1
+            for axis in axis_order:
+                axis_strides[axis] = span
+                span *= axis_sizes[axis]
+            return axis_order, axis_sizes, axis_strides
+
+        def _hw_id_for_rank(stage_id: int, tp_rank: int, layout):
+            if layout is None:
+                return stage_id * par_degree + tp_rank
+            axis_order, axis_sizes, axis_strides = layout
+            coords = {}
+            if "tp" in axis_order:
+                coords["tp"] = tp_rank % axis_sizes["tp"]
+            if "cp" in axis_order:
+                coords["cp"] = (tp_rank // axis_sizes["tp"]) % axis_sizes["cp"]
+            if "lp" in axis_order:
+                if stage_id < 0 or stage_id >= axis_sizes.get("lp", 1):
+                    raise ValueError(f"stage_id {stage_id} is out of range for lp={axis_sizes.get('lp', 1)}")
+                coords["lp"] = stage_id % axis_sizes["lp"]
+
+            linear_rank = 0
+            for axis in axis_order:
+                coord = coords.get(axis, 0)
+                size = axis_sizes.get(axis, 1)
+                if coord < 0 or coord >= size:
+                    raise ValueError(f"Coordinate {coord} for axis '{axis}' is out of range <{size}")
+                stride = axis_strides.get(axis)
+                if stride is None:
+                    raise KeyError(f"Rank layout stride missing for axis '{axis}'")
+                linear_rank += coord * stride
+            return linear_rank
+
+        par_degree = max(1, tp * cp)
+        layout = None
+        if embedding_static_bytes or lm_head_static_bytes or const_mem_offset_bytes:
+            layout = _build_rank_layout()
+        if embedding_static_bytes or lm_head_static_bytes:
+            last_stage = max(0, lp - 1)
+            for tp_rank in range(par_degree):
+                if embedding_static_bytes:
+                    hw_id = _hw_id_for_rank(0, tp_rank, layout)
+                    extra_static_bytes_per_device[hw_id] = extra_static_bytes_per_device.get(hw_id, 0.0) + embedding_static_bytes
+                if lm_head_static_bytes:
+                    hw_id = _hw_id_for_rank(last_stage, tp_rank, layout)
+                    extra_static_bytes_per_device[hw_id] = extra_static_bytes_per_device.get(hw_id, 0.0) + lm_head_static_bytes
+        if const_mem_offset_bytes:
+            for stage_id in range(lp):
+                for tp_rank in range(par_degree):
+                    hw_id = _hw_id_for_rank(stage_id, tp_rank, layout)
+                    extra_static_bytes_per_device[hw_id] = (
+                        extra_static_bytes_per_device.get(hw_id, 0.0) + const_mem_offset_bytes
+                    )
 
         kv_cache_bytes_per_layer = 0.0
         if gemm_shapes is None:
@@ -153,7 +267,7 @@ class MemoryEstimator:
             "output_proj": "out_proj",
             "ffn1": "ffn1",
             "ffn2": "ffn2",
-            "linear": "out_proj",
+            "linear": "linear_softmax",
             "router": "ffn1",
         }
 
@@ -172,6 +286,14 @@ class MemoryEstimator:
         if not flash_attention:
             attn_score_bytes = _gemm_out_bytes("attention_score", gemm_type_map["attention_score"])
 
+        softmax_out_bytes = 0.0
+        if "linear" in gemm_shapes:
+            softmax_out_bytes = _gemm_out_bytes("linear", gemm_type_map["linear"])
+        else:
+            tokens = float(batch_size) * float(seq_len_eff)
+            vocab_shard = math.ceil(float(tc.vocab_size) / float(max(1, tp * cp)))
+            softmax_out_bytes = tokens * float(vocab_shard) * float(precision.activations)
+
         router_bytes = 0.0
         if use_moe:
             router_bytes = _gemm_out_bytes("router", gemm_type_map["router"])
@@ -188,10 +310,35 @@ class MemoryEstimator:
             MemKind.LAYERNORM2: out_proj_bytes,  # (batch, seq, hidden_dim)
             MemKind.MLP: ffn2_bytes,
             MemKind.ROUTER: router_bytes,
-            MemKind.EMBEDDING: 0.0,  # Excluded by design
-            MemKind.SOFTMAX: 0.0,  # Excluded by design
+            MemKind.EMBEDDING: out_proj_bytes,
+            MemKind.SOFTMAX: softmax_out_bytes,
             MemKind.OPTIMIZER: 0.0,
         }
+        parallelism_mode = None
+        try:
+            parallelism_mode = tc.get_parallelism_mode()
+        except AttributeError:
+            parallelism_mode = None
+        if parallelism_mode is not None:
+            mode_value = str(getattr(parallelism_mode, "value", parallelism_mode)).lower()
+            if mode_value.endswith("tensor_sequence"):
+                seq_degree = max(1, int(tc._sequence_parallel_degree()))
+                hidden_full_bytes = (
+                    float(batch_size)
+                    * float(seq_len)
+                    * float(tc.hidden_dim)
+                    * float(precision.activations)
+                )
+                hidden_shard_bytes = (
+                    float(batch_size)
+                    * float(math.ceil(float(seq_len) / float(seq_degree)))
+                    * float(tc.hidden_dim)
+                    * float(precision.activations)
+                )
+                base_outputs[MemKind.OUTPUT_PROJ] = hidden_shard_bytes
+                base_outputs[MemKind.MLP] = hidden_shard_bytes
+                base_outputs[MemKind.LAYERNORM1] = hidden_full_bytes
+                base_outputs[MemKind.LAYERNORM2] = hidden_full_bytes
 
         transformer_fallback_bytes = transformer_act_layer
         if mode != "training":
@@ -224,7 +371,8 @@ class MemoryEstimator:
             kv_heads_per_tp = math.ceil(kv_heads / tp)
             kv_tokens = int(kv_cache_tokens)
             kv_cache_bytes_per_layer = (
-                float(kv_heads_per_tp)
+                float(batch_size)
+                * float(kv_heads_per_tp)
                 * float(head_dim)
                 * float(kv_tokens)
                 * float(precision.kv_cache)
@@ -260,6 +408,36 @@ class MemoryEstimator:
         filename: Optional[str] = None,
     ) -> Any:
         """Run memory simulation on the provided graph root."""
+        def _is_non_flattened(root: Any) -> bool:
+            stack = list(root if isinstance(root, (list, tuple)) else [root])
+            visited = set()
+            while stack:
+                current = stack.pop()
+                if current is None:
+                    continue
+                current_id = id(current)
+                if current_id in visited:
+                    continue
+                visited.add(current_id)
+
+                name = getattr(current, "name", "")
+                if isinstance(name, str) and name.startswith("transformer_layer"):
+                    mem_kind = getattr(current, "mem_kind", None)
+                    if mem_kind == MemKind.TRANSFORMER:
+                        return True
+
+                children = getattr(current, "children", None)
+                if isinstance(children, (list, tuple)):
+                    stack.extend(children)
+                elif children is not None:
+                    stack.append(children)
+            return False
+
+        if _is_non_flattened(graph_root):
+            raise RuntimeError(
+                "Memory simulation requires a flattened graph. "
+                "Use LLMExecutionDispatcher.build_flattened_root_for_memory()."
+            )
         return self.time_calc._simulate_with_memory(
             graph_root,
             memory_data,
