@@ -493,7 +493,7 @@ def run_cache_astrasim(
         cmd_str = " ".join(debug_cmd)
         # print(f"Full AstraSim command:\n{cmd_str}")
 
-        while attempts < 5:
+        while attempts < 2:
             attempts += 1
             per_node_sec, max_sec = run_astrasim_analytical(
                 workload_prefix=workload_prefix,
@@ -509,7 +509,7 @@ def run_cache_astrasim(
             time.sleep(0.1)
         if last_outcome_zero:
             raise RuntimeError(
-                f"AstraSim returned zero time for {comm} size={size_bytes} npus={npus_count} after 5 retries.\n"
+                f"AstraSim returned zero time for {comm} size={size_bytes} npus={npus_count} after 2 retries.\n"
                 f"Full AstraSim command:\n{cmd_str}"
             )
 

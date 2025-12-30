@@ -1013,8 +1013,6 @@ class LLMExecutionDispatcher:
                 topo_type = getattr(dim, "topology_type", None)
                 if not topo_type:
                     raise ValueError("optimize_2dmap requires a topology type on the target dimension.")
-                if str(topo_type).strip().lower() == "kingmesh2d":
-                    raise NotImplementedError("optimize_2dmap is not implemented for KingMesh2D.")
                 size_value = getattr(dim, "size", None)
                 if size_value is None:
                     raise ValueError("optimize_2dmap requires an explicit dimension size.")

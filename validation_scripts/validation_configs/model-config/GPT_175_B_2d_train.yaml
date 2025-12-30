@@ -3,15 +3,15 @@ model_param:
   run_type: "training"
   tied_embeddings: false
   model_type: "gpt"
-  global_batch_size: 8
+  global_batch_size: 64
   gradient_accumulation_steps: 1
-  seq_len: 2048
+  seq_len: 4096
   hidden_dim: 12288
   attention:
     attention_type: "mha"
     num_heads: 96
     kv_heads: 96
-    use_flashattention: false
+    use_flashattention: true
     attention_tile_size: 128
   num_experts: 1
   top_k: 1

@@ -1,0 +1,1046 @@
+#!/usr/bin/env python3
+"""
+2D topology test harness for RAPID-LLM (training + inference).
+
+Runs Mesh2D/Torus2D/KingMesh2D comparisons with and without GMap optimization,
+prints tabular results, and emits bar plots.
+"""
+
+import copy
+import hashlib
+import json
+import multiprocessing
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import seaborn as sns  # noqa: E402
+import yaml  # noqa: E402
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+sns.set()
+sns.set_context("notebook", font_scale=1.5)
+
+import config  # noqa: E402
+from validation_scripts import huggingface_bench_validation as hfval  # noqa: E402
+from astrasim_lib import ensure_chakra_available  # noqa: E402
+from inference_timing import TimeCalculationLLMInference  # noqa: E402
+from train_timing import TimeCalculationLLM  # noqa: E402
+
+TRAIN_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_train.yaml"
+TRAIN_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_train.yaml"
+TRAIN_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_train.yaml"
+INF_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_inf.yaml"
+INF_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_inf.yaml"
+INF_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_inf.yaml"
+
+OUTPUT_ROOT = Path("output") / "2d_test"
+PLOT_DIR = OUTPUT_ROOT
+Y_LABEL = "Normalized batch runtime (s)"
+CACHE_VERSION = 1
+CACHE_PATH = OUTPUT_ROOT / "2d_test_cache.json"
+VERBOSE = os.environ.get("RAPID_2D_TEST_VERBOSE", "1") != "0"
+
+NUM_WORKERS = int(os.environ.get("RAPID_2D_TEST_WORKERS", max(1, (os.cpu_count() or 1) - 1)))
+hfval.ASTRA_CACHE_MODE = "NO_CACHE"
+hfval.ASTRA_TMP_ROOT = Path("tmp") / "2d_test_runs"
+hfval.CLEANUP_ASTRA_TMP = True
+
+# TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D")
+TOPOLOGIES = ("Mesh2D", "Torus2D")
+TRAIN_SHAPES = ((8, 8), (4, 16))
+TRAIN_MODELS = (
+    {
+        "label": "70B",
+        "config": TRAIN_70B_MODEL_CONFIG,
+        "parallelisms": (
+            {"tp": 32, "cp": 1, "lp": 2},
+            {"tp": 16, "cp": 1, "lp": 4},
+        ),
+        "axes": ("tp", "lp"),
+    },
+    {
+        "label": "GPT175B",
+        "config": TRAIN_GPT175B_MODEL_CONFIG,
+        "parallelisms": (
+            {"tp": 32, "cp": 1, "lp": 2},
+            {"tp": 16, "cp": 1, "lp": 4},
+        ),
+        "axes": ("tp", "lp"),
+    },
+)
+INF_SHAPES = ((4, 4), (4, 8), (6, 6), (4, 9))
+INF_MODELS = (
+    {"label": "70B", "config": INF_70B_MODEL_CONFIG},
+    {"label": "GPT175B", "config": INF_GPT175B_MODEL_CONFIG},
+)
+
+MODEL_DISPLAY_NAMES = {
+    "70B": "Llama3-70B",
+    "GPT175B": "GPT 175B",
+}
+
+_WORKER_BASE_HW: Optional[Dict[str, Any]] = None
+
+
+def _init_worker(base_hw_config: Dict[str, Any]) -> None:
+    hfval._worker_init(base_hw_config)
+    global _WORKER_BASE_HW
+    _WORKER_BASE_HW = base_hw_config
+
+
+def read_yaml(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def _file_signature(path: str) -> str:
+    payload = Path(path).read_bytes()
+    return hashlib.sha1(payload).hexdigest()
+
+
+def determine_model_mode(model_path: str) -> str:
+    model_dict = read_yaml(model_path)
+    model_param = model_dict.get("model_param") or {}
+    mode = model_param.get("mode")
+    if not mode:
+        raise ValueError(f"model_param.mode must be defined in {model_path}")
+    return str(mode)
+
+
+def _write_temp_yaml(data: Dict[str, Any]) -> str:
+    temp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8")
+    try:
+        yaml.safe_dump(data, temp, default_flow_style=False, sort_keys=False)
+        temp.flush()
+        return temp.name
+    finally:
+        try:
+            temp.close()
+        except Exception:
+            pass
+
+
+def _update_hw_dict(
+    base_hw: Dict[str, Any],
+    *,
+    topology: str,
+    shape: Tuple[int, int],
+    parallelism: Dict[str, int],
+    gmap_opt: bool,
+    parallelism_axes: Sequence[str],
+    mb_override: Optional[int],
+) -> Dict[str, Any]:
+    cfg = copy.deepcopy(base_hw)
+    par = cfg.setdefault("parallelism", {})
+    par["dp"] = 1
+    par["tp"] = int(parallelism["tp"])
+    par["cp"] = int(parallelism["cp"])
+    par["lp"] = int(parallelism["lp"])
+    if mb_override is not None:
+        par["mb"] = int(mb_override)
+
+    net = cfg.setdefault("network", {})
+    dims = list(net.get("dimensions") or [])
+    if not dims:
+        raise ValueError("Hardware config missing network.dimensions")
+    dim0 = dims[0]
+    dim0["size"] = [int(shape[0]), int(shape[1])]
+    topo_block = dim0.setdefault("topology", {})
+    topo_block["type"] = topology
+    topo_block["optimize_2dmap"] = bool(gmap_opt)
+    dim0["parallelisms"] = list(parallelism_axes)
+    net["dimensions"] = [dim0]
+    return cfg
+
+
+def _format_runtime(value: Optional[float]) -> str:
+    if value is None:
+        return "error"
+    return f"{value:.6f}"
+
+
+def _format_mem_fields(
+    exceeded: Optional[bool],
+    violation_gb: Optional[float],
+) -> Tuple[str, str]:
+    if exceeded is None:
+        return "error", ""
+    if exceeded:
+        if violation_gb is None:
+            return "yes", ""
+        return "yes", f"{violation_gb:.2f}"
+    return "no", "0.00"
+
+
+def _slug(parts: Sequence[str]) -> str:
+    cooked = "_".join(part.replace("/", "_") for part in parts if part)
+    return cooked.replace(" ", "").replace(":", "_")
+
+
+def _load_cache() -> Dict[str, Any]:
+    if not CACHE_PATH.exists():
+        return {"version": CACHE_VERSION, "cases": {}}
+    try:
+        with CACHE_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {"version": CACHE_VERSION, "cases": {}}
+    if data.get("version") != CACHE_VERSION:
+        return {"version": CACHE_VERSION, "cases": {}}
+    cases = data.get("cases")
+    if not isinstance(cases, dict):
+        data["cases"] = {}
+    return data
+
+
+def _save_cache(cache: Dict[str, Any]) -> None:
+    try:
+        with CACHE_PATH.open("w", encoding="utf-8") as handle:
+            json.dump(cache, handle, indent=2, sort_keys=True)
+    except Exception:
+        pass
+
+
+def _case_key(case: Dict[str, Any]) -> str:
+    kind = case.get("kind")
+    data: Dict[str, Any] = {
+        "kind": kind,
+        "model": case.get("model_label"),
+        "model_sig": case.get("model_sig"),
+        "hw_sig": case.get("hw_sig"),
+        "topology": case.get("topology"),
+        "shape": case.get("shape"),
+    }
+    if kind == "train":
+        parallelism = case.get("parallelism") or {}
+        data.update(
+            {
+                "tp": parallelism.get("tp"),
+                "cp": parallelism.get("cp"),
+                "lp": parallelism.get("lp"),
+                "gmap_opt": case.get("gmap_opt"),
+                "axes": list(case.get("parallelism_axes") or ()),
+            }
+        )
+    elif kind == "inference":
+        data["tp"] = int(case["shape"][0]) * int(case["shape"][1])
+    return json.dumps(data, sort_keys=True)
+
+
+def _is_cache_row(row: Dict[str, Any]) -> bool:
+    return isinstance(row, dict) and "runtime_s" in row and "topology" in row
+
+
+def _describe_case(case: Dict[str, Any]) -> str:
+    kind = case.get("kind")
+    if kind == "train":
+        parallelism = case.get("parallelism") or {}
+        return (
+            f"train {case.get('model_label')} {case.get('topology')} "
+            f"{case.get('shape')[0]}x{case.get('shape')[1]} "
+            f"tp{parallelism.get('tp')} cp{parallelism.get('cp')} "
+            f"lp{parallelism.get('lp')} gmap={int(case.get('gmap_opt'))}"
+        )
+    if kind == "inference":
+        shape = case.get("shape")
+        tp = int(shape[0]) * int(shape[1])
+        return (
+            f"inference {case.get('model_label')} {case.get('topology')} "
+            f"{shape[0]}x{shape[1]} tp{tp}"
+        )
+    return f"unknown {case}"
+
+
+def _format_tokens(value: int) -> str:
+    if value and value % 1024 == 0:
+        return f"{value // 1024}k"
+    return str(value)
+
+
+def _format_train_label(shape_label: str, tp: int, lp: int) -> str:
+    return f"{shape_label}\nTP={tp}\nPP={lp}"
+
+
+def _format_inf_label(shape_label: str, tp: int) -> str:
+    return f"{shape_label}\nTP={tp}"
+
+
+def _run_training_case(
+    base_hw: Dict[str, Any],
+    *,
+    model_config_path: str,
+    model_label: str,
+    parallelism_axes: Sequence[str],
+    topology: str,
+    shape: Tuple[int, int],
+    parallelism: Dict[str, int],
+    gmap_opt: bool,
+) -> Tuple[Optional[float], Optional[str], Optional[bool], Optional[float]]:
+    mb = 4 * int(parallelism["lp"])
+    run_dir = None
+    prev_env: Dict[str, Optional[str]] = {}
+    hw_dict = _update_hw_dict(
+        base_hw,
+        topology=topology,
+        shape=shape,
+        parallelism=parallelism,
+        gmap_opt=gmap_opt,
+        parallelism_axes=parallelism_axes,
+        mb_override=mb,
+    )
+    temp_path = _write_temp_yaml(hw_dict)
+    desc = _slug(
+        [
+            "train",
+            model_label,
+            f"{topology}",
+            f"{shape[0]}x{shape[1]}",
+            f"tp{parallelism['tp']}",
+            f"cp{parallelism['cp']}",
+            f"lp{parallelism['lp']}",
+            f"gmap{int(gmap_opt)}",
+        ]
+    )
+    out_dir = OUTPUT_ROOT / "train" / desc
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir, prev_env = hfval._prepare_astra_tmp_dir()
+        mode = determine_model_mode(model_config_path)
+        hw_config = config.parse_config(temp_path, config_type="hardware")
+        model_config = config.parse_config(model_config_path, config_type=mode)
+        config.validate_configs(hw_config, model_config)
+        ensure_chakra_available()
+        calc = TimeCalculationLLM(hw_config, model_config, mode, output_dir=str(out_dir))
+        runtime = float(calc.calc_time_llm())
+        mem_exceeded = bool(getattr(calc, "memory_capacity_exceeded", False))
+        mem_violation = float(getattr(calc, "memory_capacity_violation_gb", 0.0) or 0.0)
+        return runtime, None, mem_exceeded, mem_violation
+    except Exception as exc:
+        return None, str(exc), None, None
+    finally:
+        if prev_env:
+            hfval._restore_astra_env(prev_env)
+        if run_dir and hfval.CLEANUP_ASTRA_TMP:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _run_inference_case(
+    base_hw: Dict[str, Any],
+    *,
+    topology: str,
+    shape: Tuple[int, int],
+    model_config_path: str,
+) -> Tuple[Optional[float], Optional[str], Optional[bool], Optional[float]]:
+    run_dir = None
+    prev_env: Dict[str, Optional[str]] = {}
+    tp = int(shape[0]) * int(shape[1])
+    hw_dict = _update_hw_dict(
+        base_hw,
+        topology=topology,
+        shape=shape,
+        parallelism={"tp": tp, "cp": 1, "lp": 1},
+        gmap_opt=False,
+        parallelism_axes=("tp",),
+        mb_override=1,
+    )
+    temp_path = _write_temp_yaml(hw_dict)
+    desc = _slug(["inference", f"{topology}", f"{shape[0]}x{shape[1]}", f"tp{tp}"])
+    out_dir = OUTPUT_ROOT / "inference" / desc
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        run_dir, prev_env = hfval._prepare_astra_tmp_dir()
+        mode = determine_model_mode(model_config_path)
+        hw_config = config.parse_config(temp_path, config_type="hardware")
+        model_config = config.parse_config(model_config_path, config_type=mode)
+        config.validate_configs(hw_config, model_config)
+        ensure_chakra_available()
+        calc = TimeCalculationLLMInference(hw_config, model_config, mode, output_dir=str(out_dir))
+        summary = calc.calc_total_inference_time()
+        runtime = float(summary["total_inference_time"])
+        mem_exceeded = bool(getattr(calc, "memory_capacity_exceeded", False))
+        mem_violation = float(getattr(calc, "memory_capacity_violation_gb", 0.0) or 0.0)
+        return runtime, None, mem_exceeded, mem_violation
+    except Exception as exc:
+        return None, str(exc), None, None
+    finally:
+        if prev_env:
+            hfval._restore_astra_env(prev_env)
+        if run_dir and hfval.CLEANUP_ASTRA_TMP:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+
+def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
+    base_hw = _WORKER_BASE_HW
+    if base_hw is None:
+        return {
+            "error": "Worker base hardware config not initialized",
+            "_case_key": case.get("case_key"),
+        }
+    if VERBOSE:
+        print(f"[2d_test] start {_describe_case(case)}", flush=True)
+    kind = case.get("kind")
+    if kind == "train":
+        runtime, error, mem_exceeded, mem_violation = _run_training_case(
+            base_hw,
+            model_config_path=case["model_config"],
+            model_label=case["model_label"],
+            parallelism_axes=case["parallelism_axes"],
+            topology=case["topology"],
+            shape=case["shape"],
+            parallelism=case["parallelism"],
+            gmap_opt=case["gmap_opt"],
+        )
+        mem_flag, mem_delta = _format_mem_fields(mem_exceeded, mem_violation)
+        row = {
+            "model": case["model_label"],
+            "topology": case["topology"],
+            "shape": f"{case['shape'][0]}x{case['shape'][1]}",
+            "tp": case["parallelism"]["tp"],
+            "cp": case["parallelism"]["cp"],
+            "lp": case["parallelism"]["lp"],
+            "mb": 4 * case["parallelism"]["lp"],
+            "gmap_opt": int(case["gmap_opt"]),
+            "runtime_s": _format_runtime(runtime),
+            "mem_exceeded": mem_flag,
+            "mem_violation_gb": mem_delta,
+        }
+        if error:
+            row["error"] = error
+        row["_case_key"] = case.get("case_key")
+        if VERBOSE:
+            status = row["runtime_s"]
+            print(f"[2d_test] done {_describe_case(case)} -> {status}", flush=True)
+        return row
+    if kind == "inference":
+        runtime, error, mem_exceeded, mem_violation = _run_inference_case(
+            base_hw,
+            topology=case["topology"],
+            shape=case["shape"],
+            model_config_path=case["model_config"],
+        )
+        mem_flag, mem_delta = _format_mem_fields(mem_exceeded, mem_violation)
+        tp = int(case["shape"][0]) * int(case["shape"][1])
+        row = {
+            "model": case["model_label"],
+            "topology": case["topology"],
+            "shape": f"{case['shape'][0]}x{case['shape'][1]}",
+            "tp": tp,
+            "cp": 1,
+            "lp": 1,
+            "mb": 1,
+            "gmap_opt": 0,
+            "runtime_s": _format_runtime(runtime),
+            "mem_exceeded": mem_flag,
+            "mem_violation_gb": mem_delta,
+        }
+        if error:
+            row["error"] = error
+        row["_case_key"] = case.get("case_key")
+        if VERBOSE:
+            status = row["runtime_s"]
+            print(f"[2d_test] done {_describe_case(case)} -> {status}", flush=True)
+        return row
+    return {"error": f"Unknown case kind: {kind}", "_case_key": case.get("case_key")}
+
+
+def _run_cases_parallel(
+    cases: Sequence[Dict[str, Any]],
+    base_hw: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    if not cases:
+        return []
+    if VERBOSE:
+        print(f"[2d_test] running {len(cases)} cases (workers={NUM_WORKERS})", flush=True)
+    progress = None
+    try:
+        from tqdm import tqdm
+
+        progress = tqdm(total=len(cases), desc="2d_test")
+    except Exception:
+        progress = None
+    worker_count = min(NUM_WORKERS, len(cases), os.cpu_count() or 1)
+    if worker_count <= 1:
+        _init_worker(base_hw)
+        results = []
+        for case in cases:
+            results.append(_case_worker(case))
+            if progress is not None:
+                progress.update(1)
+        if progress is not None:
+            progress.close()
+        return results
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(
+        processes=worker_count,
+        initializer=_init_worker,
+        initargs=(base_hw,),
+    ) as pool:
+        results = []
+        for result in pool.imap_unordered(_case_worker, cases):
+            results.append(result)
+            if progress is not None:
+                progress.update(1)
+        if progress is not None:
+            progress.close()
+        return results
+
+
+def _print_table(rows: Sequence[Dict[str, Any]], header: Sequence[str]) -> None:
+    rendered = [[str(row.get(col, "")) for col in header] for row in rows]
+    widths = [len(col) for col in header]
+    for row in rendered:
+        for idx, cell in enumerate(row):
+            widths[idx] = max(widths[idx], len(cell))
+    sep = "  "
+    header_line = sep.join(col.ljust(widths[idx]) for idx, col in enumerate(header))
+    divider = sep.join("-" * widths[idx] for idx in range(len(header)))
+    print(header_line)
+    print(divider)
+    for row in rendered:
+        print(sep.join(row[idx].ljust(widths[idx]) for idx in range(len(header))))
+
+
+def _plot_bar(
+    labels: Sequence[str],
+    values: Sequence[float],
+    *,
+    title: str,
+    ylabel: str,
+    output_path: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 0.45), 6))
+    x = np.arange(len(labels))
+    ax.bar(x, values, color="#4C78A8")
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def _plot_dual_topology_axis(
+    ax: plt.Axes,
+    labels: Sequence[str],
+    mesh_values: Sequence[float],
+    torus_values: Sequence[float],
+    *,
+    title: str,
+    ylabel: Optional[str] = None,
+) -> Tuple[List[Any], List[str]]:
+    x = np.arange(len(labels))
+    width = 0.38
+    torus_handle = ax.bar(x - width / 2, torus_values, width, label="2D Torus")
+    mesh_handle = ax.bar(x + width / 2, mesh_values, width, label="2D Mesh")
+    ax.set_title(title)
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=0, ha="center")
+    return [torus_handle, mesh_handle], ["2D Torus", "2D Mesh"]
+
+
+def _plot_gmap_compare(
+    groups: Sequence[Dict[str, Any]],
+    *,
+    title: str,
+    ylabel: str,
+    output_path: Path,
+) -> None:
+    labels = [entry["label"] for entry in groups]
+    gmap_off = [entry.get("gmap_off") for entry in groups]
+    gmap_on = [entry.get("gmap_on") for entry in groups]
+    x = np.arange(len(labels))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 0.6), 6))
+    ax.bar(x - width / 2, gmap_off, width, label="gmap_off", color="#9ECAE9")
+    ax.bar(x + width / 2, gmap_on, width, label="gmap_on", color="#3182BD")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def main() -> None:
+    hfval._ensure_project_root_on_path()
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    PLOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    train_hw_base = read_yaml(TRAIN_HW_CONFIG)
+    inf_hw_base = read_yaml(INF_HW_CONFIG)
+    train_hw_sig = _file_signature(TRAIN_HW_CONFIG)
+    inf_hw_sig = _file_signature(INF_HW_CONFIG)
+    train_model_sigs = {model["config"]: _file_signature(model["config"]) for model in TRAIN_MODELS}
+    inf_model_sigs = {model["config"]: _file_signature(model["config"]) for model in INF_MODELS}
+
+    cache = _load_cache()
+    cache_cases = cache.setdefault("cases", {})
+
+    train_cases: List[Dict[str, Any]] = []
+    for model in TRAIN_MODELS:
+        for topology in TOPOLOGIES:
+            for shape in TRAIN_SHAPES:
+                for parallelism in model["parallelisms"]:
+                    for gmap_opt in (False, True):
+                        case = {
+                            "kind": "train",
+                            "model_label": model["label"],
+                            "model_config": model["config"],
+                            "model_sig": train_model_sigs.get(model["config"], ""),
+                            "hw_sig": train_hw_sig,
+                            "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                            "topology": topology,
+                            "shape": shape,
+                            "parallelism": parallelism,
+                            "gmap_opt": gmap_opt,
+                        }
+                        case["case_key"] = _case_key(case)
+                        train_cases.append(case)
+
+    inf_cases: List[Dict[str, Any]] = []
+    for model in INF_MODELS:
+        for shape in INF_SHAPES:
+            for topology in TOPOLOGIES:
+                case = {
+                    "kind": "inference",
+                    "model_label": model["label"],
+                    "model_config": model["config"],
+                    "model_sig": inf_model_sigs.get(model["config"], ""),
+                    "hw_sig": inf_hw_sig,
+                    "topology": topology,
+                    "shape": shape,
+                }
+                case["case_key"] = _case_key(case)
+                inf_cases.append(case)
+
+    train_cached_rows = []
+    train_run_cases = []
+    for case in train_cases:
+        cached = cache_cases.get(case["case_key"])
+        if isinstance(cached, dict) and _is_cache_row(cached):
+            train_cached_rows.append(cached)
+        else:
+            train_run_cases.append(case)
+
+    inf_cached_rows = []
+    inf_run_cases = []
+    for case in inf_cases:
+        cached = cache_cases.get(case["case_key"])
+        if isinstance(cached, dict) and _is_cache_row(cached):
+            inf_cached_rows.append(cached)
+        else:
+            inf_run_cases.append(case)
+
+    print(
+        f"[2d_test] cache: train {len(train_cached_rows)}/{len(train_cases)} "
+        f"hits, inf {len(inf_cached_rows)}/{len(inf_cases)} hits",
+        flush=True,
+    )
+    if VERBOSE and train_run_cases:
+        print(f"[2d_test] train cases pending: {len(train_run_cases)}", flush=True)
+    if VERBOSE and inf_run_cases:
+        print(f"[2d_test] inference cases pending: {len(inf_run_cases)}", flush=True)
+
+    train_rows = train_cached_rows + (
+        _run_cases_parallel(train_run_cases, train_hw_base) if train_run_cases else []
+    )
+    inf_rows = inf_cached_rows + (
+        _run_cases_parallel(inf_run_cases, inf_hw_base) if inf_run_cases else []
+    )
+
+    for row in train_rows + inf_rows:
+        case_key = row.get("_case_key")
+        if case_key and _is_cache_row(row):
+            cache_cases[case_key] = row
+
+    train_errors: List[str] = []
+    for row in train_rows:
+        error = row.get("error")
+        if error:
+            train_errors.append(
+                f"{row.get('model')} {row.get('topology')} {row.get('shape')} tp{row.get('tp')} "
+                f"cp{row.get('cp')} lp{row.get('lp')} gmap={row.get('gmap_opt')}: {error}"
+            )
+
+    inf_errors: List[str] = []
+    for row in inf_rows:
+        error = row.get("error")
+        if error:
+            inf_errors.append(
+                f"{row.get('model')} {row.get('topology')} {row.get('shape')}: {error}"
+            )
+
+    def _shape_key(value: str) -> Tuple[int, int]:
+        try:
+            left, right = value.split("x")
+            return int(left), int(right)
+        except Exception:
+            return (0, 0)
+
+    train_rows.sort(
+        key=lambda row: (
+            row.get("model", ""),
+            row.get("topology", ""),
+            _shape_key(row.get("shape", "")),
+            int(row.get("tp", 0) or 0),
+            int(row.get("cp", 0) or 0),
+            int(row.get("lp", 0) or 0),
+            int(row.get("gmap_opt", 0) or 0),
+        )
+    )
+    inf_rows.sort(
+        key=lambda row: (
+            row.get("model", ""),
+            _shape_key(row.get("shape", "")),
+            row.get("topology", ""),
+        )
+    )
+
+    train_header = [
+        "model",
+        "topology",
+        "shape",
+        "tp",
+        "cp",
+        "lp",
+        "mb",
+        "gmap_opt",
+        "runtime_s",
+        "mem_exceeded",
+        "mem_violation_gb",
+        "error",
+    ]
+    inf_header = [
+        "model",
+        "topology",
+        "shape",
+        "tp",
+        "cp",
+        "lp",
+        "mb",
+        "gmap_opt",
+        "runtime_s",
+        "mem_exceeded",
+        "mem_violation_gb",
+        "error",
+    ]
+
+    print("\n=== Training Results ===")
+    _print_table(train_rows, train_header)
+    print("\n=== Inference Results ===")
+    _print_table(inf_rows, inf_header)
+
+    train_tsv = OUTPUT_ROOT / "2d_test_train.tsv"
+    inf_tsv = OUTPUT_ROOT / "2d_test_inf.tsv"
+    with train_tsv.open("w", encoding="utf-8") as handle:
+        handle.write("\t".join(train_header) + "\n")
+        for row in train_rows:
+            handle.write("\t".join(str(row.get(col, "")) for col in train_header) + "\n")
+    with inf_tsv.open("w", encoding="utf-8") as handle:
+        handle.write("\t".join(inf_header) + "\n")
+        for row in inf_rows:
+            handle.write("\t".join(str(row.get(col, "")) for col in inf_header) + "\n")
+
+    _save_cache(cache)
+
+    train_titles: Dict[str, str] = {}
+    for model in TRAIN_MODELS:
+        params = read_yaml(model["config"]).get("model_param") or {}
+        seq_len = int(params.get("seq_len", 0) or 0)
+        display_name = MODEL_DISPLAY_NAMES.get(model["label"], model["label"])
+        train_titles[model["label"]] = f"{display_name}\n[Seq={_format_tokens(seq_len)} tok]"
+
+    inf_titles: Dict[str, str] = {}
+    for model in INF_MODELS:
+        params = read_yaml(model["config"]).get("model_param") or {}
+        seq_len = int(params.get("seq_len", 0) or 0)
+        decode_len = int(params.get("decode_len", 0) or 0)
+        prefill_len = max(seq_len - decode_len, 0)
+        display_name = MODEL_DISPLAY_NAMES.get(model["label"], model["label"])
+        inf_titles[model["label"]] = (
+            f"{display_name}\n"
+            f"[Prefill={_format_tokens(prefill_len)} tok, "
+            f"Decode={_format_tokens(decode_len)} tok]"
+        )
+
+    train_ok = [row for row in train_rows if row.get("runtime_s") != "error"]
+
+    def _combo_key(row: Dict[str, Any]) -> Tuple[str, str, int, int, int]:
+        return (
+            str(row.get("model", "")),
+            str(row.get("shape", "")),
+            int(row.get("tp", 0) or 0),
+            int(row.get("cp", 0) or 0),
+            int(row.get("lp", 0) or 0),
+        )
+
+    train_clean = [row for row in train_ok if row.get("gmap_opt") == 1]
+    topo_groups: Dict[str, Dict[Tuple[str, int, int], Dict[str, float]]] = {}
+    for row in train_clean:
+        model = str(row.get("model", ""))
+        combo = (
+            str(row.get("shape", "")),
+            int(row.get("tp", 0) or 0),
+            int(row.get("lp", 0) or 0),
+        )
+        topo_groups.setdefault(model, {}).setdefault(combo, {})[row["topology"]] = float(
+            row["runtime_s"]
+        )
+
+    train_experiments: Dict[str, List[Dict[str, Any]]] = {}
+    for model_label, combo_map in topo_groups.items():
+        experiments = []
+        for combo, topo_map in combo_map.items():
+            if "Mesh2D" not in topo_map or "Torus2D" not in topo_map:
+                continue
+            torus_val = topo_map["Torus2D"]
+            if torus_val <= 0:
+                continue
+            shape_label, tp, lp = combo
+            mesh_norm = topo_map["Mesh2D"] / torus_val
+            experiments.append(
+                {
+                    "label": _format_train_label(shape_label, tp, lp),
+                    "mesh": mesh_norm,
+                    "torus": 1.0,
+                }
+            )
+        experiments.sort(key=lambda item: item["label"])
+        train_experiments[model_label] = experiments
+
+    if len(train_experiments) > 1:
+        label_sets = [
+            set(item["label"] for item in items)
+            for items in train_experiments.values()
+            if items
+        ]
+        if label_sets:
+            common_labels = set.intersection(*label_sets)
+            if common_labels:
+                for model_label, items in train_experiments.items():
+                    train_experiments[model_label] = [
+                        item for item in items if item["label"] in common_labels
+                    ]
+        for model_label, items in train_experiments.items():
+            items.sort(key=lambda item: item["label"])
+
+    train_order = [model["label"] for model in TRAIN_MODELS]
+    if any(train_experiments.get(label) for label in train_order):
+        max_items = max(
+            len(train_experiments.get(label, [])) for label in train_order if train_order
+        )
+        axis_width = max(5.5, max_items * 0.7)
+        fig, axes = plt.subplots(
+            1,
+            len(train_order),
+            figsize=(axis_width * len(train_order), 6),
+            sharey=True,
+        )
+        if len(train_order) == 1:
+            axes = [axes]
+        legend_handles: Optional[List[Any]] = None
+        legend_labels: Optional[List[str]] = None
+        for ax, model_label in zip(axes, train_order):
+            entries = train_experiments.get(model_label, [])
+            title = train_titles.get(model_label, model_label)
+            if not entries:
+                ax.set_title(title)
+                ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+                continue
+            labels = [item["label"] for item in entries]
+            mesh_vals = [item["mesh"] for item in entries]
+            torus_vals = [item["torus"] for item in entries]
+            handles, labels_text = _plot_dual_topology_axis(
+                ax,
+                labels,
+                mesh_vals,
+                torus_vals,
+                title=title,
+                ylabel=Y_LABEL if legend_handles is None else None,
+            )
+            if legend_handles is None:
+                legend_handles = handles
+                legend_labels = labels_text
+        fig.suptitle("Training runtime vs 2D topology (64 GPUs)", y=0.99)
+        if legend_handles and legend_labels:
+            axes[-1].legend(legend_handles, legend_labels, loc="lower right")
+        fig.subplots_adjust(top=0.81, bottom=0.16, left=0.1, right=0.98, wspace=0.08)
+        fig.savefig(PLOT_DIR / "2d_test_train_topology.png", dpi=200)
+        plt.close(fig)
+
+    compare_groups: Dict[Tuple[str, str, int, int, int], Dict[str, Dict[str, float]]] = {}
+    for row in train_ok:
+        combo = _combo_key(row) 
+        topo = str(row.get("topology", ""))
+        entry = compare_groups.setdefault(combo, {})
+        topo_entry = entry.setdefault(topo, {})
+        if row.get("gmap_opt") == 1:
+            topo_entry["gmap_on"] = float(row["runtime_s"])
+        else:
+            topo_entry["gmap_off"] = float(row["runtime_s"])
+
+    for combo, topo_map in compare_groups.items():
+        groups = []
+        for topo, values in sorted(topo_map.items()):
+            if "gmap_on" in values and "gmap_off" in values:
+                groups.append(
+                    {
+                        "label": topo,
+                        "gmap_on": values["gmap_on"],
+                        "gmap_off": values["gmap_off"],
+                    }
+                )
+        if not groups:
+            continue
+        model, shape_label, tp, cp, lp = combo
+        desc = _slug([model, shape_label, f"tp{tp}", f"cp{cp}", f"lp{lp}"])
+        _plot_gmap_compare(
+            groups,
+            title=f"Training runtime (gmap off vs on) - {model} {shape_label} tp{tp} cp{cp} lp{lp}",
+            ylabel="Predicted batch runtime (s)",
+            output_path=PLOT_DIR / f"2d_test_train_compare_{desc}.png",
+        )
+
+    inf_ok = [row for row in inf_rows if row.get("runtime_s") != "error"]
+    inf_groups: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for row in inf_ok:
+        model = str(row.get("model", ""))
+        shape_label = str(row.get("shape", ""))
+        inf_groups.setdefault(model, {}).setdefault(shape_label, {})[
+            row["topology"]
+        ] = float(row["runtime_s"])
+
+    inf_experiments: Dict[str, List[Dict[str, Any]]] = {}
+    for model_label, shape_map in inf_groups.items():
+        entries = []
+        for shape_label, topo_map in shape_map.items():
+            if "Mesh2D" not in topo_map or "Torus2D" not in topo_map:
+                continue
+            torus_val = topo_map["Torus2D"]
+            if torus_val <= 0:
+                continue
+            dims = _shape_key(shape_label)
+            tp = int(dims[0]) * int(dims[1])
+            mesh_norm = topo_map["Mesh2D"] / torus_val
+            entries.append(
+                {
+                    "label": _format_inf_label(shape_label, tp),
+                    "mesh": mesh_norm,
+                    "torus": 1.0,
+                }
+            )
+        entries.sort(key=lambda item: item["label"])
+        inf_experiments[model_label] = entries
+
+    if len(inf_experiments) > 1:
+        label_sets = [
+            set(item["label"] for item in items)
+            for items in inf_experiments.values()
+            if items
+        ]
+        if label_sets:
+            common_labels = set.intersection(*label_sets)
+            if common_labels:
+                for model_label, items in inf_experiments.items():
+                    inf_experiments[model_label] = [
+                        item for item in items if item["label"] in common_labels
+                    ]
+        for model_label, items in inf_experiments.items():
+            items.sort(key=lambda item: item["label"])
+
+    inf_order = [model["label"] for model in INF_MODELS]
+    if any(inf_experiments.get(label) for label in inf_order):
+        max_items = max(
+            len(inf_experiments.get(label, [])) for label in inf_order if inf_order
+        )
+        axis_width = max(5.5, max_items * 0.7)
+        fig, axes = plt.subplots(
+            1,
+            len(inf_order),
+            figsize=(axis_width * len(inf_order), 6),
+            sharey=True,
+        )
+        if len(inf_order) == 1:
+            axes = [axes]
+        legend_handles = None
+        legend_labels = None
+        for ax, model_label in zip(axes, inf_order):
+            entries = inf_experiments.get(model_label, [])
+            title = inf_titles.get(model_label, model_label)
+            if not entries:
+                ax.set_title(title)
+                ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+                ax.set_axis_off()
+                continue
+            labels = [item["label"] for item in entries]
+            mesh_vals = [item["mesh"] for item in entries]
+            torus_vals = [item["torus"] for item in entries]
+            handles, labels_text = _plot_dual_topology_axis(
+                ax,
+                labels,
+                mesh_vals,
+                torus_vals,
+                title=title,
+                ylabel=Y_LABEL if legend_handles is None else None,
+            )
+            if legend_handles is None:
+                legend_handles = handles
+                legend_labels = labels_text
+        fig.suptitle("Inference runtime vs 2D topology (TP only)", y=0.99)
+        if legend_handles and legend_labels:
+            axes[-1].legend(legend_handles, legend_labels, loc="lower right")
+        fig.subplots_adjust(top=0.81, bottom=0.16, left=0.08, right=0.98, wspace=0.08)
+        fig.savefig(PLOT_DIR / "2d_test_inf_topology.png", dpi=200)
+        plt.close(fig)
+
+    if train_errors or inf_errors:
+        print("\nErrors:")
+        for msg in train_errors + inf_errors:
+            print(f"- {msg}")
+
+    mem_failures = [
+        row
+        for row in (train_rows + inf_rows)
+        if str(row.get("mem_exceeded", "")).lower() == "yes"
+    ]
+    if mem_failures:
+        print("\nMemory capacity exceeded:")
+        for row in mem_failures:
+            label = (
+                f"{row.get('model')} {row.get('topology')} {row.get('shape')} "
+                f"tp{row.get('tp')} cp{row.get('cp')} lp{row.get('lp')} "
+                f"gmap={row.get('gmap_opt')}"
+            )
+            violation = row.get("mem_violation_gb", "")
+            suffix = f" (over by {violation} GiB)" if violation else ""
+            print(f"- {label}{suffix}")
+    else:
+        print("\nMemory capacity exceeded: none")
+
+
+if __name__ == "__main__":
+    main()

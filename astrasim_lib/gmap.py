@@ -447,7 +447,9 @@ def _build_architecture(topology: str, dims: Tuple[int, int]):
         arch.torus2(int(dim_x), int(dim_y))
         return arch
     if topo == "kingmesh2d":
-        raise NotImplementedError("optimize_2dmap does not yet support KingMesh2D mappings.")
+        # SCOTCH lacks a KingMesh2D architecture; approximate with Mesh2D.
+        arch.mesh2(int(dim_x), int(dim_y))
+        return arch
     raise ValueError(f"Unsupported topology '{topology}' for optimize_2dmap.")
 
 
