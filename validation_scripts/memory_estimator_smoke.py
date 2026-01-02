@@ -106,12 +106,31 @@ def _apply_overrides(model_cfg, sched_cfg, cfg: SmokeConfig):
             _set_if_present(model_cfg, key, int(value))
 
     if cfg.num_experts is not None:
-        _set_if_present(model_cfg, "num_experts", int(cfg.num_experts))
+        moe_cfg = getattr(model_cfg, "moe", None)
+        if moe_cfg is not None:
+            moe_cfg.num_experts = int(cfg.num_experts)
     if cfg.top_k is not None:
-        _set_if_present(model_cfg, "top_k", int(cfg.top_k))
+        moe_cfg = getattr(model_cfg, "moe", None)
+        if moe_cfg is not None:
+            moe_cfg.top_k = int(cfg.top_k)
+    moe_cfg = getattr(model_cfg, "moe", None)
+    if moe_cfg is not None:
+        if getattr(model_cfg, "intermediate_size", None) is not None:
+            moe_cfg.moe_intermediate_size = int(getattr(model_cfg, "intermediate_size"))
+        moe_enabled = bool(
+            moe_cfg.num_experts > 1
+            or moe_cfg.top_k > 1
+            or getattr(moe_cfg, "n_shared_experts", 0) > 0
+        )
+        if moe_enabled:
+            moe_cfg.moe_layer_freq = 1
+            moe_cfg.first_k_dense_replace = 0
+        else:
+            moe_cfg.moe_layer_freq = 1
+            moe_cfg.first_k_dense_replace = int(getattr(model_cfg, "num_layers", 1))
 
     if sched_cfg is not None:
-        for key in ("dp", "tp", "cp", "lp", "mb"):
+        for key in ("dp", "tp", "cp", "ep", "lp", "mb"):
             value = getattr(cfg, key)
             if value is not None and hasattr(sched_cfg, key):
                 setattr(sched_cfg, key, int(value))

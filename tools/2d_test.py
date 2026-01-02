@@ -21,6 +21,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
 import yaml  # noqa: E402
@@ -36,19 +37,28 @@ from astrasim_lib import ensure_chakra_available  # noqa: E402
 from inference_timing import TimeCalculationLLMInference  # noqa: E402
 from train_timing import TimeCalculationLLM  # noqa: E402
 
-TRAIN_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_train.yaml"
+H100_GPU = True
+
+if H100_GPU:
+    TRAIN_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/H100_SXM5_80GB_2d.yaml"
+    INF_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/H100_SXM5_80GB_2d.yaml"
+else:
+    TRAIN_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_train.yaml"
+    INF_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_inf.yaml"
+
 TRAIN_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_train.yaml"
 TRAIN_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_train.yaml"
-INF_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_inf.yaml"
 INF_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_inf.yaml"
 INF_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_inf.yaml"
 
 OUTPUT_ROOT = Path("output") / "2d_test"
 PLOT_DIR = OUTPUT_ROOT
 Y_LABEL = "Normalized batch runtime (s)"
-CACHE_VERSION = 1
+CACHE_VERSION = 3
 CACHE_PATH = OUTPUT_ROOT / "2d_test_cache.json"
 VERBOSE = os.environ.get("RAPID_2D_TEST_VERBOSE", "1") != "0"
+AUTO_PARALLELISM = True
+LP_MAX = 8
 
 NUM_WORKERS = int(os.environ.get("RAPID_2D_TEST_WORKERS", max(1, (os.cpu_count() or 1) - 1)))
 hfval.ASTRA_CACHE_MODE = "NO_CACHE"
@@ -57,14 +67,37 @@ hfval.CLEANUP_ASTRA_TMP = True
 
 # TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D")
 TOPOLOGIES = ("Mesh2D", "Torus2D")
-TRAIN_SHAPES = ((8, 8), (4, 16))
+# TRAIN_SHAPES = ((8, 8), (4, 16))
+# TRAIN_MODELS = (
+#     {
+#         "label": "70B",
+#         "config": TRAIN_70B_MODEL_CONFIG,
+#         "parallelisms": (
+#             {"tp": 32, "cp": 1, "lp": 2},
+#             {"tp": 16, "cp": 1, "lp": 4},
+#         ),
+#         "axes": ("tp", "lp"),
+#     },
+#     {
+#         "label": "GPT175B",
+#         "config": TRAIN_GPT175B_MODEL_CONFIG,
+#         "parallelisms": (
+#             {"tp": 32, "cp": 1, "lp": 2},
+#             {"tp": 16, "cp": 1, "lp": 4},
+#         ),
+#         "axes": ("tp", "lp"),
+#     },
+# )
+TRAIN_SHAPES = ((4, 5), (5,6), (4, 8), (6, 6))
 TRAIN_MODELS = (
     {
         "label": "70B",
         "config": TRAIN_70B_MODEL_CONFIG,
         "parallelisms": (
-            {"tp": 32, "cp": 1, "lp": 2},
-            {"tp": 16, "cp": 1, "lp": 4},
+            {"tp": 10, "cp": 1, "lp": 2},  #4,5 = 20 = 10 * 2
+            {"tp": 10, "cp": 1, "lp": 3},  #5,6 = 30 = 3 * 10
+            {"tp": 8, "cp": 1, "lp": 4},  #6,6 = 48 = 8 * 6
+            {"tp": 6, "cp": 1, "lp": 6},  #4,9 = 72 = 8 * 9
         ),
         "axes": ("tp", "lp"),
     },
@@ -72,13 +105,15 @@ TRAIN_MODELS = (
         "label": "GPT175B",
         "config": TRAIN_GPT175B_MODEL_CONFIG,
         "parallelisms": (
-            {"tp": 32, "cp": 1, "lp": 2},
-            {"tp": 16, "cp": 1, "lp": 4},
+            {"tp": 10, "cp": 1, "lp": 2},  #4,5 = 20 = 10 * 2
+            {"tp": 10, "cp": 1, "lp": 3},  #5,6 = 30 = 3 * 10
+            {"tp": 8, "cp": 1, "lp": 4},  #6,6 = 48 = 8 * 6
+            {"tp": 6, "cp": 1, "lp": 6},  #4,9 = 72 = 8 * 9
         ),
         "axes": ("tp", "lp"),
     },
 )
-INF_SHAPES = ((4, 4), (4, 8), (6, 6), (4, 9))
+INF_SHAPES = ((4, 5), (5, 6), (4, 8), (6, 6))
 INF_MODELS = (
     {"label": "70B", "config": INF_70B_MODEL_CONFIG},
     {"label": "GPT175B", "config": INF_GPT175B_MODEL_CONFIG},
@@ -136,7 +171,6 @@ def _update_hw_dict(
     topology: str,
     shape: Tuple[int, int],
     parallelism: Dict[str, int],
-    gmap_opt: bool,
     parallelism_axes: Sequence[str],
     mb_override: Optional[int],
 ) -> Dict[str, Any]:
@@ -157,7 +191,7 @@ def _update_hw_dict(
     dim0["size"] = [int(shape[0]), int(shape[1])]
     topo_block = dim0.setdefault("topology", {})
     topo_block["type"] = topology
-    topo_block["optimize_2dmap"] = bool(gmap_opt)
+    topo_block["optimize_2dmap"] = False
     dim0["parallelisms"] = list(parallelism_axes)
     net["dimensions"] = [dim0]
     return cfg
@@ -228,7 +262,6 @@ def _case_key(case: Dict[str, Any]) -> str:
                 "tp": parallelism.get("tp"),
                 "cp": parallelism.get("cp"),
                 "lp": parallelism.get("lp"),
-                "gmap_opt": case.get("gmap_opt"),
                 "axes": list(case.get("parallelism_axes") or ()),
             }
         )
@@ -249,7 +282,7 @@ def _describe_case(case: Dict[str, Any]) -> str:
             f"train {case.get('model_label')} {case.get('topology')} "
             f"{case.get('shape')[0]}x{case.get('shape')[1]} "
             f"tp{parallelism.get('tp')} cp{parallelism.get('cp')} "
-            f"lp{parallelism.get('lp')} gmap={int(case.get('gmap_opt'))}"
+            f"lp{parallelism.get('lp')}"
         )
     if kind == "inference":
         shape = case.get("shape")
@@ -267,12 +300,71 @@ def _format_tokens(value: int) -> str:
     return str(value)
 
 
+def _format_shape_label(shape_label: str) -> str:
+    if shape_label == "4x5":
+        return "4x5[FRED]"
+    return shape_label
+
+
+def _shape_key(value: str) -> Tuple[int, int]:
+    try:
+        left, right = value.split("x", 1)
+        right = right.split("[", 1)[0]
+        return int(left), int(right)
+    except Exception:
+        return (0, 0)
+
+
+def _candidate_parallelisms(total_devices: int) -> List[Dict[str, int]]:
+    candidates = []
+    for tp in range(1, total_devices + 1):
+        if total_devices % tp != 0:
+            continue
+        lp = total_devices // tp
+        if lp > LP_MAX:
+            continue
+        candidates.append({"tp": tp, "cp": 1, "lp": lp})
+    return candidates
+
+
+def _select_best_parallelisms(
+    rows: Sequence[Dict[str, Any]],
+) -> Dict[Tuple[str, str], Dict[str, int]]:
+    best_valid: Dict[Tuple[str, str], Tuple[float, Dict[str, int]]] = {}
+    best_any: Dict[Tuple[str, str], Tuple[float, Dict[str, int]]] = {}
+    for row in rows:
+        try:
+            runtime = float(row["runtime_s"])
+        except Exception:
+            continue
+        model = str(row.get("model", ""))
+        shape = str(row.get("shape", ""))
+        key = (model, shape)
+        par = {
+            "tp": int(row.get("tp", 0) or 0),
+            "cp": int(row.get("cp", 0) or 0),
+            "lp": int(row.get("lp", 0) or 0),
+        }
+        if runtime > 0:
+            current = best_any.get(key)
+            if current is None or runtime < current[0]:
+                best_any[key] = (runtime, par)
+        if str(row.get("mem_exceeded", "")).lower() == "no" and runtime > 0:
+            current = best_valid.get(key)
+            if current is None or runtime < current[0]:
+                best_valid[key] = (runtime, par)
+    selected: Dict[Tuple[str, str], Dict[str, int]] = {}
+    for key, value in best_any.items():
+        selected[key] = best_valid.get(key, value)[1]
+    return selected
+
+
 def _format_train_label(shape_label: str, tp: int, lp: int) -> str:
-    return f"{shape_label}\nTP={tp}\nPP={lp}"
+    return f"{_format_shape_label(shape_label)}\nTP={tp}\nPP={lp}"
 
 
 def _format_inf_label(shape_label: str, tp: int) -> str:
-    return f"{shape_label}\nTP={tp}"
+    return f"{_format_shape_label(shape_label)}\nTP={tp}"
 
 
 def _run_training_case(
@@ -284,9 +376,8 @@ def _run_training_case(
     topology: str,
     shape: Tuple[int, int],
     parallelism: Dict[str, int],
-    gmap_opt: bool,
 ) -> Tuple[Optional[float], Optional[str], Optional[bool], Optional[float]]:
-    mb = 4 * int(parallelism["lp"])
+    mb = 2 * int(parallelism["lp"])
     run_dir = None
     prev_env: Dict[str, Optional[str]] = {}
     hw_dict = _update_hw_dict(
@@ -294,7 +385,6 @@ def _run_training_case(
         topology=topology,
         shape=shape,
         parallelism=parallelism,
-        gmap_opt=gmap_opt,
         parallelism_axes=parallelism_axes,
         mb_override=mb,
     )
@@ -308,7 +398,6 @@ def _run_training_case(
             f"tp{parallelism['tp']}",
             f"cp{parallelism['cp']}",
             f"lp{parallelism['lp']}",
-            f"gmap{int(gmap_opt)}",
         ]
     )
     out_dir = OUTPUT_ROOT / "train" / desc
@@ -353,7 +442,6 @@ def _run_inference_case(
         topology=topology,
         shape=shape,
         parallelism={"tp": tp, "cp": 1, "lp": 1},
-        gmap_opt=False,
         parallelism_axes=("tp",),
         mb_override=1,
     )
@@ -406,7 +494,6 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             topology=case["topology"],
             shape=case["shape"],
             parallelism=case["parallelism"],
-            gmap_opt=case["gmap_opt"],
         )
         mem_flag, mem_delta = _format_mem_fields(mem_exceeded, mem_violation)
         row = {
@@ -417,7 +504,6 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             "cp": case["parallelism"]["cp"],
             "lp": case["parallelism"]["lp"],
             "mb": 4 * case["parallelism"]["lp"],
-            "gmap_opt": int(case["gmap_opt"]),
             "runtime_s": _format_runtime(runtime),
             "mem_exceeded": mem_flag,
             "mem_violation_gb": mem_delta,
@@ -446,7 +532,6 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             "cp": 1,
             "lp": 1,
             "mb": 1,
-            "gmap_opt": 0,
             "runtime_s": _format_runtime(runtime),
             "mem_exceeded": mem_flag,
             "mem_violation_gb": mem_delta,
@@ -559,27 +644,175 @@ def _plot_dual_topology_axis(
     return [torus_handle, mesh_handle], ["2D Torus", "2D Mesh"]
 
 
-def _plot_gmap_compare(
-    groups: Sequence[Dict[str, Any]],
+def _default_mode_colors() -> Tuple[str, str]:
+    palette = plt.rcParams.get("axes.prop_cycle", None)
+    colors = palette.by_key().get("color", []) if palette else []
+    inf_color = colors[0] if len(colors) > 0 else "#1f77b4"
+    train_color = colors[1] if len(colors) > 1 else "#ff7f0e"
+    return inf_color, train_color
+
+
+def _compute_speedup_ratio(
+    rows: Sequence[Dict[str, Any]],
+) -> Dict[Tuple[str, str], float]:
+    groups: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for row in rows:
+        try:
+            runtime = float(row["runtime_s"])
+        except Exception:
+            continue
+        if runtime <= 0:
+            continue
+        model = str(row.get("model", ""))
+        shape = str(row.get("shape", ""))
+        topo = str(row.get("topology", ""))
+        groups.setdefault(model, {}).setdefault(shape, {})[topo] = runtime
+    ratios: Dict[Tuple[str, str], float] = {}
+    for model, shape_map in groups.items():
+        for shape_label, topo_map in shape_map.items():
+            mesh_val = topo_map.get("Mesh2D")
+            torus_val = topo_map.get("Torus2D")
+            if mesh_val is None or torus_val is None or torus_val <= 0:
+                continue
+            ratios[(model, shape_label)] = mesh_val / torus_val
+    return ratios
+
+
+def _plot_speedup_by_model(
+    train_speedup: Dict[Tuple[str, str], float],
+    inf_speedup: Dict[Tuple[str, str], float],
     *,
-    title: str,
-    ylabel: str,
+    model_order: Sequence[str],
+    shapes: Sequence[str],
     output_path: Path,
 ) -> None:
-    labels = [entry["label"] for entry in groups]
-    gmap_off = [entry.get("gmap_off") for entry in groups]
-    gmap_on = [entry.get("gmap_on") for entry in groups]
-    x = np.arange(len(labels))
-    width = 0.38
-    fig, ax = plt.subplots(figsize=(max(10, len(labels) * 0.6), 6))
-    ax.bar(x - width / 2, gmap_off, width, label="gmap_off", color="#9ECAE9")
-    ax.bar(x + width / 2, gmap_on, width, label="gmap_on", color="#3182BD")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    if not model_order or not shapes:
+        return
+    max_shapes = max(len(shapes), 1)
+    axis_width = max(6.0, max_shapes * 0.7)
+    fig, axes = plt.subplots(
+        1,
+        len(model_order),
+        figsize=(axis_width * len(model_order), 6),
+        sharey=True,
+    )
+    if len(model_order) == 1:
+        axes = [axes]
+    inf_color, train_color = _default_mode_colors()
+    x = np.arange(len(shapes))
+    width = 0.36
+
+    for idx, (ax, model_label) in enumerate(zip(axes, model_order)):
+        title = MODEL_DISPLAY_NAMES.get(model_label, model_label)
+        inf_vals = []
+        train_vals = []
+        for shape in shapes:
+            inf_val = inf_speedup.get((model_label, shape))
+            train_val = train_speedup.get((model_label, shape))
+            inf_vals.append(inf_val if inf_val is not None else np.nan)
+            train_vals.append(train_val if train_val is not None else np.nan)
+        ax.bar(x - width / 2, inf_vals, width, label="inference", color=inf_color)
+        ax.bar(x + width / 2, train_vals, width, label="train", color=train_color)
+        ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.6, alpha=0.85, zorder=3)
+        ax.set_title(title)
+        ax.set_xticks(x)
+        ax.set_xticklabels([_format_shape_label(s) for s in shapes], rotation=0, ha="center")
+        ax.set_ylim(0.95, 1.4)
+        if idx == 0:
+            ax.set_ylabel("2D Torus over Mesh speedup")
+
+    legend_axis = axes[1] if len(axes) > 1 else axes[0]
+    legend_axis.legend(loc="center right")
+    fig.suptitle("2D Torus vs Mesh inference/training runtime comparison", y=0.96)
+    fig.supxlabel("2D topology shape")
+    fig.subplots_adjust(top=0.86, bottom=0.11, left=0.09, right=0.98, wspace=0.08)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def _plot_super_merged_speedup(
+    train_speedup: Dict[Tuple[str, str], float],
+    inf_speedup: Dict[Tuple[str, str], float],
+    *,
+    model_order: Sequence[str],
+    shapes: Sequence[str],
+    output_path: Path,
+) -> None:
+    if not model_order or not shapes:
+        return
+    fig, ax = plt.subplots(figsize=(max(10, len(shapes) * 0.9), 6))
+    inf_color, train_color = _default_mode_colors()
+    model_colors = {}
+    for model_label in model_order:
+        if model_label == "GPT175B":
+            model_colors[model_label] = train_color
+        else:
+            model_colors[model_label] = inf_color
+    mode_order = ["inference", "train"]
+    mode_hatches = {"inference": "", "train": "//"}
+    combos = [(model_label, mode) for model_label in model_order for mode in mode_order]
+    width = 0.72 / max(1, len(combos))
+    offsets = (np.arange(len(combos)) - (len(combos) - 1) / 2) * width
+    x = np.arange(len(shapes))
+
+    prev_hatch_lw = plt.rcParams.get("hatch.linewidth", None)
+    plt.rcParams["hatch.linewidth"] = 0.75
+    try:
+        for idx, (model_label, mode) in enumerate(combos):
+            if mode == "train":
+                values = [
+                    train_speedup.get((model_label, shape))
+                    if train_speedup.get((model_label, shape)) is not None
+                    else np.nan
+                    for shape in shapes
+                ]
+            else:
+                values = [
+                    inf_speedup.get((model_label, shape))
+                    if inf_speedup.get((model_label, shape)) is not None
+                    else np.nan
+                    for shape in shapes
+                ]
+            ax.bar(
+                x + offsets[idx],
+                values,
+                width,
+                color=model_colors[model_label],
+                hatch=mode_hatches[mode],
+            )
+    finally:
+        if prev_hatch_lw is not None:
+            plt.rcParams["hatch.linewidth"] = prev_hatch_lw
+
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.legend()
-    fig.tight_layout()
+    ax.set_xticklabels([_format_shape_label(s) for s in shapes], rotation=0, ha="center")
+    ax.set_ylim(0.95, 1.4)
+    ax.set_ylabel("2D Torus over Mesh speedup")
+    ax.set_xlabel("2D topology and GPU count")
+    ax.set_title("2D Torus vs Mesh inference/training runtime comparison")
+    ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.6, alpha=0.85, zorder=3)
+
+    mode_handles = [
+        Patch(
+            facecolor="#dddddd",
+            hatch="",
+            label="inference",
+        ),
+        Patch(
+            facecolor="#dddddd",
+            hatch="//",
+            label="train",
+        ),
+    ]
+    model_handles = [
+        Patch(
+            facecolor=model_colors.get(model_label, inf_color),
+            label=MODEL_DISPLAY_NAMES.get(model_label, model_label),
+        )
+        for model_label in model_order
+    ]
+    ax.legend(handles=mode_handles + model_handles, loc="center right")
+    fig.subplots_adjust(top=0.88, bottom=0.11, left=0.1, right=0.98)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -600,25 +833,102 @@ def main() -> None:
     cache_cases = cache.setdefault("cases", {})
 
     train_cases: List[Dict[str, Any]] = []
-    for model in TRAIN_MODELS:
-        for topology in TOPOLOGIES:
+    if AUTO_PARALLELISM:
+        if "Mesh2D" not in TOPOLOGIES:
+            raise ValueError("AUTO_PARALLELISM requires Mesh2D to be in TOPOLOGIES")
+        selection_cases: List[Dict[str, Any]] = []
+        for model in TRAIN_MODELS:
             for shape in TRAIN_SHAPES:
-                for parallelism in model["parallelisms"]:
-                    for gmap_opt in (False, True):
-                        case = {
-                            "kind": "train",
-                            "model_label": model["label"],
-                            "model_config": model["config"],
-                            "model_sig": train_model_sigs.get(model["config"], ""),
-                            "hw_sig": train_hw_sig,
-                            "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
-                            "topology": topology,
-                            "shape": shape,
-                            "parallelism": parallelism,
-                            "gmap_opt": gmap_opt,
-                        }
-                        case["case_key"] = _case_key(case)
-                        train_cases.append(case)
+                total_devices = int(shape[0]) * int(shape[1])
+                for parallelism in _candidate_parallelisms(total_devices):
+                    case = {
+                        "kind": "train",
+                        "model_label": model["label"],
+                        "model_config": model["config"],
+                        "model_sig": train_model_sigs.get(model["config"], ""),
+                        "hw_sig": train_hw_sig,
+                        "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                        "topology": "Mesh2D",
+                        "shape": shape,
+                        "parallelism": parallelism,
+                    }
+                    case["case_key"] = _case_key(case)
+                    selection_cases.append(case)
+        selection_cached_rows = []
+        selection_run_cases = []
+        for case in selection_cases:
+            cached = cache_cases.get(case["case_key"])
+            if isinstance(cached, dict) and _is_cache_row(cached):
+                selection_cached_rows.append(cached)
+            else:
+                selection_run_cases.append(case)
+        if VERBOSE:
+            print(
+                f"[2d_test] auto-parallelism sweep: "
+                f"{len(selection_cached_rows)}/{len(selection_cases)} cache hits",
+                flush=True,
+            )
+        selection_rows = selection_cached_rows + (
+            _run_cases_parallel(selection_run_cases, train_hw_base)
+            if selection_run_cases
+            else []
+        )
+        for row in selection_rows:
+            case_key = row.get("_case_key")
+            if case_key and _is_cache_row(row):
+                cache_cases[case_key] = row
+        best_parallelisms = _select_best_parallelisms(selection_rows)
+        missing_best = []
+        for model in TRAIN_MODELS:
+            for shape in TRAIN_SHAPES:
+                shape_label = f"{shape[0]}x{shape[1]}"
+                parallelism = best_parallelisms.get((model["label"], shape_label))
+                if not parallelism:
+                    missing_best.append(f"{model['label']} {shape_label}")
+                    continue
+                for topology in TOPOLOGIES:
+                    case = {
+                        "kind": "train",
+                        "model_label": model["label"],
+                        "model_config": model["config"],
+                        "model_sig": train_model_sigs.get(model["config"], ""),
+                        "hw_sig": train_hw_sig,
+                        "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                        "topology": topology,
+                        "shape": shape,
+                        "parallelism": parallelism,
+                    }
+                    case["case_key"] = _case_key(case)
+                    train_cases.append(case)
+        if missing_best:
+            print(
+                "[2d_test] warning: no valid parallelism found for "
+                + ", ".join(missing_best),
+                flush=True,
+            )
+    else:
+        for model in TRAIN_MODELS:
+            parallelisms = list(model.get("parallelisms") or ())
+            if len(parallelisms) != len(TRAIN_SHAPES):
+                raise ValueError(
+                    f"TRAIN_SHAPES ({len(TRAIN_SHAPES)}) must match parallelisms "
+                    f"({len(parallelisms)}) for model {model.get('label')}"
+                )
+            for topology in TOPOLOGIES:
+                for shape, parallelism in zip(TRAIN_SHAPES, parallelisms):
+                    case = {
+                        "kind": "train",
+                        "model_label": model["label"],
+                        "model_config": model["config"],
+                        "model_sig": train_model_sigs.get(model["config"], ""),
+                        "hw_sig": train_hw_sig,
+                        "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                        "topology": topology,
+                        "shape": shape,
+                        "parallelism": parallelism,
+                    }
+                    case["case_key"] = _case_key(case)
+                    train_cases.append(case)
 
     inf_cases: List[Dict[str, Any]] = []
     for model in INF_MODELS:
@@ -682,7 +992,7 @@ def main() -> None:
         if error:
             train_errors.append(
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')} tp{row.get('tp')} "
-                f"cp{row.get('cp')} lp{row.get('lp')} gmap={row.get('gmap_opt')}: {error}"
+                f"cp{row.get('cp')} lp{row.get('lp')}: {error}"
             )
 
     inf_errors: List[str] = []
@@ -693,13 +1003,6 @@ def main() -> None:
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')}: {error}"
             )
 
-    def _shape_key(value: str) -> Tuple[int, int]:
-        try:
-            left, right = value.split("x")
-            return int(left), int(right)
-        except Exception:
-            return (0, 0)
-
     train_rows.sort(
         key=lambda row: (
             row.get("model", ""),
@@ -708,7 +1011,6 @@ def main() -> None:
             int(row.get("tp", 0) or 0),
             int(row.get("cp", 0) or 0),
             int(row.get("lp", 0) or 0),
-            int(row.get("gmap_opt", 0) or 0),
         )
     )
     inf_rows.sort(
@@ -727,7 +1029,6 @@ def main() -> None:
         "cp",
         "lp",
         "mb",
-        "gmap_opt",
         "runtime_s",
         "mem_exceeded",
         "mem_violation_gb",
@@ -741,7 +1042,6 @@ def main() -> None:
         "cp",
         "lp",
         "mb",
-        "gmap_opt",
         "runtime_s",
         "mem_exceeded",
         "mem_violation_gb",
@@ -788,18 +1088,8 @@ def main() -> None:
 
     train_ok = [row for row in train_rows if row.get("runtime_s") != "error"]
 
-    def _combo_key(row: Dict[str, Any]) -> Tuple[str, str, int, int, int]:
-        return (
-            str(row.get("model", "")),
-            str(row.get("shape", "")),
-            int(row.get("tp", 0) or 0),
-            int(row.get("cp", 0) or 0),
-            int(row.get("lp", 0) or 0),
-        )
-
-    train_clean = [row for row in train_ok if row.get("gmap_opt") == 1]
     topo_groups: Dict[str, Dict[Tuple[str, int, int], Dict[str, float]]] = {}
-    for row in train_clean:
+    for row in train_ok:
         model = str(row.get("model", ""))
         combo = (
             str(row.get("shape", "")),
@@ -888,42 +1178,9 @@ def main() -> None:
         fig.suptitle("Training runtime vs 2D topology (64 GPUs)", y=0.99)
         if legend_handles and legend_labels:
             axes[-1].legend(legend_handles, legend_labels, loc="lower right")
-        fig.subplots_adjust(top=0.81, bottom=0.16, left=0.1, right=0.98, wspace=0.08)
+        fig.subplots_adjust(top=0.81, bottom=0.11, left=0.1, right=0.98, wspace=0.08)
         fig.savefig(PLOT_DIR / "2d_test_train_topology.png", dpi=200)
         plt.close(fig)
-
-    compare_groups: Dict[Tuple[str, str, int, int, int], Dict[str, Dict[str, float]]] = {}
-    for row in train_ok:
-        combo = _combo_key(row) 
-        topo = str(row.get("topology", ""))
-        entry = compare_groups.setdefault(combo, {})
-        topo_entry = entry.setdefault(topo, {})
-        if row.get("gmap_opt") == 1:
-            topo_entry["gmap_on"] = float(row["runtime_s"])
-        else:
-            topo_entry["gmap_off"] = float(row["runtime_s"])
-
-    for combo, topo_map in compare_groups.items():
-        groups = []
-        for topo, values in sorted(topo_map.items()):
-            if "gmap_on" in values and "gmap_off" in values:
-                groups.append(
-                    {
-                        "label": topo,
-                        "gmap_on": values["gmap_on"],
-                        "gmap_off": values["gmap_off"],
-                    }
-                )
-        if not groups:
-            continue
-        model, shape_label, tp, cp, lp = combo
-        desc = _slug([model, shape_label, f"tp{tp}", f"cp{cp}", f"lp{lp}"])
-        _plot_gmap_compare(
-            groups,
-            title=f"Training runtime (gmap off vs on) - {model} {shape_label} tp{tp} cp{cp} lp{lp}",
-            ylabel="Predicted batch runtime (s)",
-            output_path=PLOT_DIR / f"2d_test_train_compare_{desc}.png",
-        )
 
     inf_ok = [row for row in inf_rows if row.get("runtime_s") != "error"]
     inf_groups: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -1013,9 +1270,36 @@ def main() -> None:
         fig.suptitle("Inference runtime vs 2D topology (TP only)", y=0.99)
         if legend_handles and legend_labels:
             axes[-1].legend(legend_handles, legend_labels, loc="lower right")
-        fig.subplots_adjust(top=0.81, bottom=0.16, left=0.08, right=0.98, wspace=0.08)
+        fig.subplots_adjust(top=0.81, bottom=0.11, left=0.08, right=0.98, wspace=0.08)
         fig.savefig(PLOT_DIR / "2d_test_inf_topology.png", dpi=200)
         plt.close(fig)
+
+    train_speedup = _compute_speedup_ratio(train_ok)
+    inf_speedup = _compute_speedup_ratio(inf_ok)
+    merged_shapes = sorted(
+        {f"{shape[0]}x{shape[1]}" for shape in TRAIN_SHAPES}
+        | {f"{shape[0]}x{shape[1]}" for shape in INF_SHAPES},
+        key=_shape_key,
+    )
+    merged_order = [model["label"] for model in TRAIN_MODELS]
+    for model in INF_MODELS:
+        if model["label"] not in merged_order:
+            merged_order.append(model["label"])
+    if merged_shapes:
+        _plot_speedup_by_model(
+            train_speedup,
+            inf_speedup,
+            model_order=merged_order,
+            shapes=merged_shapes,
+            output_path=PLOT_DIR / "2d_test_merged_by_model.png",
+        )
+        _plot_super_merged_speedup(
+            train_speedup,
+            inf_speedup,
+            model_order=merged_order,
+            shapes=merged_shapes,
+            output_path=PLOT_DIR / "2d_test_super_merged.png",
+        )
 
     if train_errors or inf_errors:
         print("\nErrors:")
@@ -1032,8 +1316,7 @@ def main() -> None:
         for row in mem_failures:
             label = (
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')} "
-                f"tp{row.get('tp')} cp{row.get('cp')} lp{row.get('lp')} "
-                f"gmap={row.get('gmap_opt')}"
+                f"tp{row.get('tp')} cp{row.get('cp')} lp{row.get('lp')}"
             )
             violation = row.get("mem_violation_gb", "")
             suffix = f" (over by {violation} GiB)" if violation else ""

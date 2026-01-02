@@ -1039,8 +1039,14 @@ def build_model_config_dict(
             'num_layers': row.num_layers,
             'intermediate_size': intermediate_size,
             'vocab_size': row.vocab_size,
-            'num_experts': 1,
-            'top_k': 1,
+            'moe': {
+                'num_experts': 1,
+                'top_k': 1,
+                'moe_intermediate_size': intermediate_size,
+                'n_shared_experts': 0,
+                'moe_layer_freq': 1,
+                'first_k_dense_replace': row.num_layers,
+            },
             'attention': {
                 'attention_type': attention_type,
                 'num_heads': row.num_heads,

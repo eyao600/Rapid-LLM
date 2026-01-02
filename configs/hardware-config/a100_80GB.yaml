@@ -75,6 +75,7 @@ memory_hierarchy:
 
 parallelism:
   dp: 2 # data parallelism. Acts as replica count during inference
+  ep: 1 # expert parallelism
   tp: 2 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
@@ -82,6 +83,8 @@ parallelism:
   # mb is not a true parallelism parameter, does not affect num of GPUs.
   mb: 4 # micro-batches (for best results set to >= lp). 
 
+  # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
+  tp_ep: true
 network:
   overlap:
     tp_overlap: 0.63

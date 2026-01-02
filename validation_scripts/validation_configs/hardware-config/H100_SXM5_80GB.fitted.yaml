@@ -65,11 +65,14 @@ memory_hierarchy:
 parallelism:
   auto: false
   dp: 1
+  ep: 1 # expert parallelism
   tp: 8
   tp_sp: false
   cp: 1
   lp: 1
   mb: 1
+  # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
+  tp_ep: true
 network:
   dimensions:
   - id: dim0

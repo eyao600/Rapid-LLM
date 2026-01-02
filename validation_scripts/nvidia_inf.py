@@ -11,6 +11,8 @@ import seaborn as sns
 
 sns.set()
 
+FIT_MODEL = False
+
 try:
     from .validation_helpers import (
         ValidationSpec,
@@ -83,10 +85,12 @@ def _resolve_hw_config_path(device: str) -> str:
     if base_name is None:
         raise ValueError(f"No hardware config mapping for device {device}")
     base_path = os.path.join(HARDWARE_CONFIG_PATH, base_name)
-    fitted_name = base_name.replace(".yaml", FITTED_HW_SUFFIX)
-    fitted_path = os.path.join(HARDWARE_CONFIG_PATH, fitted_name)
-    return fitted_path if os.path.exists(fitted_path) else base_path
-
+    if FIT_MODEL:
+        fitted_name = base_name.replace(".yaml", FITTED_HW_SUFFIX)
+        fitted_path = os.path.join(HARDWARE_CONFIG_PATH, fitted_name)
+        return fitted_path if os.path.exists(fitted_path) else base_path
+    else:
+        return base_path
 
 def _load_data(csv_path: Path) -> pd.DataFrame:
     # Skip the leading "// filepath: ..." line by treating '/' as a comment char.

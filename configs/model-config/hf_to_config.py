@@ -45,6 +45,8 @@ def _infer_model_type(model_type_field: Optional[str]) -> Tuple[str, Optional[st
         return "llama", "qwen2"
     if "phi3" in normalized:
         return "llama", "phi3"
+    if "deepseek" in normalized:
+        return "llama", "deepseek"
     if "llama" in lowered:
         return "llama", alias
     if "gpt" in lowered or "opt" in lowered or "mpt" in lowered:
@@ -159,6 +161,16 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
 
     intermediate_size_value = int(intermediate_size) if intermediate_size is not None else 4 * int(hidden_dim)
 
+    moe_intermediate_size = _first(
+        cfg,
+        "moe_intermediate_size",
+        default=_first(lang_cfg, "moe_intermediate_size", default=intermediate_size_value),
+    )
+    try:
+        moe_intermediate_size_value = int(moe_intermediate_size)
+    except (TypeError, ValueError):
+        moe_intermediate_size_value = intermediate_size_value
+
     num_experts = _first(
         cfg,
         "num_local_experts",
@@ -199,6 +211,41 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
     except (TypeError, ValueError):
         top_k_value = 1
     top_k_value = min(top_k_value, num_experts_value)
+    n_shared_experts = _first(
+        cfg,
+        "n_shared_experts",
+        "num_shared_experts",
+        default=_first(lang_cfg, "n_shared_experts", "num_shared_experts", default=0),
+    )
+    try:
+        n_shared_experts_value = max(0, int(n_shared_experts))
+    except (TypeError, ValueError):
+        n_shared_experts_value = 0
+
+    moe_layer_freq = _first(
+        cfg,
+        "moe_layer_freq",
+        "moe_layer_frequency",
+        default=_first(lang_cfg, "moe_layer_freq", "moe_layer_frequency", default=1),
+    )
+    try:
+        moe_layer_freq = int(moe_layer_freq)
+    except (TypeError, ValueError):
+        moe_layer_freq = 1
+
+    first_k_dense_replace = _first(
+        cfg,
+        "first_k_dense_replace",
+        "first_k_dense_layers",
+        default=_first(lang_cfg, "first_k_dense_replace", "first_k_dense_layers", default=0),
+    )
+    try:
+        first_k_dense_replace = int(first_k_dense_replace)
+    except (TypeError, ValueError):
+        first_k_dense_replace = 0
+    if num_experts_value <= 1:
+        # Default to dense-only when MoE parameters are disabled.
+        first_k_dense_replace = int(num_layers)
 
     yaml_dict = {
         "model_param": {
@@ -213,8 +260,14 @@ def _build_yaml_config(cfg: dict, args: argparse.Namespace, model_type: str) -> 
             "hidden_dim": int(hidden_dim),
             "attention": attention_block,
             "intermediate_size": intermediate_size_value,
-            "num_experts": num_experts_value,
-            "top_k": top_k_value,
+            "moe": {
+                "num_experts": num_experts_value,
+                "top_k": top_k_value,
+                "moe_intermediate_size": moe_intermediate_size_value,
+                "n_shared_experts": n_shared_experts_value,
+                "moe_layer_freq": moe_layer_freq,
+                "first_k_dense_replace": first_k_dense_replace,
+            },
             "vocab_size": int(vocab_size),
             "num_layers": int(num_layers),
         },

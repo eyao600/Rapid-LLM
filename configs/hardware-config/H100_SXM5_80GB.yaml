@@ -5,7 +5,7 @@
 # [Semi] https://semianalysis.com/2025/06/23/nvidia-tensor-core-evolution-from-volta-to-blackwell/#4th-generation-tensor-core-warpgroup-level-asynchronous-mma
 
 sw_param:
-  full_recomputation: false # Enable full activation recompute during backward instead of selective recomputation
+  full_recomputation: true # Enable full activation recompute during backward instead of selective recomputation
   kernel_launch_overhead: 9e-6   # (s)
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1
@@ -83,14 +83,17 @@ memory_hierarchy:
 parallelism:
   auto: false
   ### LLM PARAMS ###
-  dp: 2 # data parallelism. Acts as replica count during inference
+  dp: 1 # data parallelism. Acts as replica count during inference
+  ep: 1 # expert parallelism
   tp: 2 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
+  tp_sp: false # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  lp: 2 # pipeline parallelism. Number of pipeline stages
+  lp: 1 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 4 # micro-batches (for best results set to >= lp). 
+  mb: 1 # micro-batches (for best results set to >= lp). 
 
+  # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
+  tp_ep: true
 network:
   dimensions:
     - id: dim0
@@ -98,13 +101,13 @@ network:
       size: auto
       topology:
         type: Ring
-        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        bandwidth: 99999 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
         optimize_2dmap: false
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [tp, cp]
+      parallelisms: [tp, cp, ep]
     - id: dim1
       label: inter_torus_infiniband
       size: auto
