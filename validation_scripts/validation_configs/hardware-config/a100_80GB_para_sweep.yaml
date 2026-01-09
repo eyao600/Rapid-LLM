@@ -14,8 +14,7 @@ sw_param:
     kv_cache: as_tensor_format # KV cache precision. WIP - currently ignored.
     parameters: as_tensor_format  # Model parameter precision
     gradients: as_tensor_format  # Accumulated gradients 
-    grad_microbatch: as_tensor_format  # Ephemeral per-microbatch gradients 
-    grad_communication: as_tensor_format  # Gradient communication precision 
+    grad_communication: fp32  # Gradient communication precision 
     optimizer_states: as_tensor_format  # Optimizer states 
     stats: as_tensor_format  # Normalization statistics 
     master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
@@ -83,16 +82,16 @@ parallelism:
 
   train:
     dp: 2 # data parallelism
-    ep: 4 # expert parallelism
+    ep: 1 # expert parallelism
     # controls expert TP sharding: if false, tp and ep are applied separately to attn/FFN; if true, TP applies to both
-    tp_ep: true
+    tp_ep: false
   inference:
     replica_count: 2 # inference throughput scaling only
-    moe_dp: 2 # inference expert pool expansion (EP_eff = tp * moe_dp)
+    moe_dp: 1 # inference expert pool expansion (EP_eff = tp * moe_dp)
 network:
   overlap:
-    tp_overlap: 0.63
-    tp_sp_overlap: 0.6
+    tp_overlap: 0.0
+    tp_sp_overlap: 0.0
     cp_overlap: 0.0
   # Global faulty links apply to the active AstraSim dimension: [[src, dst, weight]]
   # faulty_links: [[0,1,0.6],[16,17,0.1]]
@@ -101,36 +100,25 @@ network:
       label: torus2d_tp
       size: auto
       topology:
-        type: Ring
-        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        type: FC
+        bandwidth: 200 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
         optimize_2dmap: false
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [tp, cp, ep]
+      parallelisms: [tp, ep, cp]
     - id: dim1
       label: inter_torus_infiniband
       size: auto
       topology:
         type: Ring 
-        bandwidth: 25 GB # SPLIT INTO BW_PER_GPU, BW_TOTAL. BW TOTAL IS ONLY ALLOWED IF PREV DIM is 2D.
-        latency: 5e-6
+        bandwidth: 20 GB # 25GB/s per GPU, N GPUs per node. NOT AGGREGATE.
+        latency: 5e-6 
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [lp,dp]
-    - id: dim2
-      label: inter_torus_infiniband_dp
-      size: auto
-      topology:
-        type: Ring
-        bandwidth: 25 GB
-        latency: 5e-6
-        energy_per_bit: 8e-12 # (J/bit)
-        util: 1.0
-      parallelisms: []
-      collective_override: {} # overrides execution_backend.collectives when provided
 
 execution_backend:
   model: astra # analytical | astra

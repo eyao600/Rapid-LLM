@@ -2,7 +2,7 @@
 """
 2D topology test harness for RAPID-LLM (training + inference).
 
-Runs Mesh2D/Torus2D/KingMesh2D comparisons with and without GMap optimization,
+Runs Mesh2D/Torus2D/KingMesh2D/HyperCube comparisons with and without GMap optimization,
 prints tabular results, and emits bar plots.
 """
 
@@ -65,8 +65,30 @@ hfval.ASTRA_CACHE_MODE = "NO_CACHE"
 hfval.ASTRA_TMP_ROOT = Path("tmp") / "2d_test_runs"
 hfval.CLEANUP_ASTRA_TMP = True
 
-# TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D")
-TOPOLOGIES = ("Mesh2D", "Torus2D")
+TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D", "HyperCube")
+COMP_TOPO = ("Torus2D", "KingMesh2D", "HyperCube")
+
+COMP_TOPO_SPECS = {
+    "Torus2D": {
+        "output": "2d_test_super_merged.png",
+        "ylabel": "2D Torus over Mesh speedup",
+        "title": "2D Torus vs Mesh inference/training runtime comparison",
+        "dynamic_ylim": False,
+    },
+    "KingMesh2D": {
+        "output": "2d_test_super_merged_kingmesh.png",
+        "ylabel": "2D KingMesh over Mesh speedup",
+        "title": "2D KingMesh vs Mesh inference/training runtime comparison",
+        "dynamic_ylim": True,
+    },
+    "HyperCube": {
+        "output": "2d_test_super_merged_hypercube.png",
+        "ylabel": "HyperCube over Mesh speedup",
+        "title": "HyperCube vs Mesh inference/training runtime comparison",
+        "dynamic_ylim": True,
+    },
+}
+# TOPOLOGIES = ("Mesh2D", "Torus2D")
 # TRAIN_SHAPES = ((8, 8), (4, 16))
 # TRAIN_MODELS = (
 #     {
@@ -660,6 +682,9 @@ def _default_mode_colors() -> Tuple[str, str]:
 
 def _compute_speedup_ratio(
     rows: Sequence[Dict[str, Any]],
+    *,
+    baseline_topology: str,
+    target_topology: str,
 ) -> Dict[Tuple[str, str], float]:
     groups: Dict[str, Dict[str, Dict[str, float]]] = {}
     for row in rows:
@@ -676,12 +701,34 @@ def _compute_speedup_ratio(
     ratios: Dict[Tuple[str, str], float] = {}
     for model, shape_map in groups.items():
         for shape_label, topo_map in shape_map.items():
-            mesh_val = topo_map.get("Mesh2D")
-            torus_val = topo_map.get("Torus2D")
-            if mesh_val is None or torus_val is None or torus_val <= 0:
+            baseline_val = topo_map.get(baseline_topology)
+            target_val = topo_map.get(target_topology)
+            if baseline_val is None or target_val is None or target_val <= 0:
                 continue
-            ratios[(model, shape_label)] = mesh_val / torus_val
+            ratios[(model, shape_label)] = baseline_val / target_val
     return ratios
+
+
+def _speedup_ylim(
+    train_speedup: Dict[Tuple[str, str], float],
+    inf_speedup: Dict[Tuple[str, str], float],
+    *,
+    default: Tuple[float, float] = (0.95, 1.4),
+) -> Tuple[float, float]:
+    values = [val for val in train_speedup.values()] + [val for val in inf_speedup.values()]
+    if not values:
+        return default
+    lo = min(values)
+    hi = max(values)
+    lo = min(lo, 1.0)
+    hi = max(hi, 1.0)
+    span = max(hi - lo, 0.0)
+    pad = max(0.05, span * 0.1)
+    lower = max(0.0, lo - pad)
+    upper = hi + pad
+    if upper <= lower:
+        upper = lower + 0.1
+    return (lower, upper)
 
 
 def _plot_speedup_by_model(
@@ -743,6 +790,9 @@ def _plot_super_merged_speedup(
     model_order: Sequence[str],
     shapes: Sequence[str],
     output_path: Path,
+    ylabel: str = "2D Torus over Mesh speedup",
+    title: str = "2D Torus vs Mesh inference/training runtime comparison",
+    y_limits: Optional[Tuple[float, float]] = None,
 ) -> None:
     if not model_order or not shapes:
         return
@@ -792,10 +842,13 @@ def _plot_super_merged_speedup(
 
     ax.set_xticks(x)
     ax.set_xticklabels([_format_shape_label(s) for s in shapes], rotation=0, ha="center")
-    ax.set_ylim(0.95, 1.4)
-    ax.set_ylabel("2D Torus over Mesh speedup")
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    else:
+        ax.set_ylim(0.95, 1.4)
+    ax.set_ylabel(ylabel)
     ax.set_xlabel("2D topology and GPU count")
-    ax.set_title("2D Torus vs Mesh inference/training runtime comparison")
+    ax.set_title(title)
     ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.6, alpha=0.85, zorder=3)
 
     mode_handles = [
@@ -1280,8 +1333,21 @@ def main() -> None:
         fig.savefig(PLOT_DIR / "2d_test_inf_topology.png", dpi=200)
         plt.close(fig)
 
-    train_speedup = _compute_speedup_ratio(train_ok)
-    inf_speedup = _compute_speedup_ratio(inf_ok)
+    speedup_maps: Dict[str, Tuple[Dict[Tuple[str, str], float], Dict[Tuple[str, str], float]]] = {}
+    for topo in COMP_TOPO:
+        speedup_maps[topo] = (
+            _compute_speedup_ratio(
+                train_ok,
+                baseline_topology="Mesh2D",
+                target_topology=topo,
+            ),
+            _compute_speedup_ratio(
+                inf_ok,
+                baseline_topology="Mesh2D",
+                target_topology=topo,
+            ),
+        )
+    train_speedup, inf_speedup = speedup_maps.get("Torus2D", ({}, {}))
     merged_shapes = sorted(
         {f"{shape[0]}x{shape[1]}" for shape in TRAIN_SHAPES}
         | {f"{shape[0]}x{shape[1]}" for shape in INF_SHAPES},
@@ -1299,13 +1365,24 @@ def main() -> None:
             shapes=merged_shapes,
             output_path=PLOT_DIR / "2d_test_merged_by_model.png",
         )
-        _plot_super_merged_speedup(
-            train_speedup,
-            inf_speedup,
-            model_order=merged_order,
-            shapes=merged_shapes,
-            output_path=PLOT_DIR / "2d_test_super_merged.png",
-        )
+        for topo in COMP_TOPO:
+            if topo not in COMP_TOPO_SPECS:
+                continue
+            train_map, inf_map = speedup_maps.get(topo, ({}, {}))
+            spec = COMP_TOPO_SPECS[topo]
+            y_limits = None
+            if spec.get("dynamic_ylim", False):
+                y_limits = _speedup_ylim(train_map, inf_map)
+            _plot_super_merged_speedup(
+                train_map,
+                inf_map,
+                model_order=merged_order,
+                shapes=merged_shapes,
+                output_path=PLOT_DIR / spec["output"],
+                ylabel=spec["ylabel"],
+                title=spec["title"],
+                y_limits=y_limits,
+            )
 
     if train_errors or inf_errors:
         print("\nErrors:")

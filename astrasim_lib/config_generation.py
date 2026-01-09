@@ -66,6 +66,8 @@ def choose_collective(alg: str, topo: str, op: str) -> str:
         return "mesh"
     if topo == "HyperCube":
         return "hypercube"
+    if topo in ("KingMesh2D", "KingMesh"):
+        return "kingmesh"
     return "ring"
 
 
@@ -752,6 +754,10 @@ def generate_astrasim_configs_from_hw(
         )
         if override:
             return override
+        if default_alg == "auto":
+            raw_topo = _normalize_topology_name(getattr(dim, "topology_type", topo_name))
+            if raw_topo == "KingMesh2D" and topo_name != "HyperCube":
+                return "kingmesh"
         return choose_collective(default_alg, topo_name, op)
 
     ag_impl: List[str] = []

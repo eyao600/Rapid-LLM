@@ -54,19 +54,19 @@ plt.rcParams.update({"font.size": 13})
 # -----------------------------------------------------------------------------
 
 # Paths to the baseline configuration files
-HARDWARE_CONFIG_PATH = "configs/hardware-config/a100_80GB.yaml"
-HARDWARE_CONFIG_DIR = "configs/hardware-config"
+HARDWARE_CONFIG_PATH = "validation_scripts/validation_configs/hardware-config/a100_80GB_para_sweep.yaml"
+HARDWARE_CONFIG_DIR = "validation_scripts/validation_configs/hardware-config"
 HW_CONFIGS = []  # Optional: list of hardware configs to sweep; if empty, uses HARDWARE_CONFIG_PATH.
 HW_LABELS = []   # Optional: labels aligned with HW_CONFIGS.
-MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-405B.yaml"
+MODEL_CONFIG_PATH = "validation_scripts/validation_configs/model-config/Llama3.1-405B.yaml"
 
 # Parallelism values to sweep (dense grid). Edit to suit your search space.
 # Values map to the training parallelism block (parallelism.train.dp, etc.).
 PARALLELISM_SWEEP = {
-    "tp": [2**i for i in range(0, 6)],
-    "cp": [2**i for i in range(0, 6)],
+    "tp": [2**i for i in range(0, 7)],
+    "cp": [2**i for i in range(0, 7)],
     "dp": [2**i for i in range(0, 11)],
-    "lp": [2**i for i in range(0, 5)],
+    "lp": [2**i for i in range(0, 6)],
 }
 
 # Optional knobs that still live inside the parallelism section but do not
@@ -78,9 +78,9 @@ OTHER_PARALLELISM_OPTIONS = {
 # GPU count filter: only evaluate combinations whose TP*CP*DP*LP fall inside
 # this inclusive range.
 GPU_COUNT_MIN = 128
-GPU_COUNT_MAX = 2048
+GPU_COUNT_MAX = 1024
 TP_CP_PRODUCT_MIN = 1  # Optional: set to int to filter tp*cp below this threshold.
-TP_CP_PRODUCT_MAX = 128  # Optional: set to int to filter tp*cp above this threshold.
+TP_CP_PRODUCT_MAX = 512  # Optional: set to int to filter tp*cp above this threshold.
 
 # When True, discard configurations whose tp*cp product is not a square power of two.
 ENFORCE_SQUARE_TP_CP = False
@@ -97,6 +97,8 @@ PLOT_JITTER_WIDTH = 0.175
 # Swarm/point styling for better visibility.
 PLOT_POINT_SIZE = 5.0
 PLOT_POINT_EDGE = 0.2
+# Drop points slower than this multiple of the per-GPU best runtime (plot only).
+PLOT_RUNTIME_RATIO_CUTOFF = 10.0
 
 # Default output artefacts
 PLOT_OUTPUT_PATH = "tools/parallelism_sweep.png"
@@ -107,7 +109,7 @@ BEST_RUNTIME_PER_GPU_DIR = "tools/parallelism_best_runtimes_per_gpu"
 BEST_RUNTIME_PER_GPU_COMBINED_PATH = "tools/parallelism_best_runtimes_per_gpu_combined.png"
 BEST_SPEEDUP_PER_GPU_COMBINED_PATH = "tools/parallelism_speedup_per_gpu_combined.png"
 RUNTIME_CACHE_PATH = "tools/parallelism_sweep_cache.csv"
-PLOT_TITLE = "Parallelism sweep – beeswarm on log2(GPUs) categories"
+PLOT_TITLE = "Parallelism options vs runtime"
 
 # AstraSim cache handling within RAPID-LLM (mirrors run_perf default options).
 ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWRITE
@@ -117,9 +119,9 @@ MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in p
 EVALUATE_MEMORY_EXCEEDED = False  # When True, still compute runtime even if memory limits are exceeded (may crash).
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
-MAX_WORKERS = 55
+MAX_WORKERS = 60
 # When True, use a thread pool instead of a process pool (more stable, avoids worker crashes at the cost of GIL contention).
-USE_THREADPOOL = True
+USE_THREADPOOL = False
 
 
 # -----------------------------------------------------------------------------
@@ -812,6 +814,36 @@ def _gpu_exp(n: int) -> float:
     return math.log2(float(n))
 
 
+def _filter_by_runtime_ratio(
+    entries: List[Dict[str, object]],
+    ratio: float,
+) -> List[Dict[str, object]]:
+    if ratio <= 0:
+        return list(entries)
+    best_by_gpu: Dict[int, float] = {}
+    for item in entries:
+        runtime_val = float(item.get("runtime", float("nan")))
+        if not math.isfinite(runtime_val) or runtime_val <= 0:
+            continue
+        ng = int(item.get("num_gpus", 0))
+        best = best_by_gpu.get(ng)
+        if best is None or runtime_val < best:
+            best_by_gpu[ng] = runtime_val
+    if not best_by_gpu:
+        return list(entries)
+    filtered: List[Dict[str, object]] = []
+    for item in entries:
+        ng = int(item.get("num_gpus", 0))
+        best = best_by_gpu.get(ng)
+        runtime_val = float(item.get("runtime", float("nan")))
+        if best is None:
+            filtered.append(item)
+            continue
+        if math.isfinite(runtime_val) and runtime_val <= ratio * best:
+            filtered.append(item)
+    return filtered
+
+
 def plot_results(results, output_path):
     if not results:
         print("No successful configurations to plot.", file=sys.stderr)
@@ -823,6 +855,10 @@ def plot_results(results, output_path):
         if not plot_entries:
             print("Warning: all configurations violate memory limits; skipping plot.", file=sys.stderr)
             return
+    plot_entries = _filter_by_runtime_ratio(plot_entries, PLOT_RUNTIME_RATIO_CUTOFF)
+    if not plot_entries:
+        print("Warning: no configurations remain after runtime ratio filtering; skipping plot.", file=sys.stderr)
+        return
 
     metric_key = "runtime" if PLOT_METRIC.lower() == "runtime" else "performance"
 
