@@ -122,7 +122,7 @@ TOKS_PER_GPU_DENOM = "num_gpus"
 USE_DERIVED_MICROBATCH_COUNT = True
 MB_GRAPH_CAP: Optional[int] = None  # cap microbatch count in graph to keep runs fast (None disables)
 PIPELINE_MEM_SCHEDULE = "1f1b"   # "gpipe" to disable, "1f1b"/"auto" to scale activations
-PIPELINE_ACTIVATION_WINDOW_MULT = 2.0  # effective in-flight window = ceil(lp * multiplier)
+PIPELINE_ACTIVATION_WINDOW_MULT = 2.0  # effective in-flight window = ceil(pp * multiplier)
 
 # Category plotting
 CATEGORY_RUN: Optional[Sequence[str] | str] = ("all")  # "auto", "default", "all", or list of category names
@@ -938,7 +938,7 @@ def build_hw_config_dict(
     config['parallelism'] = {
         'auto': False,
         'tp': row.tp,
-        'lp': row.pp,
+        'pp': row.pp,
         'cp': 1,
         'mb': rapid_mb,
         'tp_sp': True,
@@ -951,16 +951,16 @@ def build_hw_config_dict(
     config['sw_param']['dp_zero_stage'] = row.zero_stage
 
     # Override network dimensions with bandwidths from CSV.
-    # Always use 3 dims: inner=tp/cp, mid=lp, outer=dp.
+    # Always use 3 dims: inner=tp/cp, mid=pp, outer=dp.
     tp_use_inter = row.tp > GCN
-    lp_use_inter = (row.tp * row.pp) > GCN
+    pp_use_inter = (row.tp * row.pp) > GCN
     dp_use_inter = (row.nodes > 1) and (row.dp > 1)
 
     # tp_bw = _avg_positive(
     #     [row.rs_inter, row.ag_inter] if tp_use_inter else [row.rs_intra, row.ag_intra]
     # )
-    # lp_bw = _avg_positive(
-    #     [row.rs_inter, row.ag_inter] if lp_use_inter else [row.rs_intra, row.ag_intra]
+    # pp_bw = _avg_positive(
+    #     [row.rs_inter, row.ag_inter] if pp_use_inter else [row.rs_intra, row.ag_intra]
     # )
     # dp_bw = _avg_positive(
     #     [row.ar_inter] if dp_use_inter else [row.ar_intra]
@@ -971,8 +971,8 @@ def build_hw_config_dict(
     )
     tp_bw_intra = _min_positive([row.rs_intra, row.ag_intra])
     tp_bw_inter = _min_positive([row.rs_inter, row.ag_inter])
-    lp_bw = _min_positive(
-        [row.rs_inter, row.ag_inter] if lp_use_inter else [row.rs_intra, row.ag_intra]
+    pp_bw = _min_positive(
+        [row.rs_inter, row.ag_inter] if pp_use_inter else [row.rs_intra, row.ag_intra]
     )
     dp_bw = _min_positive(
         [row.ar_inter] if dp_use_inter else [row.ar_intra]
@@ -1001,9 +1001,9 @@ def build_hw_config_dict(
                     f"{int(round(tp_inter))} GB",
                 )
     if len(dims) >= 2:
-        dims[1]['parallelisms'] = ['lp']
-        if lp_bw is not None and lp_bw > 0:
-            dims[1].setdefault('topology', {})['bandwidth'] = f"{int(round(lp_bw))} GB"
+        dims[1]['parallelisms'] = ['pp']
+        if pp_bw is not None and pp_bw > 0:
+            dims[1].setdefault('topology', {})['bandwidth'] = f"{int(round(pp_bw))} GB"
     if len(dims) >= 3:
         dims[2]['parallelisms'] = ['dp']
         if dp_bw is not None and dp_bw > 0:
@@ -1115,12 +1115,12 @@ def _pipeline_activation_window_factor(row: BenchmarkRow, tc: Any) -> float:
         return 1.0
     mb_actual = _infer_actual_microbatch_count(row)
     mb_graph = max(1, int(getattr(tc, "mb", 1)))
-    lp = max(1, int(getattr(tc, "lp", 1)))
-    if mb_actual <= 1 or lp <= 1 or mb_graph <= 0:
+    pp = max(1, int(getattr(tc, "pp", 1)))
+    if mb_actual <= 1 or pp <= 1 or mb_graph <= 0:
         return 1.0
-    # window = max(1, int(math.ceil(lp * PIPELINE_ACTIVATION_WINDOW_MULT)))
+    # window = max(1, int(math.ceil(pp * PIPELINE_ACTIVATION_WINDOW_MULT)))
     # try pp * mult and also (pp*mult*2-2)
-    window = max(1, int(math.ceil(lp * PIPELINE_ACTIVATION_WINDOW_MULT * 2 - 2)))
+    window = max(1, int(math.ceil(pp * PIPELINE_ACTIVATION_WINDOW_MULT * 2 - 2)))
     window = min(window, mb_actual)
     return float(window) / float(mb_graph)
 

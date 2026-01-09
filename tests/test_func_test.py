@@ -33,18 +33,18 @@ BACKEND_OVERRIDES: Dict[str, Dict[str, object]] = {
 }
 
 PARALLELISM_TRAIN: Tuple[Dict[str, object], ...] = (
-  {"dp": 1, "tp": 1, "cp": 1, "lp": 1, "mb": 1, "tp_sp": False},
-  {"dp": 2, "tp": 1, "cp": 1, "lp": 2, "mb": 2, "tp_sp": False},
-  {"dp": 1, "tp": 2, "cp": 1, "lp": 2, "mb": 2, "tp_sp": True},
-  {"dp": 1, "tp": 1, "cp": 2, "lp": 2, "mb": 2, "tp_sp": False},
-  {"dp": 2, "tp": 2, "cp": 2, "lp": 2, "mb": 2, "tp_sp": True},
+  {"dp": 1, "tp": 1, "cp": 1, "pp": 1, "mb": 1, "tp_sp": False},
+  {"dp": 2, "tp": 1, "cp": 1, "pp": 2, "mb": 2, "tp_sp": False},
+  {"dp": 1, "tp": 2, "cp": 1, "pp": 2, "mb": 2, "tp_sp": True},
+  {"dp": 1, "tp": 1, "cp": 2, "pp": 2, "mb": 2, "tp_sp": False},
+  {"dp": 2, "tp": 2, "cp": 2, "pp": 2, "mb": 2, "tp_sp": True},
 )
 
 PARALLELISM_INF: Tuple[Dict[str, object], ...] = (
-  {"dp": 1, "tp": 1, "cp": 1, "lp": 1, "mb": 1, "tp_sp": False},
-  {"dp": 2, "tp": 1, "cp": 1, "lp": 2, "mb": 2, "tp_sp": False},
-  {"dp": 1, "tp": 2, "cp": 1, "lp": 2, "mb": 2, "tp_sp": True},
-  {"dp": 2, "tp": 2, "cp": 1, "lp": 2, "mb": 2, "tp_sp": True},
+  {"dp": 1, "tp": 1, "cp": 1, "pp": 1, "mb": 1, "tp_sp": False},
+  {"dp": 2, "tp": 1, "cp": 1, "pp": 2, "mb": 2, "tp_sp": False},
+  {"dp": 1, "tp": 2, "cp": 1, "pp": 2, "mb": 2, "tp_sp": True},
+  {"dp": 2, "tp": 2, "cp": 1, "pp": 2, "mb": 2, "tp_sp": True},
 )
 
 MODEL_TYPES = ("gpt", "llama", "glm4_moe")
@@ -115,7 +115,7 @@ def _build_hw_overrides(
   ep: int,
   tp: int,
   cp: int,
-  lp: int,
+  pp: int,
   mb: int,
   tp_sp: bool,
   run_type: str,
@@ -129,7 +129,7 @@ def _build_hw_overrides(
       "tp": int(tp),
       "tp_sp": bool(tp_sp),
       "cp": int(cp),
-      "lp": int(lp),
+      "pp": int(pp),
       "mb": int(mb),
       "train": {"dp": int(dp), "ep": int(ep), "tp_ep": True},
       "inference": {"replica_count": inference_replica, "moe_dp": inference_moe_dp},
@@ -154,12 +154,12 @@ def _build_dense_specs(run_type: str) -> List[ValidationSpec]:
   for idx, (model_type, attention_type, backend, par) in enumerate(
     product(MODEL_TYPES, ATTN_TYPES, BACKENDS, parallelism_grid)
   ):
-    lp = int(par["lp"])
-    num_layers = 2 * lp
+    pp = int(par["pp"])
+    num_layers = 2 * pp
     label = (
       f"{run_type}:dense:{model_type}:{attention_type}:{backend}"
       f":dp{par['dp']}:ep1:tp{par['tp']}:cp{par['cp']}"
-      f":lp{lp}:mb{par['mb']}:tp_sp{par['tp_sp']}"
+      f":pp{pp}:mb{par['mb']}:tp_sp{par['tp_sp']}"
     )
     spec = ValidationSpec(
       label=label,
@@ -176,7 +176,7 @@ def _build_dense_specs(run_type: str) -> List[ValidationSpec]:
         ep=1,
         tp=int(par["tp"]),
         cp=int(par["cp"]),
-        lp=lp,
+        pp=pp,
         mb=int(par["mb"]),
         tp_sp=bool(par["tp_sp"]),
         run_type=run_type,
@@ -208,17 +208,17 @@ def _build_moe_specs(run_type: str) -> List[ValidationSpec]:
     # skip flattened backend
     if backend == "flattened":
       continue
-    dp, ep, tp, cp, lp, mb, tp_sp = par
+    dp, ep, tp, cp, pp, mb, tp_sp = par
     if run_type == "inference" and cp > 1:
       continue
     if cp > 1 and ep > 1:
       continue
     if ep > 1 and tp > 1 and not tp_sp:
       continue
-    num_layers = 2 * int(lp)
+    num_layers = 2 * int(pp)
     label = (
       f"{run_type}:moe:glm4_moe:{attention_type}:{backend}"
-      f":dp{dp}:ep{ep}:tp{tp}:cp{cp}:lp{lp}:mb{mb}:tp_sp{tp_sp}"
+      f":dp{dp}:ep{ep}:tp{tp}:cp{cp}:pp{pp}:mb{mb}:tp_sp{tp_sp}"
     )
     spec = ValidationSpec(
       label=label,
@@ -235,7 +235,7 @@ def _build_moe_specs(run_type: str) -> List[ValidationSpec]:
         ep=ep,
         tp=tp,
         cp=cp,
-        lp=lp,
+        pp=pp,
         mb=mb,
         tp_sp=tp_sp,
         run_type=run_type,
@@ -252,7 +252,7 @@ def _build_moe_specs(run_type: str) -> List[ValidationSpec]:
           "ep": ep,
           "tp": tp,
           "cp": cp,
-          "lp": lp,
+          "pp": pp,
           "mb": mb,
           "tp_sp": tp_sp,
         },
@@ -298,8 +298,8 @@ ALL_SPECS = TRAIN_SPECS + INF_SPECS
 _ensure_unique_labels(ALL_SPECS)
 SPEC_LABELS = [spec.label for spec in ALL_SPECS]
 XFAIL_LABELS = {
-  "training:moe:glm4_moe:mha:hierarchical:dp2:ep2:tp2:cp1:lp2:mb2:tp_spTrue",
-  "training:moe:glm4_moe:gqa:hierarchical:dp2:ep2:tp2:cp1:lp2:mb2:tp_spTrue",
+  "training:moe:glm4_moe:mha:hierarchical:dp2:ep2:tp2:cp1:pp2:mb2:tp_spTrue",
+  "training:moe:glm4_moe:gqa:hierarchical:dp2:ep2:tp2:cp1:pp2:mb2:tp_spTrue",
 }
 PARAMS = [
   pytest.param(

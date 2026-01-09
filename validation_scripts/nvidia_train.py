@@ -127,7 +127,7 @@ def _build_spec(
       "tp": int(tp),
       "tp_sp": bool(tp_sp),
       "cp": int(cp),
-      "lp": int(pp),
+      "pp": int(pp),
       "mb": max(1, int(mb)),
       "train": {"dp": int(dp), "ep": 1, "tp_ep": True},
       "inference": {"replica_count": 1, "moe_dp": 1},

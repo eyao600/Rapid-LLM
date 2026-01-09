@@ -91,7 +91,7 @@ def _build_spec(
             "tp": int(tp),
             "tp_sp": False,
             "cp": int(cp),
-            "lp": int(pp),
+            "pp": int(pp),
             "mb": int(pp),  # align microbatch count with pipeline stages
             "train": {"dp": int(dp), "ep": 1, "tp_ep": True},
             "inference": {"replica_count": 1, "moe_dp": 1},

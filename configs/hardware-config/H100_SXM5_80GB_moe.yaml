@@ -86,9 +86,9 @@ parallelism:
   tp: 1 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  lp: 23 # pipeline parallelism. Number of pipeline stages
+  pp: 23 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 23 # micro-batches (for best results set to >= lp). 
+  mb: 23 # micro-batches (for best results set to >= pp). 
 
   train:
     dp: 1 # data parallelism
@@ -122,7 +122,7 @@ network:
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [lp,dp]
+      parallelisms: [pp,dp]
     - id: dim2
       label: inter_torus_infiniband_dp
       size: auto

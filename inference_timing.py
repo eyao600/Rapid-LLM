@@ -591,7 +591,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             total_hbm_bytes += op.forward.memory_accesses.get("L3", 0.0)
             inter_comm_bytes += op.forward.comm_bytes
 
-        total_comm_bytes = self.num_layers * inter_comm_bytes + (self.lp - 1) * cross_layer_comm
+        total_comm_bytes = self.num_layers * inter_comm_bytes + (self.pp - 1) * cross_layer_comm
 
         energy_per_flop = self.core.nominal_energy_per_flop
         energy_hbm_byte = self.DRAM.dynamic_energy_per_bit * 8
@@ -889,7 +889,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             use_moe=self.use_moe,
             num_experts=self.moe_num_experts,
             top_k=self.moe_top_k,
-            lp=self.lp,
+            pp=self.pp,
             tp=self.tp,
             tp_sp=self.tp_sp,
             moe_dp=self.moe_dp,

@@ -85,7 +85,7 @@ def _base_parallelism_defaults(base_hw_dict: Optional[Dict[str, object]]) -> Dic
     defaults: Dict[str, object] = {
         "tp": 1,
         "cp": 1,
-        "lp": 1,
+        "pp": 1,
         "mb": 1,
         "tp_sp": True,
         "dp": 1,
@@ -101,7 +101,7 @@ def _base_parallelism_defaults(base_hw_dict: Optional[Dict[str, object]]) -> Dic
         return defaults
     defaults["tp"] = _safe_int(parallelism.get("tp", defaults["tp"]), defaults["tp"])
     defaults["cp"] = _safe_int(parallelism.get("cp", defaults["cp"]), defaults["cp"])
-    defaults["lp"] = _safe_int(parallelism.get("lp", defaults["lp"]), defaults["lp"])
+    defaults["pp"] = _safe_int(parallelism.get("pp", defaults["pp"]), defaults["pp"])
     defaults["mb"] = _safe_int(parallelism.get("mb", defaults["mb"]), defaults["mb"])
     defaults["tp_sp"] = bool(parallelism.get("tp_sp", defaults["tp_sp"]))
     train_block = parallelism.get("train")
@@ -125,7 +125,7 @@ def _resolve_flat_parallelism(
     run_type: str,
 ) -> Dict[str, object]:
     flat = _base_parallelism_defaults(base_hw_dict)
-    for key in ("tp", "cp", "lp", "mb"):
+    for key in ("tp", "cp", "pp", "mb"):
         if key in settings:
             flat[key] = _safe_int(settings[key], flat.get(key, 1))
     if "tp_sp" in settings:
@@ -135,8 +135,8 @@ def _resolve_flat_parallelism(
     if "replica_count" in settings:
         flat["replica_count"] = _safe_int(settings["replica_count"], flat.get("replica_count", 1))
 
-    if "mb" not in settings and "lp" in settings:
-        flat["mb"] = 1 if int(flat.get("lp", 1) or 1) == 1 else int(flat.get("lp", 1) or 1)
+    if "mb" not in settings and "pp" in settings:
+        flat["mb"] = 1 if int(flat.get("pp", 1) or 1) == 1 else int(flat.get("pp", 1) or 1)
 
     if run_type == "inference" and SWEEP_MOE_DP:
         moe_dp = settings.get("dp", settings.get("moe_dp", flat.get("moe_dp", 1)))
@@ -174,7 +174,7 @@ def _axis_sizes_from_settings(
         "tp": _safe_int(flat.get("tp", 1), 1),
         "cp": _safe_int(flat.get("cp", 1), 1),
         "dp": _safe_int(flat.get("dp", 1), 1),
-        "lp": _safe_int(flat.get("lp", 1), 1),
+        "pp": _safe_int(flat.get("pp", 1), 1),
         "ep": _safe_int(flat.get("ep", 1), 1),
     }
 
@@ -187,7 +187,7 @@ def _format_parallelism_label(settings: Dict[str, object]) -> str:
     tp = settings.get("tp")
     cp = settings.get("cp")
     dp = settings.get("dp")
-    lp = settings.get("lp")
+    pp = settings.get("pp")
     ep = settings.get("ep")
     dp_label = _dp_label()
     def _fmt(val: object) -> str:
@@ -196,7 +196,7 @@ def _format_parallelism_label(settings: Dict[str, object]) -> str:
     if RUN_TYPE == "training" and ep not in (None, 1, 1.0):
         parts.append(f"ep{_fmt(ep)}")
     parts.append(f"{dp_label}{_fmt(dp)}")
-    parts.append(f"pp{_fmt(lp)}")
+    parts.append(f"pp{_fmt(pp)}")
     return "-".join(parts)
 
 
@@ -204,7 +204,7 @@ def _format_parallelism_tag(settings: Dict[str, object]) -> str:
     tp = settings.get("tp")
     cp = settings.get("cp")
     dp = settings.get("dp")
-    lp = settings.get("lp")
+    pp = settings.get("pp")
     ep = settings.get("ep")
     dp_label = "moe" if RUN_TYPE == "inference" and SWEEP_MOE_DP else "dp"
     def _fmt(val: object) -> str:
@@ -213,7 +213,7 @@ def _format_parallelism_tag(settings: Dict[str, object]) -> str:
     if RUN_TYPE == "training" and ep not in (None, 1, 1.0):
         parts.append(f"ep{_fmt(ep)}")
     parts.append(f"{dp_label}{_fmt(dp)}")
-    parts.append(f"lp{_fmt(lp)}")
+    parts.append(f"pp{_fmt(pp)}")
     return "_".join(parts)
 
 
@@ -283,8 +283,8 @@ if GLM_MODE:
         MAX_ALLOWED_CP = 1
         MIN_ALLOWED_DP = 1
         MAX_ALLOWED_DP = 1
-        MIN_ALLOWED_LP = 1
-        MAX_ALLOWED_LP = 16
+        MIN_ALLOWED_PP = 1
+        MAX_ALLOWED_PP = 16
         MIN_ALLOWED_EP = 1
         MAX_ALLOWED_EP = 29
     else:
@@ -298,8 +298,8 @@ if GLM_MODE:
         MAX_ALLOWED_CP = 1
         MIN_ALLOWED_DP = 1
         MAX_ALLOWED_DP = 32
-        MIN_ALLOWED_LP = 1
-        MAX_ALLOWED_LP = 4
+        MIN_ALLOWED_PP = 1
+        MAX_ALLOWED_PP = 4
         MIN_ALLOWED_EP = 1
         MAX_ALLOWED_EP = 1
 else:
@@ -313,8 +313,8 @@ else:
     MAX_ALLOWED_CP = 16
     MIN_ALLOWED_DP = 1
     MAX_ALLOWED_DP = 16
-    MIN_ALLOWED_LP = 1
-    MAX_ALLOWED_LP = 16
+    MIN_ALLOWED_PP = 1
+    MAX_ALLOWED_PP = 16
     MIN_ALLOWED_EP = 1
     MAX_ALLOWED_EP = 1
 
@@ -618,7 +618,7 @@ def _run_fault_injection_self_test() -> None:
         "parallelism": {
             "tp": 2,
             "cp": 2,
-            "lp": 1,
+            "pp": 1,
             "train": {"dp": 2, "ep": 1, "tp_ep": True},
             "inference": {"replica_count": 1, "moe_dp": 1},
         },
@@ -651,7 +651,7 @@ def _run_fault_injection_self_test() -> None:
         "parallelism": {
             "tp": 4,
             "cp": 1,
-            "lp": 1,
+            "pp": 1,
             "train": {"dp": 4, "ep": 1, "tp_ep": True},
             "inference": {"replica_count": 1, "moe_dp": 1},
         },
@@ -835,7 +835,7 @@ def _candidate_fault_dimensions(settings: Dict[str, int]) -> List[Tuple[int, int
         candidates.append((0, dim0_nodes))
     if _one_dim_enabled():
         return candidates
-    dim1_nodes = axis_sizes["lp"] * axis_sizes["dp"]
+    dim1_nodes = axis_sizes["pp"] * axis_sizes["dp"]
     if dim1_nodes >= 2 and (ALLOWED_FAULT_DIMS is None or 1 in ALLOWED_FAULT_DIMS):
         candidates.append((1, dim1_nodes))
     return candidates
@@ -865,8 +865,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--max-dp", type=int, default=MAX_ALLOWED_DP)
     parser.add_argument("--min-ep", type=int, default=MIN_ALLOWED_EP)
     parser.add_argument("--max-ep", type=int, default=MAX_ALLOWED_EP)
-    parser.add_argument("--min-lp", type=int, default=MIN_ALLOWED_LP)
-    parser.add_argument("--max-lp", type=int, default=MAX_ALLOWED_LP)
+    parser.add_argument("--min-pp", type=int, default=MIN_ALLOWED_PP)
+    parser.add_argument("--max-pp", type=int, default=MAX_ALLOWED_PP)
     parser.add_argument("--allowed-fault-dims", type=str, default=None, help="Comma-separated list of network dimension indices eligible for faults")
     parser.add_argument("--plot-output", type=str, default=PLOT_OUTPUT_PATH)
     parser.add_argument(
@@ -935,7 +935,7 @@ def _training_moe_parallelism_valid(
     model_config_obj: object,
     tp: int,
     ep: int,
-    lp: int,
+    pp: int,
 ) -> bool:
     model_cfg = getattr(model_config_obj, "model_config", None)
     if model_cfg is None or not bool(getattr(model_cfg, "use_moe", False)):
@@ -961,11 +961,11 @@ def _training_moe_parallelism_valid(
 
     dp_dense = ep
     mini_batch = batch_size // dp_dense
-    mb = 1 if lp <= 1 else lp
+    mb = 1 if pp <= 1 else pp
     if mini_batch % mb != 0:
         return False
     effective_batch = mini_batch
-    if lp > 1:
+    if pp > 1:
         effective_batch = mini_batch // mb
     elif dp_dense <= 1:
         effective_batch = batch_size
@@ -1011,12 +1011,12 @@ def _enumerate_training_moe_vectors(
             denom = tp * ep
             if denom <= 0 or num_gpus % denom != 0:
                 continue
-            lp = num_gpus // denom
-            if not (MIN_ALLOWED_LP <= lp <= MAX_ALLOWED_LP):
+            pp = num_gpus // denom
+            if not (MIN_ALLOWED_PP <= pp <= MAX_ALLOWED_PP):
                 continue
-            if not _training_moe_parallelism_valid(model_config_obj, tp, ep, lp):
+            if not _training_moe_parallelism_valid(model_config_obj, tp, ep, pp):
                 continue
-            vectors.append((tp, 1, 1, lp, ep))
+            vectors.append((tp, 1, 1, pp, ep))
     return vectors
 
 
@@ -1030,8 +1030,8 @@ def _enumerate_parallelism_vectors_full_range(num_gpus: int) -> List[Tuple[int, 
                     continue
                 if num_gpus % denom != 0:
                     continue
-                lp = num_gpus // denom
-                vectors.append((tp, cp, dp, lp))
+                pp = num_gpus // denom
+                vectors.append((tp, cp, dp, pp))
     return vectors
 
 
@@ -1042,8 +1042,8 @@ def _enumerate_parallelism_vectors(num_gpus: int) -> List[Tuple[int, int, int, i
         for cp in _divisors(rem_tp):
             rem_cp = rem_tp // cp
             for dp in _divisors(rem_cp):
-                lp = rem_cp // dp
-                vectors.append((tp, cp, dp, lp))
+                pp = rem_cp // dp
+                vectors.append((tp, cp, dp, pp))
     return vectors
 
 
@@ -1108,10 +1108,10 @@ def _filtered_parallelism_vectors(
     filtered: List[Tuple[int, ...]] = []
     for vector in tuples:
         if len(vector) == 4:
-            tp, cp, dp, lp = vector
+            tp, cp, dp, pp = vector
             ep = 1
         elif len(vector) == 5:
-            tp, cp, dp, lp, ep = vector
+            tp, cp, dp, pp, ep = vector
         else:
             continue
         if not (MIN_ALLOWED_TP <= tp <= MAX_ALLOWED_TP):
@@ -1120,7 +1120,7 @@ def _filtered_parallelism_vectors(
             continue
         if not (MIN_ALLOWED_DP <= dp <= MAX_ALLOWED_DP):
             continue
-        if not (MIN_ALLOWED_LP <= lp <= MAX_ALLOWED_LP):
+        if not (MIN_ALLOWED_PP <= pp <= MAX_ALLOWED_PP):
             continue
         if not (MIN_ALLOWED_EP <= ep <= MAX_ALLOWED_EP):
             continue
@@ -1137,27 +1137,27 @@ def _filtered_parallelism_vectors(
     return filtered
 
 
-def _make_parallelism_settings(tp: int, cp: int, dp: int, lp: int, ep: int = 1) -> Dict[str, int]:
+def _make_parallelism_settings(tp: int, cp: int, dp: int, pp: int, ep: int = 1) -> Dict[str, int]:
     return {
         "tp": tp,
         "cp": cp,
         "dp": dp,
-        "lp": lp,
+        "pp": pp,
         "ep": ep,
-        "mb": 1 if lp == 1 else 2*lp,
+        "mb": 1 if pp == 1 else 2*pp,
         "tp_sp": True,
     }
 
 
 def _vector_to_settings(vector: Sequence[int]) -> Dict[str, int]:
     if len(vector) == 4:
-        tp, cp, dp, lp = vector
+        tp, cp, dp, pp = vector
         ep = 1
     elif len(vector) == 5:
-        tp, cp, dp, lp, ep = vector
+        tp, cp, dp, pp, ep = vector
     else:
         raise ValueError(f"Unsupported parallelism vector length: {len(vector)}")
-    return _make_parallelism_settings(tp, cp, dp, lp, ep=ep)
+    return _make_parallelism_settings(tp, cp, dp, pp, ep=ep)
 
 
 def generate_parallelism_samples(
@@ -1648,9 +1648,9 @@ def _dump_debug_hw_config(result: Dict[str, object]) -> Optional[Path]:
     tp = settings.get("tp")
     cp = settings.get("cp")
     dp = settings.get("dp")
-    lp = settings.get("lp")
+    pp = settings.get("pp")
     label = f"{kind}_{_DEBUG_FILE_INDEX:03d}"
-    if all(isinstance(val, (int, float)) for val in (tp, cp, dp, lp)):
+    if all(isinstance(val, (int, float)) for val in (tp, cp, dp, pp)):
         label += f"_{_format_parallelism_tag(settings)}"
     num_faults = result.get("num_faults")
     fault_mode = result.get("fault_mode")
@@ -1714,8 +1714,8 @@ def _failure_label_from_settings(
     tp = settings.get("tp")
     cp = settings.get("cp")
     dp = settings.get("dp")
-    lp = settings.get("lp")
-    if all(isinstance(val, (int, float)) for val in (tp, cp, dp, lp)):
+    pp = settings.get("pp")
+    if all(isinstance(val, (int, float)) for val in (tp, cp, dp, pp)):
         label += f"_{_format_parallelism_tag(settings)}"
     if kind == "fault" and fault_mode:
         label += f"_{fault_mode}"
@@ -1864,7 +1864,7 @@ def read_fault_report(path: str) -> List[Dict[str, object]]:
                 cp = int(_get(parts, "cp", 1))
                 ep = int(_get(parts, "ep", 1))
                 dp = int(_get(parts, dp_col, 1))
-                lp = int(_get(parts, "lp", 1))
+                pp = int(_get(parts, "pp", 1))
                 baseline = float(_get(parts, "baseline_runtime", float("nan")))
                 fault_min = float(_get(parts, "fault_min", float("nan")))
                 fault_max = float(_get(parts, "fault_max", float("nan")))
@@ -1872,7 +1872,7 @@ def read_fault_report(path: str) -> List[Dict[str, object]]:
                 label = str(_get(parts, "label", "") or "")
             except (TypeError, ValueError):
                 continue
-            settings = _make_parallelism_settings(tp, cp, dp, lp, ep=ep)
+            settings = _make_parallelism_settings(tp, cp, dp, pp, ep=ep)
             if not label:
                 label = _format_parallelism_label(settings)
             records.append(
@@ -1896,7 +1896,7 @@ def write_fault_report(records: List[Dict[str, object]], path: str) -> None:
         "cp",
         "ep",
         dp_label,
-        "lp",
+        "pp",
         "baseline_runtime",
         "fault_min",
         "fault_max",
@@ -1911,7 +1911,7 @@ def write_fault_report(records: List[Dict[str, object]], path: str) -> None:
                 str(record["parallelism"]["cp"]),
                 str(record["parallelism"].get("ep", 1)),
                 str(record["parallelism"]["dp"]),
-                str(record["parallelism"]["lp"]),
+                str(record["parallelism"]["pp"]),
                 f"{record['baseline_runtime']:.6f}",
                 f"{record['fault_min']:.6f}" if math.isfinite(record["fault_min"]) else "nan",
                 f"{record['fault_max']:.6f}" if math.isfinite(record["fault_max"]) else "nan",
@@ -2148,7 +2148,7 @@ def plot_fault_sensitivity_combined(
 def main(cli_args: Optional[Sequence[str]] = None) -> int:
     global TARGET_NUM_GPUS, SAMPLE_COUNT, FAULT_ITER, FAULT_WORKERS, FAULT_MAG
     global NUM_FAULTS, MIN_ALLOWED_TP, MAX_ALLOWED_TP, MIN_ALLOWED_CP, MAX_ALLOWED_CP
-    global MIN_ALLOWED_DP, MAX_ALLOWED_DP, MIN_ALLOWED_EP, MAX_ALLOWED_EP, MIN_ALLOWED_LP, MAX_ALLOWED_LP
+    global MIN_ALLOWED_DP, MAX_ALLOWED_DP, MIN_ALLOWED_EP, MAX_ALLOWED_EP, MIN_ALLOWED_PP, MAX_ALLOWED_PP
     global ALLOWED_FAULT_DIMS, PLOT_OUTPUT_PATH, FILTERED_PLOT_OUTPUT_PATH, REPORT_OUTPUT_PATH, RESULTS_JSON_PATH
     global RANDOM_SEED, ENFORCE_SQUARE_TP_CP, DEBUG_MODE, DEBUG_RUN_DIR, DEBUG_SAVED_PATHS
     global _DEBUG_FILE_INDEX, FAILURE_DUMP_DIR, FAILURE_SAVED_PATHS, _FAILURE_FILE_INDEX
@@ -2182,8 +2182,8 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     MAX_ALLOWED_DP = max(MIN_ALLOWED_DP, args.max_dp)
     MIN_ALLOWED_EP = max(1, args.min_ep)
     MAX_ALLOWED_EP = max(MIN_ALLOWED_EP, args.max_ep)
-    MIN_ALLOWED_LP = max(1, args.min_lp)
-    MAX_ALLOWED_LP = max(MIN_ALLOWED_LP, args.max_lp)
+    MIN_ALLOWED_PP = max(1, args.min_pp)
+    MAX_ALLOWED_PP = max(MIN_ALLOWED_PP, args.max_pp)
 
     allowed_dims_list = _parse_int_list(args.allowed_fault_dims) if args.allowed_fault_dims else []
     ALLOWED_FAULT_DIMS = allowed_dims_list if allowed_dims_list else None

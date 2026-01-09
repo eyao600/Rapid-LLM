@@ -78,7 +78,7 @@ class MemoryEstimator:
         dp = max(1, int(getattr(tc, "dp", 1)))
         dp_layout = dp
         tp = max(1, int(getattr(tc, "tp", 1)))
-        lp = max(1, int(getattr(tc, "lp", 1)))
+        pp = max(1, int(getattr(tc, "pp", 1)))
         cp = max(1, int(getattr(tc, "cp", 1)))
         ep = max(1, int(getattr(tc, "ep", 1)))
         tp_ep = bool(getattr(tc, "tp_ep", True))
@@ -110,7 +110,7 @@ class MemoryEstimator:
         ) = llm_util.get_transformer_mem_layer(
             dp=dp,
             tp=tp,
-            lp=lp,
+            pp=pp,
             mb=max(1, int(getattr(tc, "mb", 1))),
             batch_size=batch_size,
             hidden_dim=tc.hidden_dim,
@@ -178,7 +178,7 @@ class MemoryEstimator:
             ) = llm_util.get_transformer_mem_layer(
                 dp=dp,
                 tp=tp,
-                lp=lp,
+                pp=pp,
                 mb=max(1, int(getattr(tc, "mb", 1))),
                 batch_size=batch_size,
                 hidden_dim=tc.hidden_dim,
@@ -245,7 +245,7 @@ class MemoryEstimator:
                 return None
 
             ep = max(1, int(getattr(tc, "ep", 1)))
-            axis_sizes = {"tp": tp, "cp": cp, "ep": ep, "lp": lp, "dp": dp_layout}
+            axis_sizes = {"tp": tp, "cp": cp, "ep": ep, "pp": pp, "dp": dp_layout}
             axis_order = []
             for dim in dimensions:
                 dim_axes = [str(axis).strip().lower() for axis in getattr(dim, "parallelisms", ()) or ()]
@@ -253,7 +253,7 @@ class MemoryEstimator:
                     if name not in axis_sizes:
                         raise ValueError(
                             f"Unsupported parallelism axis '{name}' in network layout. "
-                            "Supported axes for memory estimation are: tp, cp, ep, lp, dp."
+                            "Supported axes for memory estimation are: tp, cp, ep, pp, dp."
                         )
                     if name not in axis_order:
                         axis_order.append(name)
@@ -269,7 +269,7 @@ class MemoryEstimator:
                     )
 
             if axis_order:
-                ordered_axes = ["tp", "cp", "ep", "lp", "dp"]
+                ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
                 axis_order = [axis for axis in ordered_axes if axis in axis_order]
             if not axis_order:
                 return None
@@ -279,8 +279,8 @@ class MemoryEstimator:
                 raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
             if ep > 1 and "ep" not in axis_order:
                 raise ValueError("Network layout must include 'ep' when expert parallelism > 1.")
-            if lp > 1 and "lp" not in axis_order:
-                raise ValueError("Network layout must include 'lp' when pipeline parallelism > 1.")
+            if pp > 1 and "pp" not in axis_order:
+                raise ValueError("Network layout must include 'pp' when pipeline parallelism > 1.")
 
             axis_strides = {}
             span = 1
@@ -303,10 +303,10 @@ class MemoryEstimator:
                 coords["cp"] = (tp_rank // tp_size) % cp_size
             if "ep" in axis_order:
                 coords["ep"] = (tp_rank // max(1, tp_size * cp_size)) % ep_size
-            if "lp" in axis_order:
-                if stage_id < 0 or stage_id >= axis_sizes.get("lp", 1):
-                    raise ValueError(f"stage_id {stage_id} is out of range for lp={axis_sizes.get('lp', 1)}")
-                coords["lp"] = stage_id % axis_sizes["lp"]
+            if "pp" in axis_order:
+                if stage_id < 0 or stage_id >= axis_sizes.get("pp", 1):
+                    raise ValueError(f"stage_id {stage_id} is out of range for pp={axis_sizes.get('pp', 1)}")
+                coords["pp"] = stage_id % axis_sizes["pp"]
 
             linear_rank = 0
             for axis in axis_order:
@@ -325,7 +325,7 @@ class MemoryEstimator:
         if embedding_static_bytes or lm_head_static_bytes or const_mem_offset_bytes:
             layout = _build_rank_layout()
         if embedding_static_bytes or lm_head_static_bytes:
-            last_stage = max(0, lp - 1)
+            last_stage = max(0, pp - 1)
             for tp_rank in range(par_degree):
                 if embedding_static_bytes:
                     hw_id = _hw_id_for_rank(0, tp_rank, layout)
@@ -334,7 +334,7 @@ class MemoryEstimator:
                     hw_id = _hw_id_for_rank(last_stage, tp_rank, layout)
                     extra_static_bytes_per_device[hw_id] = extra_static_bytes_per_device.get(hw_id, 0.0) + lm_head_static_bytes
         if const_mem_offset_bytes:
-            for stage_id in range(lp):
+            for stage_id in range(pp):
                 for tp_rank in range(par_degree):
                     hw_id = _hw_id_for_rank(stage_id, tp_rank, layout)
                     extra_static_bytes_per_device[hw_id] = (

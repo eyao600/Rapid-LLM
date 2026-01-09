@@ -66,7 +66,7 @@ PARALLELISM_SWEEP = {
     "tp": [2**i for i in range(0, 7)],
     "cp": [2**i for i in range(0, 7)],
     "dp": [2**i for i in range(0, 11)],
-    "lp": [2**i for i in range(0, 6)],
+    "pp": [2**i for i in range(0, 6)],
 }
 
 # Optional knobs that still live inside the parallelism section but do not
@@ -75,7 +75,7 @@ OTHER_PARALLELISM_OPTIONS = {
     "tp_sp": [True],
 }
 
-# GPU count filter: only evaluate combinations whose TP*CP*DP*LP fall inside
+# GPU count filter: only evaluate combinations whose TP*CP*DP*PP fall inside
 # this inclusive range.
 GPU_COUNT_MIN = 128
 GPU_COUNT_MAX = 1024
@@ -130,7 +130,7 @@ USE_THREADPOOL = False
 
 def add_rgb_ternary_legend(ax,
                            corner_labels=("R = log2(tp+cp)",
-                                          "G = log2(lp)",
+                                          "G = log2(pp)",
                                           "B = log2(dp)"),
                            gamma=0.85,
                            inset_xywh=(0.72, 0.58, 0.24, 0.24),  # Axes fraction: x, y, w, h
@@ -359,7 +359,7 @@ def cartesian_product(option_map):
 
 def build_parallelism_settings(flat_settings: Dict[str, object]) -> Dict[str, object]:
     parallelism: Dict[str, object] = {}
-    for key in ("tp", "cp", "lp", "mb", "tp_sp"):
+    for key in ("tp", "cp", "pp", "mb", "tp_sp"):
         if key in flat_settings:
             parallelism[key] = flat_settings[key]
     train_block = {
@@ -383,14 +383,14 @@ def _parallelism_snapshot(parallelism: Dict[str, object]) -> Dict[str, int]:
         "tp": int(parallelism.get("tp", 1) or 1),
         "cp": int(parallelism.get("cp", 1) or 1),
         "dp": int(train_block["dp"]),
-        "lp": int(parallelism.get("lp", 1) or 1),
+        "pp": int(parallelism.get("pp", 1) or 1),
     }
 
 
 def total_gpu_count(parallel_cfg):
     values = _parallelism_snapshot(parallel_cfg)
     total = 1
-    for axis in ("tp", "cp", "dp", "lp"):
+    for axis in ("tp", "cp", "dp", "pp"):
         total *= max(1, int(values.get(axis, 1)))
     return total
 
@@ -417,7 +417,7 @@ def make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=None):
     """Return (parsed HW config, YAML string) for the given override."""
     updated = copy.deepcopy(base_hw_dict)
     parallel_block = updated.setdefault("parallelism", {})
-    for key in ("tp", "cp", "lp", "mb", "tp_sp"):
+    for key in ("tp", "cp", "pp", "mb", "tp_sp"):
         if key in parallel_settings:
             parallel_block[key] = parallel_settings[key]
 
@@ -463,17 +463,17 @@ def make_temp_hw_config(base_hw_dict, parallel_settings, hw_mutator=None):
 def _rgb_from_parallelism(entries, gamma: float = 0.85):
     """
     Build per-point RGBA colors using:
-      R = log2(tp+cp), G = log2(lp), B = log2(dp)
+      R = log2(tp+cp), G = log2(pp), B = log2(dp)
     Each channel is min-max normalized over the dataset, then gamma-adjusted.
     """
     snapshots = [_parallelism_snapshot(e["parallelism"]) for e in entries]
     tps = np.array([max(1, int(snap["tp"])) for snap in snapshots], dtype=float)
     cps = np.array([max(1, int(snap["cp"])) for snap in snapshots], dtype=float)
     dps = np.array([max(1, int(snap["dp"])) for snap in snapshots], dtype=float)
-    lps = np.array([max(1, int(snap["lp"])) for snap in snapshots], dtype=float)
+    pps = np.array([max(1, int(snap["pp"])) for snap in snapshots], dtype=float)
 
     r_raw = np.log2(tps + cps)
-    g_raw = np.log2(lps)
+    g_raw = np.log2(pps)
     b_raw = np.log2(dps)
 
     def _norm(x):
@@ -885,7 +885,7 @@ def plot_results(results, output_path):
             "tp": snap["tp"],
             "cp": snap["cp"],
             "dp": snap["dp"],
-            "lp": snap["lp"],
+            "pp": snap["pp"],
             "memory_exceeded": bool(item.get("memory_exceeded", False)),
             metric_key: metric_val,
         })
@@ -895,14 +895,14 @@ def plot_results(results, output_path):
     order = sorted(df["gpu_exp"].unique())
     df["gpu_exp_cat"] = pd.Categorical(df["gpu_exp"], categories=order, ordered=True)
 
-    # --- Per-point RGB colors: R=log2(tp+cp), G=log2(lp), B=log2(dp) ---
+    # --- Per-point RGB colors: R=log2(tp+cp), G=log2(pp), B=log2(dp) ---
     tps = df["tp"].to_numpy(dtype=float)
     cps = df["cp"].to_numpy(dtype=float)
     dps = df["dp"].to_numpy(dtype=float)
-    lps = df["lp"].to_numpy(dtype=float)
+    pps = df["pp"].to_numpy(dtype=float)
 
     r_raw = np.log2(tps + cps)
-    g_raw = np.log2(lps)
+    g_raw = np.log2(pps)
     b_raw = np.log2(dps)
 
     def _norm(x, gamma=0.85):
@@ -965,7 +965,7 @@ def plot_results(results, output_path):
         )
     # add_rgb_ternary_legend(
     #     ax,
-    #     corner_labels=("R = log2(tp+cp)", "G = log2(lp)", "B = log2(dp)"),
+    #     corner_labels=("R = log2(tp+cp)", "G = log2(pp)", "B = log2(dp)"),
     #     gamma=0.85,                      # match your _rgb_from_parallelism gamma
     #     inset_xywh=(0.70, 0.50, 0.26, 0.26)  # tweak position/size to taste
     # )
@@ -1005,7 +1005,7 @@ def plot_results(results, output_path):
 
     # Reminder of color encoding
     ax.text(0.99, 0.01,
-            "Color: R=log2(tp+cp), G=log2(lp), B=log2(dp)",
+            "Color: R=log2(tp+cp), G=log2(pp), B=log2(dp)",
             transform=ax.transAxes, ha="right", va="bottom", fontsize=9, alpha=0.8)
 
     # Per-GPU-count best runtime markers (exclude memory violations)
@@ -1237,7 +1237,7 @@ def plot_speedup_per_gpu_combined(
 #             "tp": int(p.get("tp", 1)),
 #             "cp": int(p.get("cp", 1)),
 #             "dp": int(p.get("dp", 1)),
-#             "lp": int(p.get("lp", 1)),
+#             "pp": int(p.get("pp", 1)),
 #         })
 #     df = pd.DataFrame(df_rows)
 
@@ -1301,7 +1301,7 @@ def plot_speedup_per_gpu_combined(
 
 #     # Small caption to recall color encoding
 #     ax.text(0.99, 0.01,
-#             "Color channels: R=log2(tp+cp), G=log2(lp), B=log2(dp)",
+#             "Color channels: R=log2(tp+cp), G=log2(pp), B=log2(dp)",
 #             transform=ax.transAxes, ha="right", va="bottom", fontsize=9, alpha=0.8)
 
 #     plt.tight_layout()
@@ -1399,7 +1399,7 @@ def _build_tasks(
             settings: Dict[str, object] = {}
             settings.update(gpu_choice)
             settings.update(other_choice)
-            settings["mb"] = settings.get("lp", 1)
+            settings["mb"] = settings.get("pp", 1)
             tasks.append(tuple(sorted(settings.items())))
     return tasks
 

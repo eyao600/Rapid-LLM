@@ -33,7 +33,7 @@ class InferenceConfig:
 
     
     moe_dp: int = 1  # inference expert pool expansion (used to size MoE routing group)
-    lp: int = 1  # layer parallel
+    pp: int = 1  # layer parallel
     tp: int = 1  # tensor parallel degree
     cp: int = 1  # context parallel degree
     tp_sp: bool = False  # sequence-parallel toggle
@@ -350,7 +350,7 @@ class InferenceEngine:
             config=self.config,
             mode="inference",
             dp=1,
-            lp=self.config.lp,
+            pp=self.config.pp,
             tp=self.config.tp,
             cp=self.config.cp,
             ep=self.config.moe_dp,

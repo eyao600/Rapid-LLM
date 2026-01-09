@@ -419,7 +419,7 @@ class TimeCalculationLLM(TimeCalculation):
         """Return detailed per-rank parameter counts used for ZeRO modeling."""
 
         tp = max(1, self.tp)
-        lp = max(1, self.lp)
+        pp = max(1, self.pp)
 
         ffn_proj_factor = 3 if llm_util.is_llama_style(self.model_type) else 2
         if llm_util.is_glm_style(self.model_type):
@@ -436,21 +436,21 @@ class TimeCalculationLLM(TimeCalculation):
         params_per_layer_per_rank = transformer_param_layer / tp
 
         total_transformer_params = params_per_layer_per_rank * self.num_layers
-        if lp == 1:
+        if pp == 1:
             transformer_params_local = total_transformer_params
         else:
-            layers_per_stage = math.ceil(self.num_layers / lp)
+            layers_per_stage = math.ceil(self.num_layers / pp)
             transformer_params_local = params_per_layer_per_rank * layers_per_stage
             transformer_params_local = min(transformer_params_local, total_transformer_params)
 
         embedding_params = vocab_size * hidden_dim / tp
         output_params = 0.0 if self.tied_embeddings else embedding_params
 
-        if lp == 1:
+        if pp == 1:
             total_params_per_rank = transformer_params_local + embedding_params + output_params
         else:
             # Pipeline splits embeddings/output across stages. Approximate their contribution by spreading across stages.
-            total_params_per_rank = transformer_params_local + (embedding_params / lp) + (output_params / lp)
+            total_params_per_rank = transformer_params_local + (embedding_params / pp) + (output_params / pp)
 
         max_layer_params = max(params_per_layer_per_rank, embedding_params, output_params)
         return (
@@ -2134,9 +2134,9 @@ class TimeCalculationLLM(TimeCalculation):
     def get_inter_layer_comm_latency_llm(self, batch_size, hidden_dim, seq_len): #calculate the cross-layer communication latency
         w = 0
         w_size = 0
-        if self.lp > 1:
+        if self.pp > 1:
             w_size = self.precision.activations * batch_size * hidden_dim * seq_len
-            transfer_time = w_size / self.links["lp"].bandwidth + self.links["lp"].latency
+            transfer_time = w_size / self.links["pp"].bandwidth + self.links["pp"].latency
             mem_time = self.roofline(0, 2 * w_size, name="inter_layer", mem_level=self.num_levels - 1)
             # 2: read from memory of previous layer and write to the memory of the next layer
             w = mem_time + transfer_time
@@ -2870,10 +2870,10 @@ class TimeCalculationLLM(TimeCalculation):
     def _effective_transformer_batch(self) -> int:
         run_type = str(getattr(getattr(self, "model", None), "run_type", "training")).lower()
         if run_type == "inference":
-            if self.lp > 1:
+            if self.pp > 1:
                 return self.micro_batch
             return self.batch_size
-        if self.lp > 1:
+        if self.pp > 1:
             return self.micro_batch
         dp_dense = self.dp * self.ep if self.use_moe else self.dp
         if dp_dense > 1:
@@ -2932,7 +2932,7 @@ class TimeCalculationLLM(TimeCalculation):
                 'size': cross_layer_bytes,
                 'type': PIPELINE,
                 'participants': 2,
-                'interconnect_type': 'lp',
+                'interconnect_type': 'pp',
                 'local_comp_time': 0
             }
         }
@@ -3007,7 +3007,7 @@ class TimeCalculationLLM(TimeCalculation):
         return {
             'dp': (self.links["dp"].bandwidth, self.links["dp"].latency),
             'ep': (self.links["ep"].bandwidth, self.links["ep"].latency),
-            'lp': (self.links["lp"].bandwidth, self.links["lp"].latency),
+            'pp': (self.links["pp"].bandwidth, self.links["pp"].latency),
             'tp': (self.links["tp"].bandwidth, self.links["tp"].latency),
             'cp': (self.links["cp"].bandwidth, self.links["cp"].latency),
         }
@@ -3163,7 +3163,7 @@ class TimeCalculationLLM(TimeCalculation):
             'cp': int(getattr(self, 'cp', 0) or 0),
             'ep': int(graph_ep or 0),
             'dp': int(getattr(self, 'dp', 0) or 0),
-            'lp': int(getattr(self, 'lp', 0) or 0),
+            'pp': int(getattr(self, 'pp', 0) or 0),
         }
         group_members = {
             "MLP": ("ffn1", "gelu", "ffn2"),
@@ -3446,7 +3446,7 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_graph = llm_simulation.Graph(
                 mode="transformer",
                 dp=self.dp,
-                lp=self.lp,
+                pp=self.pp,
                 tp=self.tp,
                 cp=self.cp,
                 ep=graph_ep,
@@ -3597,7 +3597,7 @@ class TimeCalculationLLM(TimeCalculation):
         pipeline_graph_obj = llm_simulation.Graph(
             mode="pipeline",
             dp=self.dp,
-            lp=self.lp,
+            pp=self.pp,
             tp=self.tp,
             cp=self.cp,
             ep=graph_ep,
@@ -3616,7 +3616,7 @@ class TimeCalculationLLM(TimeCalculation):
             pipeline_graph_obj_no_dp = llm_simulation.Graph( # if gradient accumulation is used, we need a no-dp variant of the graph for the non-last step, since dp all-reduce is only done on the last step
                 mode="pipeline",
                 dp=1,
-                lp=self.lp,
+                pp=self.pp,
                 tp=self.tp,
                 cp=self.cp,
                 ep=graph_ep,
@@ -3776,7 +3776,7 @@ class TimeCalculationLLM(TimeCalculation):
             transformer_mem_layer = (total_dense * dense_layers + total_moe * moe_layers) / total_layers
 
         if self._debug_memory:
-            layers_per_device = max(1, math.ceil(self.num_layers / max(1, self.lp)))
+            layers_per_device = max(1, math.ceil(self.num_layers / max(1, self.pp)))
             to_gib = lambda bytes_val: float(bytes_val) / float(1024 ** 3)
             self._memory_breakdown_debug = {
                 "layers_per_device": layers_per_device,

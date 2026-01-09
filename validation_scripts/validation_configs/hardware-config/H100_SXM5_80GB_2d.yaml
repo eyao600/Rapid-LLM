@@ -91,9 +91,9 @@ parallelism:
   tp: 8 # tensor parallelism
   tp_sp: false # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  lp: 1 # pipeline parallelism. Number of pipeline stages
+  pp: 1 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 1 # micro-batches (for best results set to >= lp). 
+  mb: 1 # micro-batches (for best results set to >= pp). 
 
   train:
     dp: 1 # data parallelism
@@ -120,7 +120,7 @@ network:
         util: 1.0
         optimize_2dmap: false
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [tp, cp, lp]
+      parallelisms: [tp, cp, pp]
       
 execution_backend:
   model: astra # analytical | astra

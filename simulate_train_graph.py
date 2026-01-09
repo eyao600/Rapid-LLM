@@ -130,7 +130,7 @@ class Graph:
         self,
         mode: str,
         dp: int,
-        lp: int,
+        pp: int,
         tp: int,
         cp: int,
         comp_times: Dict[str, Any],
@@ -140,7 +140,7 @@ class Graph:
     ) -> None:
         self.mode = mode
         self.dp = int(dp)
-        self.lp = int(lp)
+        self.pp = int(pp)
         self.tp = int(tp)
         self.cp = int(cp)
         self.ep = int(ep)
@@ -153,7 +153,7 @@ class Graph:
 
         self.num_batch = self.misc_metadata.get("num_batch", 0)
         self.num_layer = self.misc_metadata.get("num_layer", 0)
-        self.layer_per_device = self.num_layer / self.lp if self.lp else self.num_layer
+        self.layer_per_device = self.num_layer / self.pp if self.pp else self.num_layer
         self.dp_microbatch_mode = str(self.misc_metadata.get("dp_microbatch_mode", "every_mb")).lower()
         self.dp_zero_stage = int(self.misc_metadata.get("dp_zero_stage", 0) or 0)
         self.moe_layer_mask = list(self.misc_metadata.get("moe_layer_mask", []) or [])
@@ -168,7 +168,7 @@ class Graph:
         return float(value) if value is not None else default
 
     def _compute_layers_per_stage(self) -> List[int]:
-        stage_count = max(1, int(self.lp) if self.lp else 1)
+        stage_count = max(1, int(self.pp) if self.pp else 1)
         if self.num_layer <= 0:
             return [0 for _ in range(stage_count)]
         base = self.num_layer // stage_count
@@ -595,7 +595,7 @@ class Graph:
         Args:
             network_model: NetworkModel instance for collective timing
             interconnect_params: Dict with bandwidth/latency for each type
-                                {'dp': (ib, ll), 'lp': (ib, ll), 'tp': (ib, ll)}
+                                {'dp': (ib, ll), 'pp': (ib, ll), 'tp': (ib, ll)}
         """
         def traverse_and_convert(node, visited=None):
             if visited is None:
@@ -705,7 +705,7 @@ class Graph:
             linear_softmax = Node(
                 f"linear_softmax{b}",
                 op_id,
-                self.lp - 1,
+                self.pp - 1,
                 linear_softmax_f_time,
                 mem_kind=MemKind.SOFTMAX,
             )
@@ -838,7 +838,7 @@ class Graph:
             linear_softmax_b = Node(
                 "linear_softmax_b",
                 op_id,
-                self.lp - 1,
+                self.pp - 1,
                 linear_softmax_b_time,
                 fwd=False,
                 mem_kind=MemKind.SOFTMAX,
@@ -1096,30 +1096,30 @@ class Graph:
                         _bwd_exit_node(b, layer_idx).add_child(ep_edge)
 
 
-        last_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
-        first_transformer_layer = [-1] * self.lp  # Initialize with -1 for all GPUs
+        last_transformer_layer = [-1] * self.pp  # Initialize with -1 for all GPUs
+        first_transformer_layer = [-1] * self.pp  # Initialize with -1 for all GPUs
 
         # first_transformer_layer.append(0)
-        gpu_index = self.lp - 1
+        gpu_index = self.pp - 1
         for l in range(self.num_layer - 1, 0, -1):
             if _bwd_exit_node(0, l).hw_id != _bwd_exit_node(0, l-1).hw_id:  # Check if on different GPU
                 # print("Layer ", l, " is on GPU ", _bwd_exit_node(0, l).hw_id)
                 first_transformer_layer[gpu_index-1] = l-1  # Record first layer on each GPU
                 last_transformer_layer[gpu_index] = l  # Record last layer on each GPU
                 gpu_index -= 1
-        # for id in range(self.lp):
+        # for id in range(self.pp):
             # print("GPU ", id, " first layer ", first_transformer_layer[id], " last layer ", last_transformer_layer[id])
 
 
 
         for b in range(self.num_batch-1, 0, -1):
-            gpu_index = self.lp - 1
+            gpu_index = self.pp - 1
             for l in range(self.num_layer - 1, 0, -1):
                 if _bwd_exit_node(b, l).hw_id != _bwd_exit_node(b, l-1).hw_id:  # Check if on different GPUs
                     # last_transformer_layer.append(l)  # Record last layer on each GPU
                     # first_transformer_layer.append(l-1)  # Record first layer on each GPU
                     
-                    if _bwd_exit_node(b, l).hw_id == self.lp - 1:
+                    if _bwd_exit_node(b, l).hw_id == self.pp - 1:
                         _bwd_exit_node(b, l).add_child(softmax_node_b[b-1])  # Add dependency edge
                     else:
                         _bwd_exit_node(b, l).add_child(_bwd_entry_node(b-1, first_transformer_layer[gpu_index]))  # Add dependency edge
@@ -1209,7 +1209,7 @@ class Graph:
                         stage_min_layer[stage] = min(stage_min_layer[stage], l)
                                 
                 # bwd flips mbs, so we attach to first one, not last.
-                for stage in range(self.lp):
+                for stage in range(self.pp):
                     last_node = None
                     if stage == 0:
                         last_node = embedding_node_b[0]
@@ -1403,7 +1403,7 @@ class Graph:
         ready_list.append(root)
         root.scheduled = True
         ###find number of devices needed
-        base_devices = max(1, int(self.lp) if self.lp else 1)
+        base_devices = max(1, int(self.pp) if self.pp else 1)
         max_hw_id = -1
         visited_nodes: Set[int] = set()
         stack = list(root if isinstance(root, (list, tuple)) else [root])
@@ -1518,7 +1518,7 @@ class Graph:
         ready_list.append(root)
         root.scheduled = True
         ###find number of devices needed
-        base_devices = max(1, int(self.lp) if self.lp else 1)
+        base_devices = max(1, int(self.pp) if self.pp else 1)
         max_hw_id = -1
         visited_nodes: Set[int] = set()
         stack = list(root if isinstance(root, (list, tuple)) else [root])

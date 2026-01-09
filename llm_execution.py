@@ -360,7 +360,7 @@ class PipelineGraphFlattener:
         self._tp_size = int(getattr(transformer_graph, "tp", 1))
         self._cp_size = int(getattr(transformer_graph, "cp", 1))
         self._ep_size = int(ep_size)
-        self._lp_size = int(getattr(pipeline_graph, "lp", 1))
+        self._pp_size = int(getattr(pipeline_graph, "pp", 1))
         if rank_layout is not None:
             self._configure_rank_layout(rank_layout)
 
@@ -387,7 +387,7 @@ class PipelineGraphFlattener:
         self._tp_size = max(1, axis_sizes.get("tp", self._tp_size))
         self._cp_size = max(1, axis_sizes.get("cp", self._cp_size))
         self._ep_size = max(1, axis_sizes.get("ep", self._ep_size))
-        self._lp_size = max(1, axis_sizes.get("lp", self._lp_size))
+        self._pp_size = max(1, axis_sizes.get("pp", self._pp_size))
         if self._par_degree != self._tp_size * self._cp_size * self._ep_size:
             raise ValueError(
                 f"Inconsistent tensor/context/expert parallel factors: tp={self._tp_size}, cp={self._cp_size}, "
@@ -828,7 +828,7 @@ class PipelineGraphFlattener:
                         comm_size_bytes=per_rank_bytes,
                         comm_type=CollectiveType.PIPELINE,
                         participants=2,
-                        comm_interconnect_type="lp",
+                        comm_interconnect_type="pp",
                     )
                     edge_obj.is_cross_layer = True
                     tail.add_child(edge_obj)
@@ -972,10 +972,10 @@ class PipelineGraphFlattener:
             coords["cp"] = (tp_rank_int // self._tp_size) % self._cp_size
         if "ep" in self._layout_axis_order:
             coords["ep"] = (tp_rank_int // max(1, self._tp_size * self._cp_size)) % self._ep_size
-        if "lp" in self._layout_axis_order:
-            if stage_int < 0 or stage_int >= self._lp_size:
-                raise ValueError(f"stage_id {stage_int} is out of range for lp={self._lp_size}")
-            coords["lp"] = stage_int % self._lp_size
+        if "pp" in self._layout_axis_order:
+            if stage_int < 0 or stage_int >= self._pp_size:
+                raise ValueError(f"stage_id {stage_int} is out of range for pp={self._pp_size}")
+            coords["pp"] = stage_int % self._pp_size
 
         linear_rank = 0
         for axis in self._layout_axis_order:
@@ -1075,18 +1075,18 @@ class LLMExecutionDispatcher:
         tp_size = _safe_int(getattr(self.pipeline_graph, "tp", getattr(self.time_calc, "tp", 1)))
         cp_size = _safe_int(getattr(self.pipeline_graph, "cp", getattr(self.time_calc, "cp", 1)))
         ep_size = _safe_int(getattr(self.time_calc, "ep", 1))
-        lp_size = _safe_int(getattr(self.pipeline_graph, "lp", getattr(self.time_calc, "lp", 1)))
+        pp_size = _safe_int(getattr(self.pipeline_graph, "pp", getattr(self.time_calc, "pp", 1)))
         dp_size = _safe_int(getattr(self.time_calc, "dp", 1))
 
-        axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "ep": ep_size, "lp": lp_size, "dp": dp_size}
+        axis_sizes: Dict[str, int] = {"tp": tp_size, "cp": cp_size, "ep": ep_size, "pp": pp_size, "dp": dp_size}
         axis_order: List[str] = []
 
         # Enforce axis ordering for hierarchical/hybrid modes: the first active
         # dimension must contain exactly {'tp','cp','ep'} (or the active subset).
         # Subsequent active
-        # dimensions may contain 'lp' (optionally combined with 'dp'). This
+        # dimensions may contain 'pp' (optionally combined with 'dp'). This
         # matches the assumptions in the hierarchical graphs where a stage is a
-        # TP/CP/EP cluster replicated across LP (and potentially DP) axes.
+        # TP/CP/EP cluster replicated across PP (and potentially DP) axes.
         enforce_layout = self.time_calc.execution_mode in {
             ExecutionMode.HYBRID,
             ExecutionMode.FULL_ASTRASIM_HIERARCHICAL,
@@ -1113,7 +1113,7 @@ class LLMExecutionDispatcher:
                 if name not in axis_sizes:
                     raise ValueError(
                         f"Unsupported parallelism axis '{name}' in network layout. "
-                        "Supported axes for AstraSim integration are: tp, cp, ep, lp, dp."
+                        "Supported axes for AstraSim integration are: tp, cp, ep, pp, dp."
                     )
                 if name not in axis_order:
                     axis_order.append(name)
@@ -1128,7 +1128,7 @@ class LLMExecutionDispatcher:
                 )
 
         if axis_order:
-            ordered_axes = ["tp", "cp", "ep", "lp", "dp"]
+            ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
             axis_order = [axis for axis in ordered_axes if axis in axis_order]
 
         # Ensure the layout covers active parallel axes
@@ -1138,8 +1138,8 @@ class LLMExecutionDispatcher:
             raise ValueError("Network layout must include 'cp' when context parallelism > 1.")
         if ep_size > 1 and "ep" not in axis_order:
             raise ValueError("Network layout must include 'ep' when expert parallelism > 1.")
-        if lp_size > 1 and "lp" not in axis_order:
-            raise ValueError("Network layout must include 'lp' when pipeline parallelism > 1.")
+        if pp_size > 1 and "pp" not in axis_order:
+            raise ValueError("Network layout must include 'pp' when pipeline parallelism > 1.")
 
         axis_strides: Dict[str, int] = {}
         span = 1
@@ -1170,11 +1170,11 @@ class LLMExecutionDispatcher:
                 "stage_span": span,
             }
 
-        # Transformer graphs only encode TP/CP axes; pipeline graphs encode LP
+        # Transformer graphs only encode TP/CP axes; pipeline graphs encode PP
         # (DP replicas are handled externally). Store these subsets so callers
         # can attach the appropriate layout before invoking AstraSim.
         self._transformer_rank_layout = _subset_layout(["tp", "cp", "ep"])
-        self._pipeline_rank_layout = _subset_layout(["lp", "dp"])
+        self._pipeline_rank_layout = _subset_layout(["pp", "dp"])
 
         return descriptor
 
@@ -1352,8 +1352,8 @@ class LLMExecutionDispatcher:
             return {}
         stage_dp_faults: Dict[Tuple[int, int], List[Tuple[int, int, float]]] = {}
         for detail in projection.entries:
-            src_stage = self._axis_value_from_coords(detail.src_coords, "lp")
-            dst_stage = self._axis_value_from_coords(detail.dst_coords, "lp")
+            src_stage = self._axis_value_from_coords(detail.src_coords, "pp")
+            dst_stage = self._axis_value_from_coords(detail.dst_coords, "pp")
             if src_stage != dst_stage:
                 raise ValueError(
                     "Transformer faulty link spans multiple pipeline stages; "

@@ -442,7 +442,7 @@ def generate_astrasim_configs_from_hw(
             "tp": int(active.get("tp", 1) or 1),
             "cp": int(active.get("cp", 1) or 1),
             "ep": int(active.get("ep", 1) or 1),
-            "lp": int(active.get("lp", 1) or 1),
+            "pp": int(active.get("pp", 1) or 1),
             "dp": int(active.get("dp", 1) or 1),
         }
     else:
@@ -450,7 +450,7 @@ def generate_astrasim_configs_from_hw(
             "tp": int(sch_config.tp),
             "cp": int(sch_config.cp),
             "ep": int(sch_config.train.ep),
-            "lp": int(sch_config.lp),
+            "pp": int(sch_config.pp),
             "dp": int(sch_config.train.dp),
         }
     synthetic_only = axes_filter_normalized is not None and set(axes_filter_normalized) == {"synthetic2"}
@@ -515,9 +515,9 @@ def generate_astrasim_configs_from_hw(
             axis_sizes.setdefault("tp", 1)
             axis_sizes.setdefault("cp", 1)
             axis_sizes.setdefault("ep", 1)
-            axis_sizes.setdefault("lp", 1)
+            axis_sizes.setdefault("pp", 1)
             axis_sizes.setdefault("dp", 1)
-        axis_order_preference = ["tp", "cp", "ep", "lp", "dp"]
+        axis_order_preference = ["tp", "cp", "ep", "pp", "dp"]
 
     allowed_axes = set(axis_sizes.keys()) if axes_filter_normalized else None
     # print(f"Allowed axes: {allowed_axes}")
@@ -536,7 +536,7 @@ def generate_astrasim_configs_from_hw(
             if axis not in axis_sizes:
                 raise ValueError(
                     f"Unsupported parallelism axis '{axis}' referenced by network dimension '{dim.label}'. "
-                    "Supported axes are tp, cp, ep, lp, dp."
+                    "Supported axes are tp, cp, ep, pp, dp."
                 )
             effective *= axis_sizes[axis]
         dim_infos.append((dim, axes, effective, dim_idx))

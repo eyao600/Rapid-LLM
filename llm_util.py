@@ -161,7 +161,7 @@ def process_gemm_shapes(self, batch_size, seq_len, d_model, num_heads, kv_heads,
 def get_transformer_mem_layer(
     dp,
     tp,
-    lp=1,
+    pp=1,
     mb=1,
     batch_size=1,
     hidden_dim=1,
@@ -300,7 +300,7 @@ def estimate_inference_memory(exp_hw_config, exp_model_config, **kwargs):
         _set_if_present(model_cfg, key, key)
 
     if sched_cfg is not None:
-        for key in ("tp", "cp", "lp", "mb"):
+        for key in ("tp", "cp", "pp", "mb"):
             if key in kwargs and hasattr(sched_cfg, key):
                 setattr(sched_cfg, key, int(kwargs[key]))
         if "moe_dp" in kwargs:

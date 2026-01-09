@@ -67,7 +67,7 @@ parallelism:
   tp: 2
   tp_sp: true
   cp: 1
-  lp: 2
+  pp: 2
   mb: 4
   train:
     dp: 2 # data parallelism
@@ -104,7 +104,7 @@ network:
       util: 0.93
     collective_override: {}
     parallelisms:
-    - lp
+    - pp
     - dp
   - id: dim2
     label: inter_torus_infiniband_dp

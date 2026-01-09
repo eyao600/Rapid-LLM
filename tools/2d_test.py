@@ -58,7 +58,7 @@ CACHE_VERSION = 3
 CACHE_PATH = OUTPUT_ROOT / "2d_test_cache.json"
 VERBOSE = os.environ.get("RAPID_2D_TEST_VERBOSE", "1") != "0"
 AUTO_PARALLELISM = True
-LP_MAX = 8
+PP_MAX = 8
 
 NUM_WORKERS = int(os.environ.get("RAPID_2D_TEST_WORKERS", max(1, (os.cpu_count() or 1) - 1)))
 hfval.ASTRA_CACHE_MODE = "NO_CACHE"
@@ -100,19 +100,19 @@ COMP_TOPO_SPECS = {
 #         "label": "70B",
 #         "config": TRAIN_70B_MODEL_CONFIG,
 #         "parallelisms": (
-#             {"tp": 32, "cp": 1, "lp": 2},
-#             {"tp": 16, "cp": 1, "lp": 4},
+#             {"tp": 32, "cp": 1, "pp": 2},
+#             {"tp": 16, "cp": 1, "pp": 4},
 #         ),
-#         "axes": ("tp", "lp"),
+#         "axes": ("tp", "pp"),
 #     },
 #     {
 #         "label": "GPT175B",
 #         "config": TRAIN_GPT175B_MODEL_CONFIG,
 #         "parallelisms": (
-#             {"tp": 32, "cp": 1, "lp": 2},
-#             {"tp": 16, "cp": 1, "lp": 4},
+#             {"tp": 32, "cp": 1, "pp": 2},
+#             {"tp": 16, "cp": 1, "pp": 4},
 #         ),
-#         "axes": ("tp", "lp"),
+#         "axes": ("tp", "pp"),
 #     },
 # )
 TRAIN_SHAPES = ((4, 5), (5,6), (4, 8), (6, 6))
@@ -121,23 +121,23 @@ TRAIN_MODELS = (
         "label": "70B",
         "config": TRAIN_70B_MODEL_CONFIG,
         "parallelisms": (
-            {"tp": 10, "cp": 1, "lp": 2},  #4,5 = 20 = 10 * 2
-            {"tp": 10, "cp": 1, "lp": 3},  #5,6 = 30 = 3 * 10
-            {"tp": 8, "cp": 1, "lp": 4},  #6,6 = 48 = 8 * 6
-            {"tp": 6, "cp": 1, "lp": 6},  #4,9 = 72 = 8 * 9
+            {"tp": 10, "cp": 1, "pp": 2},  #4,5 = 20 = 10 * 2
+            {"tp": 10, "cp": 1, "pp": 3},  #5,6 = 30 = 3 * 10
+            {"tp": 8, "cp": 1, "pp": 4},  #6,6 = 48 = 8 * 6
+            {"tp": 6, "cp": 1, "pp": 6},  #4,9 = 72 = 8 * 9
         ),
-        "axes": ("tp", "lp"),
+        "axes": ("tp", "pp"),
     },
     {
         "label": "GPT175B",
         "config": TRAIN_GPT175B_MODEL_CONFIG,
         "parallelisms": (
-            {"tp": 10, "cp": 1, "lp": 2},  #4,5 = 20 = 10 * 2
-            {"tp": 10, "cp": 1, "lp": 3},  #5,6 = 30 = 3 * 10
-            {"tp": 8, "cp": 1, "lp": 4},  #6,6 = 48 = 8 * 6
-            {"tp": 6, "cp": 1, "lp": 6},  #4,9 = 72 = 8 * 9
+            {"tp": 10, "cp": 1, "pp": 2},  #4,5 = 20 = 10 * 2
+            {"tp": 10, "cp": 1, "pp": 3},  #5,6 = 30 = 3 * 10
+            {"tp": 8, "cp": 1, "pp": 4},  #6,6 = 48 = 8 * 6
+            {"tp": 6, "cp": 1, "pp": 6},  #4,9 = 72 = 8 * 9
         ),
-        "axes": ("tp", "lp"),
+        "axes": ("tp", "pp"),
     },
 )
 INF_SHAPES = ((4, 5), (5, 6), (4, 8), (6, 6))
@@ -205,7 +205,7 @@ def _update_hw_dict(
     par = cfg.setdefault("parallelism", {})
     par["tp"] = int(parallelism["tp"])
     par["cp"] = int(parallelism["cp"])
-    par["lp"] = int(parallelism["lp"])
+    par["pp"] = int(parallelism["pp"])
     if mb_override is not None:
         par["mb"] = int(mb_override)
     train_block = par.setdefault("train", {})
@@ -294,7 +294,7 @@ def _case_key(case: Dict[str, Any]) -> str:
             {
                 "tp": parallelism.get("tp"),
                 "cp": parallelism.get("cp"),
-                "lp": parallelism.get("lp"),
+                "pp": parallelism.get("pp"),
                 "axes": list(case.get("parallelism_axes") or ()),
             }
         )
@@ -315,7 +315,7 @@ def _describe_case(case: Dict[str, Any]) -> str:
             f"train {case.get('model_label')} {case.get('topology')} "
             f"{case.get('shape')[0]}x{case.get('shape')[1]} "
             f"tp{parallelism.get('tp')} cp{parallelism.get('cp')} "
-            f"lp{parallelism.get('lp')}"
+            f"pp{parallelism.get('pp')}"
         )
     if kind == "inference":
         shape = case.get("shape")
@@ -353,10 +353,10 @@ def _candidate_parallelisms(total_devices: int) -> List[Dict[str, int]]:
     for tp in range(1, total_devices + 1):
         if total_devices % tp != 0:
             continue
-        lp = total_devices // tp
-        if lp > LP_MAX:
+        pp = total_devices // tp
+        if pp > PP_MAX:
             continue
-        candidates.append({"tp": tp, "cp": 1, "lp": lp})
+        candidates.append({"tp": tp, "cp": 1, "pp": pp})
     return candidates
 
 
@@ -376,7 +376,7 @@ def _select_best_parallelisms(
         par = {
             "tp": int(row.get("tp", 0) or 0),
             "cp": int(row.get("cp", 0) or 0),
-            "lp": int(row.get("lp", 0) or 0),
+            "pp": int(row.get("pp", 0) or 0),
         }
         if runtime > 0:
             current = best_any.get(key)
@@ -392,8 +392,8 @@ def _select_best_parallelisms(
     return selected
 
 
-def _format_train_label(shape_label: str, tp: int, lp: int) -> str:
-    return f"{_format_shape_label(shape_label)}\nTP={tp}\nPP={lp}"
+def _format_train_label(shape_label: str, tp: int, pp: int) -> str:
+    return f"{_format_shape_label(shape_label)}\nTP={tp}\nPP={pp}"
 
 
 def _format_inf_label(shape_label: str, tp: int) -> str:
@@ -410,7 +410,7 @@ def _run_training_case(
     shape: Tuple[int, int],
     parallelism: Dict[str, int],
 ) -> Tuple[Optional[float], Optional[str], Optional[bool], Optional[float]]:
-    mb = 2 * int(parallelism["lp"])
+    mb = 2 * int(parallelism["pp"])
     run_dir = None
     prev_env: Dict[str, Optional[str]] = {}
     hw_dict = _update_hw_dict(
@@ -430,7 +430,7 @@ def _run_training_case(
             f"{shape[0]}x{shape[1]}",
             f"tp{parallelism['tp']}",
             f"cp{parallelism['cp']}",
-            f"lp{parallelism['lp']}",
+            f"pp{parallelism['pp']}",
         ]
     )
     out_dir = OUTPUT_ROOT / "train" / desc
@@ -474,7 +474,7 @@ def _run_inference_case(
         base_hw,
         topology=topology,
         shape=shape,
-        parallelism={"tp": tp, "cp": 1, "lp": 1},
+        parallelism={"tp": tp, "cp": 1, "pp": 1},
         parallelism_axes=("tp",),
         mb_override=1,
     )
@@ -535,8 +535,8 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             "shape": f"{case['shape'][0]}x{case['shape'][1]}",
             "tp": case["parallelism"]["tp"],
             "cp": case["parallelism"]["cp"],
-            "lp": case["parallelism"]["lp"],
-            "mb": 4 * case["parallelism"]["lp"],
+            "pp": case["parallelism"]["pp"],
+            "mb": 4 * case["parallelism"]["pp"],
             "runtime_s": _format_runtime(runtime),
             "mem_exceeded": mem_flag,
             "mem_violation_gb": mem_delta,
@@ -563,7 +563,7 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             "shape": f"{case['shape'][0]}x{case['shape'][1]}",
             "tp": tp,
             "cp": 1,
-            "lp": 1,
+            "pp": 1,
             "mb": 1,
             "runtime_s": _format_runtime(runtime),
             "mem_exceeded": mem_flag,
@@ -911,7 +911,7 @@ def main() -> None:
                         "model_config": model["config"],
                         "model_sig": train_model_sigs.get(model["config"], ""),
                         "hw_sig": train_hw_sig,
-                        "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                        "parallelism_axes": model.get("axes", ("tp", "cp", "pp")),
                         "topology": "Mesh2D",
                         "shape": shape,
                         "parallelism": parallelism,
@@ -957,7 +957,7 @@ def main() -> None:
                         "model_config": model["config"],
                         "model_sig": train_model_sigs.get(model["config"], ""),
                         "hw_sig": train_hw_sig,
-                        "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                        "parallelism_axes": model.get("axes", ("tp", "cp", "pp")),
                         "topology": topology,
                         "shape": shape,
                         "parallelism": parallelism,
@@ -986,7 +986,7 @@ def main() -> None:
                         "model_config": model["config"],
                         "model_sig": train_model_sigs.get(model["config"], ""),
                         "hw_sig": train_hw_sig,
-                        "parallelism_axes": model.get("axes", ("tp", "cp", "lp")),
+                        "parallelism_axes": model.get("axes", ("tp", "cp", "pp")),
                         "topology": topology,
                         "shape": shape,
                         "parallelism": parallelism,
@@ -1056,7 +1056,7 @@ def main() -> None:
         if error:
             train_errors.append(
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')} tp{row.get('tp')} "
-                f"cp{row.get('cp')} lp{row.get('lp')}: {error}"
+                f"cp{row.get('cp')} pp{row.get('pp')}: {error}"
             )
 
     inf_errors: List[str] = []
@@ -1074,7 +1074,7 @@ def main() -> None:
             _shape_key(row.get("shape", "")),
             int(row.get("tp", 0) or 0),
             int(row.get("cp", 0) or 0),
-            int(row.get("lp", 0) or 0),
+            int(row.get("pp", 0) or 0),
         )
     )
     inf_rows.sort(
@@ -1091,7 +1091,7 @@ def main() -> None:
         "shape",
         "tp",
         "cp",
-        "lp",
+        "pp",
         "mb",
         "runtime_s",
         "mem_exceeded",
@@ -1104,7 +1104,7 @@ def main() -> None:
         "shape",
         "tp",
         "cp",
-        "lp",
+        "pp",
         "mb",
         "runtime_s",
         "mem_exceeded",
@@ -1158,7 +1158,7 @@ def main() -> None:
         combo = (
             str(row.get("shape", "")),
             int(row.get("tp", 0) or 0),
-            int(row.get("lp", 0) or 0),
+            int(row.get("pp", 0) or 0),
         )
         topo_groups.setdefault(model, {}).setdefault(combo, {})[row["topology"]] = float(
             row["runtime_s"]
@@ -1173,11 +1173,11 @@ def main() -> None:
             torus_val = topo_map["Torus2D"]
             if torus_val <= 0:
                 continue
-            shape_label, tp, lp = combo
+            shape_label, tp, pp = combo
             mesh_norm = topo_map["Mesh2D"] / torus_val
             experiments.append(
                 {
-                    "label": _format_train_label(shape_label, tp, lp),
+                    "label": _format_train_label(shape_label, tp, pp),
                     "mesh": mesh_norm,
                     "torus": 1.0,
                 }
@@ -1404,7 +1404,7 @@ def main() -> None:
         for row in mem_failures:
             label = (
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')} "
-                f"tp{row.get('tp')} cp{row.get('cp')} lp{row.get('lp')}"
+                f"tp{row.get('tp')} cp{row.get('cp')} pp{row.get('pp')}"
             )
             violation = row.get("mem_violation_gb", "")
             suffix = f" (over by {violation} GiB)" if violation else ""

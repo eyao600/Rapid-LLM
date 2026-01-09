@@ -79,7 +79,7 @@ class GMapCollector:
         self._canonical_signature = self._select_canonical_signature()
 
     # ------------------------------------------------------------------
-    # Canonical cluster helpers (only one LP/DP slice contributes weights)
+    # Canonical cluster helpers (only one PP/DP slice contributes weights)
     # ------------------------------------------------------------------
 
     def _select_canonical_signature(self) -> Optional[Tuple[Tuple[str, int], ...]]:
@@ -357,7 +357,7 @@ def begin_collection(
     topology = str(optimize_cfg.get("topology", "")).strip()
     if not topology:
         raise ValueError("optimize_2dmap requires a topology string.")
-    include_pipeline = "lp" in subset_axes
+    include_pipeline = "pp" in subset_axes
     return GMapCollector(
         topology=topology,
         subset_axes=subset_axes,

@@ -29,7 +29,7 @@ INTERMEDIATE_SIZE: Optional[int] = None
 VOCAB_SIZE: Optional[int] = None
 TP: Optional[int] = None
 CP: Optional[int] = None
-LP: Optional[int] = None
+PP: Optional[int] = None
 DP: Optional[int] = None
 EP: Optional[int] = None
 MB: Optional[int] = None
@@ -62,7 +62,7 @@ class SmokeConfig:
     vocab_size: Optional[int] = VOCAB_SIZE
     tp: Optional[int] = TP
     cp: Optional[int] = CP
-    lp: Optional[int] = LP
+    pp: Optional[int] = PP
     dp: Optional[int] = DP
     ep: Optional[int] = EP
     mb: Optional[int] = MB
@@ -136,7 +136,7 @@ def _apply_overrides(model_cfg, sched_cfg, cfg: SmokeConfig):
             moe_cfg.first_k_dense_replace = int(getattr(model_cfg, "num_layers", 1))
 
     if sched_cfg is not None:
-        for key in ("tp", "cp", "lp", "mb"):
+        for key in ("tp", "cp", "pp", "mb"):
             value = getattr(cfg, key, None)
             if value is not None and hasattr(sched_cfg, key):
                 setattr(sched_cfg, key, int(value))

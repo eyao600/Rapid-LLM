@@ -100,14 +100,14 @@ def _collect_parallelism_values(hw_config, *, run_type: str) -> dict:
             "tp": sch_config.tp,
             "cp": sch_config.cp,
             "ep": sch_config.inference.moe_dp,
-            "lp": sch_config.lp,
+            "pp": sch_config.pp,
             "dp": 1,
         }
     return {
         "tp": sch_config.tp,
         "cp": sch_config.cp,
         "ep": sch_config.train.ep,
-        "lp": sch_config.lp,
+        "pp": sch_config.pp,
         "dp": sch_config.train.dp,
     }
 
@@ -130,7 +130,7 @@ def _format_parallelism_terms(dim, parallelism_values):
 def network_topology_summary_training(hw_config):
     parallelism_values = _collect_parallelism_values(hw_config, run_type="training")
     dimensions = list(getattr(hw_config.network_layout, "dimensions", ()))
-    ordered_axes = ["tp", "cp", "ep", "lp", "dp"]
+    ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
     formatted_terms = []
     for axis in ordered_axes:
         value = parallelism_values.get(axis)
@@ -170,7 +170,7 @@ def network_topology_summary_inference(hw_config):
     replica_count = 1
     if sch_config is not None:
         replica_count = max(1, int(sch_config.inference.replica_count))
-    ordered_axes = ["tp", "cp", "ep", "lp", "dp"]
+    ordered_axes = ["tp", "cp", "ep", "pp", "dp"]
     formatted_terms = []
     for axis in ordered_axes:
         value = parallelism_values.get(axis)

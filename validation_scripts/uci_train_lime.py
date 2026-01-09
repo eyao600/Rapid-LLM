@@ -154,7 +154,7 @@ def _make_dimension(idx: int, label: str, axes: List[str], bandwidth_gb: float, 
 
 def _build_network_override(tp: int, pp: int, cp: int, dp: int, astra_mode: str) -> Tuple[Dict[str, object], str]:
     """Construct a network override that mirrors the 4-GPU ring (2 NVLink, 2 PCIe)."""
-    sizes = {"tp": int(tp), "lp": int(pp), "cp": int(cp), "dp": int(dp)}
+    sizes = {"tp": int(tp), "pp": int(pp), "cp": int(cp), "dp": int(dp)}
     active_axes = [axis for axis, value in sizes.items() if value > 1]
     mapping_desc: str
     dims: List[Dict[str, object]] = []
@@ -167,7 +167,7 @@ def _build_network_override(tp: int, pp: int, cp: int, dp: int, astra_mode: str)
             axes_for_dim0 = ["tp", "cp"]
         elif axis:
             axes_for_dim0 = [axis]
-        bw = AVG_NVLINK_PCIE_BW_GB if axis == "lp" else PCIE_LINK_BW_GB
+        bw = AVG_NVLINK_PCIE_BW_GB if axis == "pp" else PCIE_LINK_BW_GB
         dims.append(_make_dimension(0, "ring_single_axis", axes_for_dim0, bw, PCIE_LATENCY_S, "Ring"))
         dims.append(_make_dimension(1, "unused_dim1", [], PCIE_LINK_BW_GB, PCIE_LATENCY_S, "FullyConnected"))
         dims.append(_make_dimension(2, "unused_dim2", [], PCIE_LINK_BW_GB, PCIE_LATENCY_S, "FullyConnected"))
@@ -179,16 +179,16 @@ def _build_network_override(tp: int, pp: int, cp: int, dp: int, astra_mode: str)
             fast_axes = ["tp", "cp"]
 
         remaining_axes: List[str] = []
-        for axis in ("lp", "dp"):
+        for axis in ("pp", "dp"):
             if sizes[axis] > 1:
                 remaining_axes.append(axis)
 
         if not fast_axes:
-            # No tp/cp present: prefer lp on the fast dimension, keep dp for the outermost.
-            if sizes["lp"] > 1:
-                fast_axes = ["lp"]
-                if "lp" in remaining_axes:
-                    remaining_axes.remove("lp")
+            # No tp/cp present: prefer pp on the fast dimension, keep dp for the outermost.
+            if sizes["pp"] > 1:
+                fast_axes = ["pp"]
+                if "pp" in remaining_axes:
+                    remaining_axes.remove("pp")
             else:
                 fast_axes = [active_axes[0]]
                 if fast_axes[0] in remaining_axes:
@@ -267,7 +267,7 @@ def _build_spec(
             "tp": int(tp),
             "tp_sp": False,
             "cp": int(cp),
-            "lp": int(pp),
+            "pp": int(pp),
             "mb": int(eff_mb),  # align microbatch count with pipeline stages
             "train": {"dp": int(dp), "ep": 1, "tp_ep": True},
             "inference": {"replica_count": 1, "moe_dp": 1},

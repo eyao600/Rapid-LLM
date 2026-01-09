@@ -22,7 +22,7 @@ class LinkInfo(NamedTuple):
 def _active_axis_sizes(hw_config, run_type: str) -> Dict[str, int]:
     sch = getattr(hw_config, "sch_config", None)
     if sch is None:
-        return {"tp": 1, "cp": 1, "ep": 1, "lp": 1, "dp": 1}
+        return {"tp": 1, "cp": 1, "ep": 1, "pp": 1, "dp": 1}
     normalized = str(run_type or "training").lower()
     if normalized == "inference":
         dp = 1
@@ -34,7 +34,7 @@ def _active_axis_sizes(hw_config, run_type: str) -> Dict[str, int]:
         "tp": int(sch.tp),
         "cp": int(sch.cp),
         "ep": ep,
-        "lp": int(sch.lp),
+        "pp": int(sch.pp),
         "dp": dp,
     }
 
@@ -67,7 +67,7 @@ def _refresh_network_layout(hw_config, axis_sizes: Dict[str, int]):
 class Parallelism:
     def __init__(self, exp_config, run_type: str = "training"):
         sch = exp_config.sch_config
-        self.lp = sch.lp
+        self.pp = sch.pp
         self.mb = sch.mb
         self.tp = sch.tp
         self.cp = sch.cp
@@ -370,7 +370,7 @@ class TimeCalculation:
         self.links = {
             "dp": LinkInfo(*self.network.get_link("dp")),
             "ep": LinkInfo(*self.network.get_link("ep")),
-            "lp": LinkInfo(*self.network.get_link("lp")),
+            "pp": LinkInfo(*self.network.get_link("pp")),
             "tp": LinkInfo(*self.network.get_link("tp")),
             "cp": LinkInfo(*self.network.get_link("cp")),
         }
@@ -378,7 +378,7 @@ class TimeCalculation:
         # Scheduling Parameters
         par = Parallelism(hw_config, run_type=run_type)
         self.mode = mode
-        self.lp = par.lp
+        self.pp = par.pp
         self.mb = par.mb
         self.dp = par.dp
         self.ep = par.ep
@@ -443,7 +443,7 @@ class TimeCalculation:
             else:
                 dp_dense = self.dp * self.ep if bool(getattr(self.model, "use_moe", False)) else self.dp
             self.mini_batch = math.ceil(self.batch_size / dp_dense)  # mini-batch size for each data parallel node
-            self.micro_batch = math.ceil(self.mini_batch / self.mb) if self.lp > 1 else self.mini_batch
+            self.micro_batch = math.ceil(self.mini_batch / self.mb) if self.pp > 1 else self.mini_batch
             self.attention_type = self.model.attention_type
             self.flash_attention = getattr(self.model, "use_flashattention", False)
             self.kv_heads = self.model.kv_heads if hasattr(self.model, "kv_heads") else self.num_heads
@@ -481,7 +481,7 @@ class TimeCalculation:
         active = getattr(hw_config, "active_parallelism", None)
         if isinstance(active, dict) and active:
             total = 1
-            for axis in ("dp", "lp", "tp", "cp", "ep"):
+            for axis in ("dp", "pp", "tp", "cp", "ep"):
                 total *= max(1, int(active.get(axis, 1) or 1))
             return max(1, total)
 
@@ -491,7 +491,7 @@ class TimeCalculation:
         total = (
             max(1, int(sch.train.dp))
             * max(1, int(sch.train.ep))
-            * max(1, int(sch.lp))
+            * max(1, int(sch.pp))
             * max(1, int(sch.tp))
             * max(1, int(sch.cp))
         )

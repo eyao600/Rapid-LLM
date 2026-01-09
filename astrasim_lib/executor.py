@@ -797,7 +797,7 @@ def convert_rapid_llm_graph_to_chakra_et(
         duration_sec = getattr(task, "duration", 0.0) or 0.0
         return float(duration_sec)
 
-    # Step 3: Recover the multi-dimensional axis layout (tp/cp/lp, etc.) so that
+    # Step 3: Recover the multi-dimensional axis layout (tp/cp/pp, etc.) so that
     # communicator membership can be reconstructed deterministically later on.
     rank_layout = getattr(graph_root, "_astrasim_rank_layout", None)
     axis_order, axis_sizes, axis_strides = _extract_axis_layout(rank_layout)
@@ -1173,11 +1173,11 @@ def convert_rapid_llm_graph_to_chakra_et(
     if collector:
         _record_pipeline_edges_for_first_dim(collector)
     # Step 6: Group collectives by label/axis so we can reconstruct communicator
-    # memberships (tp/cp/lp) without relying on the original ordering.
+    # memberships (tp/cp/pp) without relying on the original ordering.
     tp_collective_groups: Dict[str, List[Any]] = defaultdict(list)
     for edge, info in collective_info.items():
         interconnect_type = info.get("interconnect_type")
-        if interconnect_type and interconnect_type not in {"dp", "lp", "pipeline"}:
+        if interconnect_type and interconnect_type not in {"dp", "pp", "pipeline"}:
             tp_collective_groups[info["name"]].append(edge)
 
     (

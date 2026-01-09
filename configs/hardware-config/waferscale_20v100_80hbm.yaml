@@ -104,7 +104,7 @@ memory_hierarchy:
 
 parallelism:
   auto: false
-  lp: 1
+  pp: 1
   mb: 1
   tp: 20
   tp_sp: false
@@ -130,7 +130,7 @@ network:
         energy_per_bit: 8e-12 # (J/bit)
         util: 0.95
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [tp, cp, ep, lp, dp]
+      parallelisms: [tp, cp, ep, pp, dp]
 
   overlap:
     # fraction of TP+SP compute that can overlap TP/SP comm

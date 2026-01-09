@@ -989,7 +989,7 @@ def _build_network_layout_config(
 
 _PARALLELISM_DEFAULTS: Dict[str, object] = {
     "auto": False,
-    "lp": 1,
+    "pp": 1,
     "mb": 1,
     "tp": 1,
     "cp": 1,
@@ -1636,7 +1636,7 @@ class SWConfig:
 @dataclass
 class SchedulingConfig:
     auto: bool
-    lp: int
+    pp: int
     mb: int
     tp: int
     cp: int
@@ -1653,7 +1653,7 @@ class SchedulingConfig:
         params.update(parallelism_block)
         auto = _coerce_bool(params.get("auto", False), "parallelism.auto")
         tp_sp = _coerce_bool(params.get("tp_sp", False), "parallelism.tp_sp")
-        lp = _coerce_int(params.get("lp", 1), "parallelism.lp")
+        pp = _coerce_int(params.get("pp", 1), "parallelism.pp")
         mb = _coerce_int(params.get("mb", 1), "parallelism.mb")
         tp = _coerce_int(params.get("tp", 1), "parallelism.tp")
         cp = _coerce_int(params.get("cp", 1), "parallelism.cp")
@@ -1663,7 +1663,7 @@ class SchedulingConfig:
         )
         return cls(
             auto=auto,
-            lp=lp,
+            pp=pp,
             mb=mb,
             tp=tp,
             cp=cp,
@@ -1808,7 +1808,7 @@ class HWConfig:
             "auto": sch_config.auto,
             "dp": sch_config.train.dp,
             "ep": sch_config.train.ep,
-            "lp": sch_config.lp,
+            "pp": sch_config.pp,
             "mb": sch_config.mb,
             "tp": sch_config.tp,
             "cp": sch_config.cp,
@@ -2051,7 +2051,7 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
     if sch is None:
         raise ValueError("hardware parallelism settings are missing")
 
-    lp = sch.lp
+    pp = sch.pp
     mb = sch.mb
     tp = sch.tp
     cp = sch.cp
@@ -2169,7 +2169,7 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
                     f"(moe_group={moe_ranks}, tp={tp}, ep={train_ep})."
                 )
             effective_batch = mini_batch
-            if lp > 1:
+            if pp > 1:
                 effective_batch = mini_batch // mb
             elif dp_dense <= 1:
                 effective_batch = batch_size

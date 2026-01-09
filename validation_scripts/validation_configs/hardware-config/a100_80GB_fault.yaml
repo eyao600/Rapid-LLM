@@ -76,9 +76,9 @@ parallelism:
   tp: 2 # tensor parallelism
   tp_sp: true # tensor-sequence parallelism
   cp: 1 # context parallelism. Not supported for inference.
-  lp: 1 # pipeline parallelism. Number of pipeline stages
+  pp: 1 # pipeline parallelism. Number of pipeline stages
   # mb is not a true parallelism parameter, does not affect num of GPUs.
-  mb: 1 # micro-batches (for best results set to >= lp).
+  mb: 1 # micro-batches (for best results set to >= pp).
 
   train:
     dp: 1 # data parallelism
@@ -100,11 +100,11 @@ network:
       label: torus2d_tp
       size: auto
       topology:
-        type: Mesh2D
-        bandwidth: 75 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
+        type: Torus2D
+        bandwidth: 100 GB # We assume 8 25GB/s NVLINKs in the torus. Torus2D is hardcoded bidirectional, so it's actually 4 links, 25GB/s each (because they get replicated). So 100GB/s total. 
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
-        util: 1.0
+        util: 0.75
         optimize_2dmap: false
       collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, ep]
@@ -118,7 +118,7 @@ network:
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       collective_override: {} # overrides execution_backend.collectives when provided
-      parallelisms: [lp,dp]
+      parallelisms: [pp,dp]
     - id: dim2
       label: inter_torus_infiniband_dp
       size: auto

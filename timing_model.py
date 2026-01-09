@@ -21,7 +21,7 @@ class CommSpec:
         kind: Collective type (CollectiveType).
         size_bytes: Total bytes transferred (int >= 0).
         participants: Number of ranks involved (int >= 1).
-        interconnect: Logical interconnect label (tp/dp/cp/lp/etc.).
+        interconnect: Logical interconnect label (tp/dp/cp/pp/etc.).
         extra: Free-form metadata (e.g. debug labels).
     """
 
