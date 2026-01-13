@@ -54,6 +54,10 @@ def _as_gbps(value: object) -> object:
     return round(_gbps_from_bps(float(value)), 6)
 
 
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
 def choose_collective(alg: str, topo: str, op: str) -> str:
     """Resolve ``auto`` policies for collective algorithms (post-2D unpacking)."""
     if alg != "auto":
@@ -784,7 +788,13 @@ def generate_astrasim_configs_from_hw(
         default_a2a = "auto"
         sys_opts = None
 
-    def _collective_for_dimension(dim, topo_name: str, op: str, default_alg: str) -> str:
+    def _collective_for_dimension(
+        dim,
+        topo_name: str,
+        op: str,
+        default_alg: str,
+        npus_value: object,
+    ) -> str:
         override = (
             dim.collective_override.get(op)
             or dim.collective_override.get(op.replace("-", "_"))
@@ -796,7 +806,15 @@ def generate_astrasim_configs_from_hw(
             raw_topo = _normalize_topology_name(getattr(dim, "topology_type", topo_name))
             if raw_topo == "KingMesh2D" and topo_name != "HyperCube":
                 return "kingmesh"
-        return choose_collective(default_alg, topo_name, op)
+        alg = choose_collective(default_alg, topo_name, op)
+        if default_alg == "auto" and topo_name == "Switch" and alg == "halvingDoubling":
+            try:
+                count = int(npus_value)
+            except (TypeError, ValueError):
+                count = 0
+            if count and not _is_power_of_two(count):
+                return "ring"
+        return alg
 
     ag_impl: List[str] = []
     ar_impl: List[str] = []
@@ -806,10 +824,11 @@ def generate_astrasim_configs_from_hw(
     for entry in network_entries:
         dim = entry["dim"]
         topo_name = entry["topology"]
-        ag_impl.append(_collective_for_dimension(dim, topo_name, "all-gather", default_ag))
-        ar_impl.append(_collective_for_dimension(dim, topo_name, "all-reduce", default_ar))
-        rs_impl.append(_collective_for_dimension(dim, topo_name, "reduce-scatter", default_rs))
-        a2a_impl.append(_collective_for_dimension(dim, topo_name, "all-to-all", default_a2a))
+        npus_value = entry.get("npus")
+        ag_impl.append(_collective_for_dimension(dim, topo_name, "all-gather", default_ag, npus_value))
+        ar_impl.append(_collective_for_dimension(dim, topo_name, "all-reduce", default_ar, npus_value))
+        rs_impl.append(_collective_for_dimension(dim, topo_name, "reduce-scatter", default_rs, npus_value))
+        a2a_impl.append(_collective_for_dimension(dim, topo_name, "all-to-all", default_a2a, npus_value))
 
     system = {
         "scheduling-policy": "LIFO",
