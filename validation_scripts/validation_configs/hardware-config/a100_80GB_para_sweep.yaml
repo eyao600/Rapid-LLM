@@ -90,8 +90,8 @@ parallelism:
     moe_dp: 1 # inference expert pool expansion (EP_eff = tp * moe_dp)
 network:
   overlap:
-    tp_overlap: 0.0
-    tp_sp_overlap: 0.0
+    tp_overlap: 0.63
+    tp_sp_overlap: 0.63
     cp_overlap: 0.0
   # Global faulty links apply to the active AstraSim dimension: [[src, dst, weight]]
   # faulty_links: [[0,1,0.6],[16,17,0.1]]
@@ -112,8 +112,14 @@ network:
       label: inter_torus_infiniband
       size: auto
       topology:
-        type: Ring 
-        bandwidth: 20 GB # 25GB/s per GPU, N GPUs per node. NOT AGGREGATE.
+        type: SuperPOD
+        superpod_variant: h100
+        leaf_size: 32
+        leaf_switches_per_su: 8
+        spine_switches_per_su: 4
+        bandwidth:
+          - 100 GB
+          - 200 GB
         latency: 5e-6 
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0

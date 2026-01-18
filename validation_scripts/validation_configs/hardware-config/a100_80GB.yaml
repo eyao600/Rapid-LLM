@@ -39,13 +39,13 @@ tech_param:
     FMA_d1: 8                 # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
     FMA_d2: 4
     dataflow: best            # {wst | ast | ost | best}: wst: weight stationary, ast: activation stationary, ost: output stationary, best: best of all 3
-    util: 1
+    util: 0.77
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB     # (/s)
     dynamic_energy_per_bit: 4.5e-12     # (J)
     latency: 100e-9     # (s)
-    util: 1
+    util: 0.3
   SRAM-L2:
     size: 40 MB
     bandwidth: 7050 GB

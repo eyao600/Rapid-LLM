@@ -47,53 +47,77 @@ else:
     INF_HW_CONFIG = "validation_scripts/validation_configs/hardware-config/a100_80GB_2d_gmap_inf.yaml"
 
 TRAIN_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_train.yaml"
-TRAIN_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_train.yaml"
+# TRAIN_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_train.yaml"
+TRAIN_GLM45_106B_MODEL_CONFIG = "configs/model-config/GLM_4.5_AIR_106B.yaml"
 INF_70B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/Llama3.1-70B_2d_inf.yaml"
-INF_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_inf.yaml"
+# INF_GPT175B_MODEL_CONFIG = "validation_scripts/validation_configs/model-config/GPT_175_B_2d_inf.yaml"
+INF_GLM45_106B_MODEL_CONFIG = "configs/model-config/GLM_4.5_AIR_106B_inf.yaml"
 
 OUTPUT_ROOT = Path("output") / "2d_test"
 PLOT_DIR = OUTPUT_ROOT
 Y_LABEL = "Normalized batch runtime (s)"
-CACHE_VERSION = 3
+CACHE_VERSION = 6
 CACHE_PATH = OUTPUT_ROOT / "2d_test_cache.json"
 VERBOSE = os.environ.get("RAPID_2D_TEST_VERBOSE", "1") != "0"
 AUTO_PARALLELISM = True
 PP_MAX = 8
+os.environ.setdefault("RAPID_ALLOW_MOE_EXPERT_PADDING", "1")
 
 NUM_WORKERS = int(os.environ.get("RAPID_2D_TEST_WORKERS", max(1, (os.cpu_count() or 1) - 1)))
 hfval.ASTRA_CACHE_MODE = "NO_CACHE"
 hfval.ASTRA_TMP_ROOT = Path("tmp") / "2d_test_runs"
 hfval.CLEANUP_ASTRA_TMP = True
 
-# TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D", "HyperCube")
-# COMP_TOPO = ("Torus2D", "KingMesh2D", "HyperCube")
+# COMPARE_TOPOLOGIES = ("Torus2D", "KingMesh2D", "HyperCube")
+# Compare these topologies against Mesh2D in plots/tables.
+COMPARE_TOPOLOGIES = ("Torus2D", "FullyConnected")
+# If True, scale FullyConnected per-link BW to match Mesh2D total injection.
+FC_FAIR = False
+FC_FAIR_MESH_EDGES = 4
 
-
-TOPOLOGIES = ("Mesh2D", "Torus2D", "KingMesh2D")
-COMP_TOPO = ("Torus2D", "KingMesh2D")
+TOPOLOGIES = ("Mesh2D",) + COMPARE_TOPOLOGIES
+COMP_TOPO = COMPARE_TOPOLOGIES
 
 
 COMP_TOPO_SPECS = {
     "Torus2D": {
         "output": "2d_test_super_merged.png",
         "ylabel": "2D Torus over Mesh speedup",
-        "title": "2D Torus vs Mesh inference/training runtime comparison",
-        "dynamic_ylim": False,
+        "title": "2D Torus vs Mesh runtime comparison",
+        "dynamic_ylim": True,
     },
     "KingMesh2D": {
         "output": "2d_test_super_merged_kingmesh.png",
         "ylabel": "2D KingMesh over Mesh speedup",
-        "title": "2D KingMesh vs Mesh inference/training runtime comparison",
+        "title": "2D KingMesh vs Mesh runtime comparison",
         "dynamic_ylim": True,
     },
     "HyperCube": {
         "output": "2d_test_super_merged_hypercube.png",
         "ylabel": "HyperCube over Mesh speedup",
-        "title": "HyperCube vs Mesh inference/training runtime comparison",
+        "title": "HyperCube vs Mesh runtime comparison",
+        "dynamic_ylim": True,
+    },
+    "FullyConnected": {
+        "output": "2d_test_super_merged_fullyconnected.png",
+        "ylabel": "Fully Connected over Mesh speedup",
+        "title": "Fully Connected vs Mesh runtime comparison",
         "dynamic_ylim": True,
     },
 }
 # TOPOLOGIES = ("Mesh2D", "Torus2D")
+
+BW_SWEEP_GBPS = (50,200,325,750,1500)
+BW_SWEEP_LABELS = {
+    10: "10 GB/s",
+    25: "25 GB/s",
+    50: "50 GB/s",
+    100: "100 GB/s",
+    200: "200 GB/s",
+    325: "325 GB/s",
+    750: "750 GB/s",
+    1500: "1.5 TB/s",
+}
 # TRAIN_SHAPES = ((8, 8), (4, 16))
 # TRAIN_MODELS = (
 #     {
@@ -115,7 +139,7 @@ COMP_TOPO_SPECS = {
 #         "axes": ("tp", "pp"),
 #     },
 # )
-TRAIN_SHAPES = ((4, 5), (5,6), (4, 8), (6, 6))
+TRAIN_SHAPES = ((4, 5), (4, 6), (4, 8), (6, 6))
 TRAIN_MODELS = (
     {
         "label": "70B",
@@ -129,26 +153,39 @@ TRAIN_MODELS = (
         "axes": ("tp", "pp"),
     },
     {
-        "label": "GPT175B",
-        "config": TRAIN_GPT175B_MODEL_CONFIG,
+        "label": "GLM4.5_106B",
+        "config": TRAIN_GLM45_106B_MODEL_CONFIG,
         "parallelisms": (
-            {"tp": 10, "cp": 1, "pp": 2},  #4,5 = 20 = 10 * 2
-            {"tp": 10, "cp": 1, "pp": 3},  #5,6 = 30 = 3 * 10
-            {"tp": 8, "cp": 1, "pp": 4},  #6,6 = 48 = 8 * 6
-            {"tp": 6, "cp": 1, "pp": 6},  #4,9 = 72 = 8 * 9
+            {"tp": 10, "cp": 1, "pp": 2, "ep": 1},  #4,5 = 20 = 10 * 2
+            {"tp": 10, "cp": 1, "pp": 3, "ep": 1},  #5,6 = 30 = 3 * 10
+            {"tp": 16, "cp": 1, "pp": 2, "ep": 1},  #4,8 = 32 = 16 * 2
+            {"tp": 12, "cp": 1, "pp": 3, "ep": 1},  #6,6 = 36 = 12 * 3
         ),
-        "axes": ("tp", "pp"),
+        "axes": ("tp", "ep", "pp"),
     },
+    # {
+    #     "label": "GPT175B",
+    #     "config": TRAIN_GPT175B_MODEL_CONFIG,
+    #     "parallelisms": (
+    #         {"tp": 10, "cp": 1, "pp": 2},  #4,5 = 20 = 10 * 2
+    #         {"tp": 10, "cp": 1, "pp": 3},  #5,6 = 30 = 3 * 10
+    #         {"tp": 8, "cp": 1, "pp": 4},  #6,6 = 48 = 8 * 6
+    #         {"tp": 6, "cp": 1, "pp": 6},  #4,9 = 72 = 8 * 9
+    #     ),
+    #     "axes": ("tp", "pp"),
+    # },
 )
-INF_SHAPES = ((4, 5), (5, 6), (4, 8), (6, 6))
+INF_SHAPES = ((4, 5), (4, 6), (4, 8), (6, 6))
 INF_MODELS = (
     {"label": "70B", "config": INF_70B_MODEL_CONFIG},
-    {"label": "GPT175B", "config": INF_GPT175B_MODEL_CONFIG},
+    {"label": "GLM4.5_106B", "config": INF_GLM45_106B_MODEL_CONFIG},
+    # {"label": "GPT175B", "config": INF_GPT175B_MODEL_CONFIG},
 )
 
 MODEL_DISPLAY_NAMES = {
-    "70B": "Llama3-70B",
-    "GPT175B": "GPT 175B",
+    "70B": "Llama 3 70B",
+    "GLM4.5_106B": "GLM 4.5 106B",
+    # "GPT175B": "GPT 175B",
 }
 
 _WORKER_BASE_HW: Optional[Dict[str, Any]] = None
@@ -179,6 +216,33 @@ def determine_model_mode(model_path: str) -> str:
     return str(mode)
 
 
+_MODEL_MOE_CACHE: Dict[str, bool] = {}
+
+
+def _is_moe_model(model_path: str) -> bool:
+    cached = _MODEL_MOE_CACHE.get(model_path)
+    if cached is not None:
+        return cached
+    model_dict = read_yaml(model_path)
+    model_param = model_dict.get("model_param") or {}
+    moe_cfg = model_param.get("moe") or {}
+    try:
+        num_experts = int(moe_cfg.get("num_experts", 1) or 1)
+    except (TypeError, ValueError):
+        num_experts = 1
+    try:
+        top_k = int(moe_cfg.get("top_k", 1) or 1)
+    except (TypeError, ValueError):
+        top_k = 1
+    try:
+        n_shared = int(moe_cfg.get("n_shared_experts", 0) or 0)
+    except (TypeError, ValueError):
+        n_shared = 0
+    enabled = num_experts > 1 or top_k > 1 or n_shared > 0
+    _MODEL_MOE_CACHE[model_path] = enabled
+    return enabled
+
+
 def _write_temp_yaml(data: Dict[str, Any]) -> str:
     temp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8")
     try:
@@ -192,26 +256,56 @@ def _write_temp_yaml(data: Dict[str, Any]) -> str:
             pass
 
 
+def _bw_tag(bw_gbps: int) -> str:
+    return f"bw{int(bw_gbps)}"
+
+
+def _bw_label(bw_gbps: int) -> str:
+    return BW_SWEEP_LABELS.get(int(bw_gbps), f"{int(bw_gbps)} GB/s")
+
+
+def _bw_config_string(bw_gbps: int) -> str:
+    return f"{int(bw_gbps)} GB"
+
+
+def _fc_fair_bandwidth_gbps(bw_gbps: int, node_count: int) -> int:
+    if node_count <= 1:
+        return int(bw_gbps)
+    fc_edges = max(node_count - 1, 1)
+    scaled = (FC_FAIR_MESH_EDGES * float(bw_gbps)) / fc_edges
+    return max(1, int(round(scaled)))
+
+
+def _with_bw_tag(filename: str, bw_tag: str) -> str:
+    stem, ext = os.path.splitext(filename)
+    return f"{stem}_{bw_tag}{ext}"
+
+
 def _update_hw_dict(
     base_hw: Dict[str, Any],
     *,
     topology: str,
     shape: Tuple[int, int],
     parallelism: Dict[str, int],
-    parallelism_axes: Sequence[str],
     mb_override: Optional[int],
+    bandwidth_gbps: Optional[int],
 ) -> Dict[str, Any]:
     cfg = copy.deepcopy(base_hw)
     par = cfg.setdefault("parallelism", {})
     par["tp"] = int(parallelism["tp"])
-    par["cp"] = int(parallelism["cp"])
+    par["cp"] = int(parallelism.get("cp", 1))
     par["pp"] = int(parallelism["pp"])
+    if "tp_sp" in parallelism:
+        par["tp_sp"] = bool(parallelism["tp_sp"])
     if mb_override is not None:
         par["mb"] = int(mb_override)
     train_block = par.setdefault("train", {})
     train_block["dp"] = 1
-    train_block.setdefault("ep", 1)
+    ep = int(parallelism.get("ep", train_block.get("ep", 1) or 1))
+    train_block["ep"] = ep
     train_block.setdefault("tp_ep", True)
+    if ep > 1:
+        par["tp_sp"] = True
     inference_block = par.setdefault("inference", {})
     inference_block.setdefault("replica_count", 1)
     inference_block.setdefault("moe_dp", 1)
@@ -221,12 +315,52 @@ def _update_hw_dict(
     if not dims:
         raise ValueError("Hardware config missing network.dimensions")
     dim0 = dims[0]
-    dim0["size"] = [int(shape[0]), int(shape[1])]
+    pp = int(parallelism.get("pp", 1) or 1)
+    if pp > 1:
+        # Hierarchical mode models a TP/CP/EP stage; scale the 2D mesh per stage.
+        stage_shape = _stage_shape_for_pp(shape, pp)
+    else:
+        stage_shape = shape
+    node_count = int(stage_shape[0]) * int(stage_shape[1])
+    dim0["size"] = [int(stage_shape[0]), int(stage_shape[1])]
     topo_block = dim0.setdefault("topology", {})
     topo_block["type"] = topology
+    base_bw_value = topo_block.get("bandwidth")
+    if bandwidth_gbps is not None:
+        base_bw_value = _bw_config_string(bandwidth_gbps)
+    dim0_bw_value = base_bw_value
+    if FC_FAIR and topology == "FullyConnected" and bandwidth_gbps is not None:
+        dim0_bw_value = _bw_config_string(
+            _fc_fair_bandwidth_gbps(bandwidth_gbps, node_count)
+        )
+    if bandwidth_gbps is not None:
+        topo_block["bandwidth"] = dim0_bw_value
     topo_block["optimize_2dmap"] = False
-    dim0["parallelisms"] = list(parallelism_axes)
-    net["dimensions"] = [dim0]
+    dim0["parallelisms"] = ["tp", "cp", "ep"]
+
+    exec_backend = cfg.setdefault("execution_backend", {})
+    if str(exec_backend.get("model", "analytical")).lower() == "astra":
+        astra_block = exec_backend.setdefault("astra", {})
+        astra_block["mode"] = "full_astrasim_hierarchical"
+
+    bw_value = base_bw_value if base_bw_value is not None else topo_block.get("bandwidth")
+    if isinstance(bw_value, (list, tuple)):
+        bw_value = bw_value[0] if bw_value else bw_value
+    dim1 = {
+        "id": "dim1_pp_dp",
+        "label": "pp_dp_dim",
+        "size": int(pp) * int(train_block.get("dp", 1) or 1),
+        "topology": {
+            "type": "Ring",
+            "bandwidth": bw_value,
+            "latency": topo_block.get("latency"),
+            "energy_per_bit": topo_block.get("energy_per_bit"),
+            "util": topo_block.get("util", 1.0),
+        },
+        "parallelisms": ["pp", "dp"],
+    }
+    net["dimensions"] = [dim0, dim1]
+
     return cfg
 
 
@@ -288,12 +422,18 @@ def _case_key(case: Dict[str, Any]) -> str:
         "topology": case.get("topology"),
         "shape": case.get("shape"),
     }
+    bw_gbps = case.get("bandwidth_gbps")
+    if bw_gbps is not None:
+        data["bw_gbps"] = int(bw_gbps)
+    if str(case.get("topology")) == "FullyConnected":
+        data["fc_fair"] = bool(FC_FAIR)
     if kind == "train":
         parallelism = case.get("parallelism") or {}
         data.update(
             {
                 "tp": parallelism.get("tp"),
                 "cp": parallelism.get("cp"),
+                "ep": parallelism.get("ep", 1),
                 "pp": parallelism.get("pp"),
                 "axes": list(case.get("parallelism_axes") or ()),
             }
@@ -309,20 +449,22 @@ def _is_cache_row(row: Dict[str, Any]) -> bool:
 
 def _describe_case(case: Dict[str, Any]) -> str:
     kind = case.get("kind")
+    bw_gbps = case.get("bandwidth_gbps")
+    bw_text = f" bw={_bw_label(bw_gbps)}" if bw_gbps is not None else ""
     if kind == "train":
         parallelism = case.get("parallelism") or {}
         return (
             f"train {case.get('model_label')} {case.get('topology')} "
             f"{case.get('shape')[0]}x{case.get('shape')[1]} "
             f"tp{parallelism.get('tp')} cp{parallelism.get('cp')} "
-            f"pp{parallelism.get('pp')}"
+            f"ep{parallelism.get('ep', 1)} pp{parallelism.get('pp')}{bw_text}"
         )
     if kind == "inference":
         shape = case.get("shape")
         tp = int(shape[0]) * int(shape[1])
         return (
             f"inference {case.get('model_label')} {case.get('topology')} "
-            f"{shape[0]}x{shape[1]} tp{tp}"
+            f"{shape[0]}x{shape[1]} tp{tp}{bw_text}"
         )
     return f"unknown {case}"
 
@@ -335,7 +477,7 @@ def _format_tokens(value: int) -> str:
 
 def _format_shape_label(shape_label: str) -> str:
     if shape_label == "4x5":
-        return "4x5[FRED]"
+        return "4x5"
     return shape_label
 
 
@@ -348,15 +490,73 @@ def _shape_key(value: str) -> Tuple[int, int]:
         return (0, 0)
 
 
-def _candidate_parallelisms(total_devices: int) -> List[Dict[str, int]]:
+def _stage_shape_for_pp(shape: Tuple[int, int], pp: int) -> Tuple[int, int]:
+    if pp <= 1:
+        return shape
+    total = int(shape[0]) * int(shape[1])
+    if total % pp != 0:
+        raise ValueError(f"Shape {shape[0]}x{shape[1]} not divisible by pp={pp}")
+    target_ratio = float(shape[0]) / float(shape[1]) if shape[1] else 1.0
+    best = None
+    best_score = None
+    best_dist = None
+    for p1 in range(1, pp + 1):
+        if pp % p1 != 0:
+            continue
+        p2 = pp // p1
+        if shape[0] % p1 != 0 or shape[1] % p2 != 0:
+            continue
+        cand = (int(shape[0]) // p1, int(shape[1]) // p2)
+        ratio = float(cand[0]) / float(cand[1]) if cand[1] else 1.0
+        score = abs(ratio - target_ratio)
+        dist = abs(cand[0] - shape[0]) + abs(cand[1] - shape[1])
+        if best is None or (score, dist) < (best_score, best_dist):
+            best = cand
+            best_score = score
+            best_dist = dist
+    if best is not None:
+        return best
+
+    stage_size = total // pp
+    for a in range(1, stage_size + 1):
+        if stage_size % a != 0:
+            continue
+        b = stage_size // a
+        ratio = float(a) / float(b) if b else 1.0
+        score = abs(ratio - target_ratio)
+        dist = abs(a - shape[0]) + abs(b - shape[1])
+        if best is None or (score, dist) < (best_score, best_dist):
+            best = (int(a), int(b))
+            best_score = score
+            best_dist = dist
+    if best is None:
+        return (stage_size, 1)
+    return best
+
+
+def _candidate_parallelisms(
+    total_devices: int,
+    *,
+    axes: Sequence[str],
+) -> List[Dict[str, int]]:
+    axes_set = {axis.strip().lower() for axis in axes}
+    allow_ep = "ep" in axes_set
+    allow_pp = "pp" in axes_set
     candidates = []
-    for tp in range(1, total_devices + 1):
-        if total_devices % tp != 0:
+    ep_values = range(1, total_devices + 1) if allow_ep else (1,)
+    for ep in ep_values:
+        if total_devices % ep != 0:
             continue
-        pp = total_devices // tp
-        if pp > PP_MAX:
-            continue
-        candidates.append({"tp": tp, "cp": 1, "pp": pp})
+        remaining = total_devices // ep
+        for tp in range(1, remaining + 1):
+            if remaining % tp != 0:
+                continue
+            pp = remaining // tp
+            if not allow_pp and pp != 1:
+                continue
+            if pp > PP_MAX:
+                continue
+            candidates.append({"tp": tp, "cp": 1, "pp": pp, "ep": ep})
     return candidates
 
 
@@ -376,6 +576,7 @@ def _select_best_parallelisms(
         par = {
             "tp": int(row.get("tp", 0) or 0),
             "cp": int(row.get("cp", 0) or 0),
+            "ep": int(row.get("ep", 1) or 1),
             "pp": int(row.get("pp", 0) or 0),
         }
         if runtime > 0:
@@ -405,10 +606,10 @@ def _run_training_case(
     *,
     model_config_path: str,
     model_label: str,
-    parallelism_axes: Sequence[str],
     topology: str,
     shape: Tuple[int, int],
     parallelism: Dict[str, int],
+    bandwidth_gbps: Optional[int],
 ) -> Tuple[Optional[float], Optional[str], Optional[bool], Optional[float]]:
     mb = 2 * int(parallelism["pp"])
     run_dir = None
@@ -418,21 +619,23 @@ def _run_training_case(
         topology=topology,
         shape=shape,
         parallelism=parallelism,
-        parallelism_axes=parallelism_axes,
         mb_override=mb,
+        bandwidth_gbps=bandwidth_gbps,
     )
     temp_path = _write_temp_yaml(hw_dict)
-    desc = _slug(
-        [
-            "train",
-            model_label,
-            f"{topology}",
-            f"{shape[0]}x{shape[1]}",
-            f"tp{parallelism['tp']}",
-            f"cp{parallelism['cp']}",
-            f"pp{parallelism['pp']}",
-        ]
-    )
+    desc_parts = [
+        "train",
+        model_label,
+        f"{topology}",
+        f"{shape[0]}x{shape[1]}",
+        f"tp{parallelism['tp']}",
+        f"cp{parallelism['cp']}",
+        f"ep{parallelism.get('ep', 1)}",
+        f"pp{parallelism['pp']}",
+    ]
+    if bandwidth_gbps is not None:
+        desc_parts.append(_bw_tag(bandwidth_gbps))
+    desc = _slug(desc_parts)
     out_dir = OUTPUT_ROOT / "train" / desc
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -466,6 +669,7 @@ def _run_inference_case(
     topology: str,
     shape: Tuple[int, int],
     model_config_path: str,
+    bandwidth_gbps: Optional[int],
 ) -> Tuple[Optional[float], Optional[str], Optional[bool], Optional[float]]:
     run_dir = None
     prev_env: Dict[str, Optional[str]] = {}
@@ -475,11 +679,14 @@ def _run_inference_case(
         topology=topology,
         shape=shape,
         parallelism={"tp": tp, "cp": 1, "pp": 1},
-        parallelism_axes=("tp",),
         mb_override=1,
+        bandwidth_gbps=bandwidth_gbps,
     )
     temp_path = _write_temp_yaml(hw_dict)
-    desc = _slug(["inference", f"{topology}", f"{shape[0]}x{shape[1]}", f"tp{tp}"])
+    desc_parts = ["inference", f"{topology}", f"{shape[0]}x{shape[1]}", f"tp{tp}"]
+    if bandwidth_gbps is not None:
+        desc_parts.append(_bw_tag(bandwidth_gbps))
+    desc = _slug(desc_parts)
     out_dir = OUTPUT_ROOT / "inference" / desc
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -523,10 +730,10 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             base_hw,
             model_config_path=case["model_config"],
             model_label=case["model_label"],
-            parallelism_axes=case["parallelism_axes"],
             topology=case["topology"],
             shape=case["shape"],
             parallelism=case["parallelism"],
+            bandwidth_gbps=case.get("bandwidth_gbps"),
         )
         mem_flag, mem_delta = _format_mem_fields(mem_exceeded, mem_violation)
         row = {
@@ -535,6 +742,7 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             "shape": f"{case['shape'][0]}x{case['shape'][1]}",
             "tp": case["parallelism"]["tp"],
             "cp": case["parallelism"]["cp"],
+            "ep": case["parallelism"].get("ep", 1),
             "pp": case["parallelism"]["pp"],
             "mb": 4 * case["parallelism"]["pp"],
             "runtime_s": _format_runtime(runtime),
@@ -554,6 +762,7 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             topology=case["topology"],
             shape=case["shape"],
             model_config_path=case["model_config"],
+            bandwidth_gbps=case.get("bandwidth_gbps"),
         )
         mem_flag, mem_delta = _format_mem_fields(mem_exceeded, mem_violation)
         tp = int(case["shape"][0]) * int(case["shape"][1])
@@ -563,6 +772,7 @@ def _case_worker(case: Dict[str, Any]) -> Dict[str, Any]:
             "shape": f"{case['shape'][0]}x{case['shape'][1]}",
             "tp": tp,
             "cp": 1,
+            "ep": 1,
             "pp": 1,
             "mb": 1,
             "runtime_s": _format_runtime(runtime),
@@ -805,7 +1015,7 @@ def _plot_super_merged_speedup(
     inf_color, train_color = _default_mode_colors()
     model_colors = {}
     for model_label in model_order:
-        if model_label == "GPT175B":
+        if model_label == "GLM4.5_106B":
             model_colors[model_label] = train_color
         else:
             model_colors[model_label] = inf_color
@@ -817,6 +1027,7 @@ def _plot_super_merged_speedup(
     x = np.arange(len(shapes))
 
     prev_hatch_lw = plt.rcParams.get("hatch.linewidth", None)
+    combined_handles = []
     plt.rcParams["hatch.linewidth"] = 0.75
     try:
         for idx, (model_label, mode) in enumerate(combos):
@@ -841,6 +1052,15 @@ def _plot_super_merged_speedup(
                 color=model_colors[model_label],
                 hatch=mode_hatches[mode],
             )
+            label_mode = "inf" if mode == "inference" else "train"
+            display_name = MODEL_DISPLAY_NAMES.get(model_label, model_label)
+            combined_handles.append(
+                Patch(
+                    facecolor=model_colors[model_label],
+                    hatch=mode_hatches[mode],
+                    label=f"{display_name} {label_mode}",
+                )
+            )
     finally:
         if prev_hatch_lw is not None:
             plt.rcParams["hatch.linewidth"] = prev_hatch_lw
@@ -856,44 +1076,29 @@ def _plot_super_merged_speedup(
     ax.set_title(title)
     ax.axhline(1.0, color="#333333", linestyle="--", linewidth=1.6, alpha=0.85, zorder=3)
 
-    mode_handles = [
-        Patch(
-            facecolor="#dddddd",
-            hatch="",
-            label="inference",
-        ),
-        Patch(
-            facecolor="#dddddd",
-            hatch="//",
-            label="train",
-        ),
-    ]
-    model_handles = [
-        Patch(
-            facecolor=model_colors.get(model_label, inf_color),
-            label=MODEL_DISPLAY_NAMES.get(model_label, model_label),
-        )
-        for model_label in model_order
-    ]
-    ax.legend(handles=mode_handles + model_handles, loc="center right")
+    ax.legend(handles=combined_handles, loc="upper left")
     fig.subplots_adjust(top=0.88, bottom=0.11, left=0.1, right=0.98)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
 
-def main() -> None:
-    hfval._ensure_project_root_on_path()
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    PLOT_DIR.mkdir(parents=True, exist_ok=True)
+def _run_for_bandwidth(
+    *,
+    bw_gbps: int,
+    train_hw_base: Dict[str, Any],
+    inf_hw_base: Dict[str, Any],
+    train_hw_sig: str,
+    inf_hw_sig: str,
+    train_model_sigs: Dict[str, str],
+    inf_model_sigs: Dict[str, str],
+    cache: Dict[str, Any],
+) -> None:
+    bw_gbps = int(bw_gbps)
+    bw_label = _bw_label(bw_gbps)
+    bw_tag = _bw_tag(bw_gbps)
+    if VERBOSE:
+        print(f"[2d_test] bandwidth sweep: {bw_label}", flush=True)
 
-    train_hw_base = read_yaml(TRAIN_HW_CONFIG)
-    inf_hw_base = read_yaml(INF_HW_CONFIG)
-    train_hw_sig = _file_signature(TRAIN_HW_CONFIG)
-    inf_hw_sig = _file_signature(INF_HW_CONFIG)
-    train_model_sigs = {model["config"]: _file_signature(model["config"]) for model in TRAIN_MODELS}
-    inf_model_sigs = {model["config"]: _file_signature(model["config"]) for model in INF_MODELS}
-
-    cache = _load_cache()
     cache_cases = cache.setdefault("cases", {})
 
     train_cases: List[Dict[str, Any]] = []
@@ -902,19 +1107,27 @@ def main() -> None:
             raise ValueError("AUTO_PARALLELISM requires Mesh2D to be in TOPOLOGIES")
         selection_cases: List[Dict[str, Any]] = []
         for model in TRAIN_MODELS:
+            model_axes = model.get("axes", ("tp", "cp", "pp"))
+            require_ep = _is_moe_model(model["config"])
             for shape in TRAIN_SHAPES:
                 total_devices = int(shape[0]) * int(shape[1])
-                for parallelism in _candidate_parallelisms(total_devices):
+                for parallelism in _candidate_parallelisms(total_devices, axes=model_axes):
+                    ep_value = int(parallelism.get("ep", 1) or 1)
+                    if require_ep and ep_value <= 1:
+                        continue
+                    if not require_ep and ep_value != 1:
+                        continue
                     case = {
                         "kind": "train",
                         "model_label": model["label"],
                         "model_config": model["config"],
                         "model_sig": train_model_sigs.get(model["config"], ""),
                         "hw_sig": train_hw_sig,
-                        "parallelism_axes": model.get("axes", ("tp", "cp", "pp")),
+                        "parallelism_axes": model_axes,
                         "topology": "Mesh2D",
                         "shape": shape,
                         "parallelism": parallelism,
+                        "bandwidth_gbps": bw_gbps,
                     }
                     case["case_key"] = _case_key(case)
                     selection_cases.append(case)
@@ -961,6 +1174,7 @@ def main() -> None:
                         "topology": topology,
                         "shape": shape,
                         "parallelism": parallelism,
+                        "bandwidth_gbps": bw_gbps,
                     }
                     case["case_key"] = _case_key(case)
                     train_cases.append(case)
@@ -990,6 +1204,7 @@ def main() -> None:
                         "topology": topology,
                         "shape": shape,
                         "parallelism": parallelism,
+                        "bandwidth_gbps": bw_gbps,
                     }
                     case["case_key"] = _case_key(case)
                     train_cases.append(case)
@@ -1006,6 +1221,7 @@ def main() -> None:
                     "hw_sig": inf_hw_sig,
                     "topology": topology,
                     "shape": shape,
+                    "bandwidth_gbps": bw_gbps,
                 }
                 case["case_key"] = _case_key(case)
                 inf_cases.append(case)
@@ -1044,6 +1260,10 @@ def main() -> None:
     inf_rows = inf_cached_rows + (
         _run_cases_parallel(inf_run_cases, inf_hw_base) if inf_run_cases else []
     )
+    for row in train_rows:
+        row.setdefault("ep", 1)
+    for row in inf_rows:
+        row.setdefault("ep", 1)
 
     for row in train_rows + inf_rows:
         case_key = row.get("_case_key")
@@ -1056,7 +1276,7 @@ def main() -> None:
         if error:
             train_errors.append(
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')} tp{row.get('tp')} "
-                f"cp{row.get('cp')} pp{row.get('pp')}: {error}"
+                f"cp{row.get('cp')} ep{row.get('ep', 1)} pp{row.get('pp')}: {error}"
             )
 
     inf_errors: List[str] = []
@@ -1074,6 +1294,7 @@ def main() -> None:
             _shape_key(row.get("shape", "")),
             int(row.get("tp", 0) or 0),
             int(row.get("cp", 0) or 0),
+            int(row.get("ep", 1) or 1),
             int(row.get("pp", 0) or 0),
         )
     )
@@ -1091,6 +1312,7 @@ def main() -> None:
         "shape",
         "tp",
         "cp",
+        "ep",
         "pp",
         "mb",
         "runtime_s",
@@ -1104,6 +1326,7 @@ def main() -> None:
         "shape",
         "tp",
         "cp",
+        "ep",
         "pp",
         "mb",
         "runtime_s",
@@ -1112,13 +1335,13 @@ def main() -> None:
         "error",
     ]
 
-    print("\n=== Training Results ===")
+    print(f"\n=== Training Results (BW {bw_label}) ===")
     _print_table(train_rows, train_header)
-    print("\n=== Inference Results ===")
+    print(f"\n=== Inference Results (BW {bw_label}) ===")
     _print_table(inf_rows, inf_header)
 
-    train_tsv = OUTPUT_ROOT / "2d_test_train.tsv"
-    inf_tsv = OUTPUT_ROOT / "2d_test_inf.tsv"
+    train_tsv = OUTPUT_ROOT / f"2d_test_train_{bw_tag}.tsv"
+    inf_tsv = OUTPUT_ROOT / f"2d_test_inf_{bw_tag}.tsv"
     with train_tsv.open("w", encoding="utf-8") as handle:
         handle.write("\t".join(train_header) + "\n")
         for row in train_rows:
@@ -1243,7 +1466,7 @@ def main() -> None:
         if legend_handles and legend_labels:
             axes[-1].legend(legend_handles, legend_labels, loc="lower right")
         fig.subplots_adjust(top=0.81, bottom=0.11, left=0.1, right=0.98, wspace=0.08)
-        fig.savefig(PLOT_DIR / "2d_test_train_topology.png", dpi=200)
+        fig.savefig(PLOT_DIR / f"2d_test_train_topology_{bw_tag}.png", dpi=200)
         plt.close(fig)
 
     inf_ok = [row for row in inf_rows if row.get("runtime_s") != "error"]
@@ -1335,7 +1558,7 @@ def main() -> None:
         if legend_handles and legend_labels:
             axes[-1].legend(legend_handles, legend_labels, loc="lower right")
         fig.subplots_adjust(top=0.81, bottom=0.11, left=0.08, right=0.98, wspace=0.08)
-        fig.savefig(PLOT_DIR / "2d_test_inf_topology.png", dpi=200)
+        fig.savefig(PLOT_DIR / f"2d_test_inf_topology_{bw_tag}.png", dpi=200)
         plt.close(fig)
 
     speedup_maps: Dict[str, Tuple[Dict[Tuple[str, str], float], Dict[Tuple[str, str], float]]] = {}
@@ -1368,7 +1591,7 @@ def main() -> None:
             inf_speedup,
             model_order=merged_order,
             shapes=merged_shapes,
-            output_path=PLOT_DIR / "2d_test_merged_by_model.png",
+            output_path=PLOT_DIR / f"2d_test_merged_by_model_{bw_tag}.png",
         )
         for topo in COMP_TOPO:
             if topo not in COMP_TOPO_SPECS:
@@ -1383,9 +1606,9 @@ def main() -> None:
                 inf_map,
                 model_order=merged_order,
                 shapes=merged_shapes,
-                output_path=PLOT_DIR / spec["output"],
+                output_path=PLOT_DIR / _with_bw_tag(spec["output"], bw_tag),
                 ylabel=spec["ylabel"],
-                title=spec["title"],
+                title=f"{spec['title']} (BW={bw_label})",
                 y_limits=y_limits,
             )
 
@@ -1404,13 +1627,39 @@ def main() -> None:
         for row in mem_failures:
             label = (
                 f"{row.get('model')} {row.get('topology')} {row.get('shape')} "
-                f"tp{row.get('tp')} cp{row.get('cp')} pp{row.get('pp')}"
+                f"tp{row.get('tp')} cp{row.get('cp')} ep{row.get('ep', 1)} pp{row.get('pp')}"
             )
             violation = row.get("mem_violation_gb", "")
             suffix = f" (over by {violation} GiB)" if violation else ""
             print(f"- {label}{suffix}")
     else:
         print("\nMemory capacity exceeded: none")
+
+
+def main() -> None:
+    hfval._ensure_project_root_on_path()
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    PLOT_DIR.mkdir(parents=True, exist_ok=True)
+
+    train_hw_base = read_yaml(TRAIN_HW_CONFIG)
+    inf_hw_base = read_yaml(INF_HW_CONFIG)
+    train_hw_sig = _file_signature(TRAIN_HW_CONFIG)
+    inf_hw_sig = _file_signature(INF_HW_CONFIG)
+    train_model_sigs = {model["config"]: _file_signature(model["config"]) for model in TRAIN_MODELS}
+    inf_model_sigs = {model["config"]: _file_signature(model["config"]) for model in INF_MODELS}
+
+    cache = _load_cache()
+    for bw_gbps in BW_SWEEP_GBPS:
+        _run_for_bandwidth(
+            bw_gbps=bw_gbps,
+            train_hw_base=train_hw_base,
+            inf_hw_base=inf_hw_base,
+            train_hw_sig=train_hw_sig,
+            inf_hw_sig=inf_hw_sig,
+            train_model_sigs=train_model_sigs,
+            inf_model_sigs=inf_model_sigs,
+            cache=cache,
+        )
 
 
 if __name__ == "__main__":

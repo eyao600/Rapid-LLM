@@ -324,6 +324,16 @@ class TimeCalculationLLM(TimeCalculation):
             return 0
         moe_ranks = self._moe_routing_group()
         if self.moe_num_experts % moe_ranks != 0:
+            if self._moe_allow_padding() and _env_flag("RAPID_ALLOW_MOE_EXPERT_PADDING"):
+                if not getattr(self, "_moe_expert_padding_warned", False):
+                    warnings.warn(
+                        "MoE expert count is not divisible by the routing group; "
+                        "padding experts for inference. Set RAPID_ALLOW_MOE_EXPERT_PADDING=0 "
+                        "to enforce divisibility.",
+                        stacklevel=2,
+                    )
+                    self._moe_expert_padding_warned = True
+                return max(1, math.ceil(self.moe_num_experts / moe_ranks))
             raise ValueError(
                 "moe_num_experts must be divisible by the MoE routing group size. "
                 f"moe_num_experts={self.moe_num_experts}, moe_group={moe_ranks}, "

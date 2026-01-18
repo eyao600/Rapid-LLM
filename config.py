@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import math
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import yaml as _yaml
@@ -14,6 +15,17 @@ _PRECISION_DTYPE_BYTES = {
     "fp32": 4.0,
     "single": 4.0,
 }
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    return normalized not in {"", "0", "false", "no"}
+
+
+_MOE_PADDING_WARNED = False
 
 
 @dataclass(frozen=True)
@@ -2138,6 +2150,7 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
             )
 
     if model.use_moe:
+        allow_moe_padding = _env_flag("RAPID_ALLOW_MOE_EXPERT_PADDING")
         if run_type == "inference":
             moe_ranks = tp * max(1, moe_dp)
             if moe_ranks > model.num_experts:
@@ -2146,10 +2159,20 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
                     f"(moe_group={moe_ranks}, tp={tp}, moe_dp={moe_dp})."
                 )
             if model.num_experts % moe_ranks != 0:
-                raise ValueError(
-                    "Number of MoE experts must be divisible by the MoE routing group size "
-                    f"(moe_group={moe_ranks}, tp={tp}, moe_dp={moe_dp})."
-                )
+                if allow_moe_padding:
+                    global _MOE_PADDING_WARNED
+                    if not _MOE_PADDING_WARNED:
+                        print(
+                            "[WARNING]: MoE expert count is not divisible by tp*moe_dp for "
+                            "inference; padding experts to enable simulation. "
+                            "Set RAPID_ALLOW_MOE_EXPERT_PADDING=0 to enforce divisibility."
+                        )
+                        _MOE_PADDING_WARNED = True
+                else:
+                    raise ValueError(
+                        "Number of MoE experts must be divisible by the MoE routing group size "
+                        f"(moe_group={moe_ranks}, tp={tp}, moe_dp={moe_dp})."
+                    )
         else:
             tp_sp = bool(getattr(sch, "tp_sp", False))
             if tp > 1 and train_ep > 1 and not tp_sp:

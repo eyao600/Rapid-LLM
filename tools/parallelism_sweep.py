@@ -78,7 +78,7 @@ OTHER_PARALLELISM_OPTIONS = {
 # GPU count filter: only evaluate combinations whose TP*CP*DP*PP fall inside
 # this inclusive range.
 GPU_COUNT_MIN = 128
-GPU_COUNT_MAX = 1024
+GPU_COUNT_MAX = 4096
 TP_CP_PRODUCT_MIN = 1  # Optional: set to int to filter tp*cp below this threshold.
 TP_CP_PRODUCT_MAX = 512  # Optional: set to int to filter tp*cp above this threshold.
 
@@ -116,7 +116,7 @@ ASTRA_CACHE_MODE = "NO_CACHE"  # Options: NO_CACHE, CACHE_READONLY, CACHE_READWR
 
 # Plotting behaviour toggles
 MEM_AWARE_FILTER = False  # When True, skip memory-violating configurations in plots.
-EVALUATE_MEMORY_EXCEEDED = False  # When True, still compute runtime even if memory limits are exceeded (may crash).
+EVALUATE_MEMORY_EXCEEDED = True  # When True, still compute runtime even if memory limits are exceeded (may crash).
 
 # Maximum number of parallel worker processes (set <= available CPUs - 1). Set to 1 to disable multiprocessing.
 MAX_WORKERS = 60

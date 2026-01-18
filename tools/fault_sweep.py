@@ -192,10 +192,15 @@ def _format_parallelism_label(settings: Dict[str, object]) -> str:
     dp_label = _dp_label()
     def _fmt(val: object) -> str:
         return str(int(val)) if isinstance(val, (int, float)) else str(val)
-    parts = [f"tp{_fmt(tp)}", f"cp{_fmt(cp)}"]
-    if RUN_TYPE == "training" and ep not in (None, 1, 1.0):
+    parts = [f"tp{_fmt(tp)}"]
+    if not MOE_MODE:
+        parts.append(f"cp{_fmt(cp)}")
+    if MOE_MODE:
+        parts.append(f"ep{_fmt(ep if ep is not None else 1)}")
+    elif RUN_TYPE == "training" and ep not in (None, 1, 1.0):
         parts.append(f"ep{_fmt(ep)}")
-    parts.append(f"{dp_label}{_fmt(dp)}")
+    if not MOE_MODE:
+        parts.append(f"{dp_label}{_fmt(dp)}")
     parts.append(f"pp{_fmt(pp)}")
     return "-".join(parts)
 
@@ -209,12 +214,41 @@ def _format_parallelism_tag(settings: Dict[str, object]) -> str:
     dp_label = "moe" if RUN_TYPE == "inference" and SWEEP_MOE_DP else "dp"
     def _fmt(val: object) -> str:
         return str(int(val)) if isinstance(val, (int, float)) else str(val)
-    parts = [f"tp{_fmt(tp)}", f"cp{_fmt(cp)}"]
-    if RUN_TYPE == "training" and ep not in (None, 1, 1.0):
+    parts = [f"tp{_fmt(tp)}"]
+    if not MOE_MODE:
+        parts.append(f"cp{_fmt(cp)}")
+    if MOE_MODE:
+        parts.append(f"ep{_fmt(ep if ep is not None else 1)}")
+    elif RUN_TYPE == "training" and ep not in (None, 1, 1.0):
         parts.append(f"ep{_fmt(ep)}")
-    parts.append(f"{dp_label}{_fmt(dp)}")
+    if not MOE_MODE:
+        parts.append(f"{dp_label}{_fmt(dp)}")
     parts.append(f"pp{_fmt(pp)}")
     return "_".join(parts)
+
+
+def _parallelism_identity(settings: Dict[str, object]) -> Tuple[int, int, int, int, int]:
+    return (
+        _safe_int(settings.get("tp", 1), 1),
+        _safe_int(settings.get("cp", 1), 1),
+        _safe_int(settings.get("dp", 1), 1),
+        _safe_int(settings.get("pp", 1), 1),
+        _safe_int(settings.get("ep", 1), 1),
+    )
+
+
+def _record_key(record: Dict[str, object]) -> Optional[Tuple[int, int, int, int, int]]:
+    settings = record.get("parallelism")
+    if isinstance(settings, dict):
+        return _parallelism_identity(settings)
+    return None
+
+
+def _record_display_label(record: Dict[str, object]) -> str:
+    settings = record.get("parallelism")
+    if isinstance(settings, dict):
+        return _format_parallelism_label(settings)
+    return str(record.get("label", "") or "")
 
 
 def _ensure_ep_in_network(network: Dict[str, object]) -> None:
@@ -255,15 +289,23 @@ def _tag_output_path(base_path: str, tag: str) -> str:
     safe_tag = str(tag).replace(os.sep, "_")
     return str(p.with_name(f"{p.stem}.{safe_tag}{p.suffix}"))
 
+
+def _suffix_output_path(base_path: str, suffix: str) -> str:
+    p = Path(base_path)
+    safe_suffix = str(suffix).replace(os.sep, "_")
+    stem = p.stem if p.suffix else p.name
+    return str(p.with_name(f"{stem}_{safe_suffix}{p.suffix}"))
+
 # -----------------------------------------------------------------------------
 # Fault sweep configuration
 # -----------------------------------------------------------------------------
 
-GLM_MODE = False
+GLM_MODE = True
 GLM_TRAIN = True
 MAX_ATTEMPTS = 1
 PLOT_ONLY = False
 PLOT_NUM = 0
+PLOT_SKIP_TOP = 0
 ONE_DIM = True  # 1_DIM: restrict faults to the first network dimension (tp/ep only).
 globals()["1_DIM"] = ONE_DIM
 
@@ -273,9 +315,10 @@ def _one_dim_enabled() -> bool:
 
 if GLM_MODE:
     if GLM_TRAIN:
-        HARDWARE_CONFIG_PATH = "configs/hardware-config/H100_SXM5_80GB_moe.yaml"
-        MODEL_CONFIG_PATH = "configs/model-config/GLM4.7_331B.yaml"
-        NETWORK_CONFIG_PATH: Optional[str] = "configs/hardware-config/a100_80GB.yaml"
+        HARDWARE_CONFIG_PATH = "validation_scripts/validation_configs/hardware-config/a100_80GB_fault.yaml"
+        MODEL_CONFIG_PATH = "configs/model-config/GLM4.7_358B.yaml"
+        NETWORK_CONFIG_PATH: Optional[str] = None
+        # NETWORK_CONFIG_PATH: Optional[str] = "configs/hardware-config/a100_80GB.yaml"
         TARGET_NUM_GPUS = 60
         MIN_ALLOWED_TP = 1
         MAX_ALLOWED_TP = 29
@@ -289,7 +332,7 @@ if GLM_MODE:
         MAX_ALLOWED_EP = 29
     else:
         HARDWARE_CONFIG_PATH = "configs/hardware-config/H100_SXM5_80GB_moe.yaml"
-        MODEL_CONFIG_PATH = "configs/model-config/GLM4.7_331B_inf.yaml"
+        MODEL_CONFIG_PATH = "configs/model-config/GLM4.7_358B_inf.yaml"
         NETWORK_CONFIG_PATH: Optional[str] = "configs/hardware-config/a100_80GB.yaml"
         TARGET_NUM_GPUS = 64
         MIN_ALLOWED_TP = 1
@@ -306,26 +349,32 @@ else:
     HARDWARE_CONFIG_PATH = "validation_scripts/validation_configs/hardware-config/a100_80GB_fault.yaml"
     MODEL_CONFIG_PATH = "configs/model-config/Llama3.1-70B.yaml"
     NETWORK_CONFIG_PATH: Optional[str] = None
-    TARGET_NUM_GPUS = 128
+    TARGET_NUM_GPUS = 96
     MIN_ALLOWED_TP = 1
-    MAX_ALLOWED_TP = 16
+    MAX_ALLOWED_TP = 24
     MIN_ALLOWED_CP = 1
-    MAX_ALLOWED_CP = 16
+    MAX_ALLOWED_CP = 24
     MIN_ALLOWED_DP = 1
-    MAX_ALLOWED_DP = 16
+    MAX_ALLOWED_DP = 4
     MIN_ALLOWED_PP = 1
-    MAX_ALLOWED_PP = 16
+    MAX_ALLOWED_PP = 4
     MIN_ALLOWED_EP = 1
     MAX_ALLOWED_EP = 1
 
+# When True, discard configurations whose tp*cp product is not a square power of two.
+ENFORCE_SQUARE_TP_CP = False
+MIN_TP_CP_PROD = 1
+MAX_TP_CP_PROD = 99
+
 RUN_TYPE = "training"
 SWEEP_MOE_DP = False
+MOE_MODE = False
 BASE_HW_DICT: Optional[Dict[str, object]] = None
 
 SAMPLE_COUNT = 25
 FAULT_ITER = 300
-FAULT_WORKERS = 105
-FAULT_MAG = (0.66, 0.0)  # May also be a (mean, std) tuple
+FAULT_WORKERS = 110
+FAULT_MAG = (0.5, 0.0)  # May also be a (mean, std) tuple
 NUM_FAULTS = [1]
 HARD_FAULT_ITER = 300
 HARD_NUM_FAULTS = [1]
@@ -350,11 +399,6 @@ _ACTIVE_EXECUTOR: Optional[ProcessPoolExecutor] = None
 _OLD_SIGINT_HANDLER = None
 _OLD_SIGTERM_HANDLER = None
 _SHUTDOWN_REQUESTED = False
-
-# When True, discard configurations whose tp*cp product is not a square power of two.
-ENFORCE_SQUARE_TP_CP = True
-MIN_TP_CP_PROD = 16
-MAX_TP_CP_PROD = 16
 
 # Debug dumping controls
 DEBUG_MODE = False
@@ -874,6 +918,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         type=int,
         default=PLOT_NUM,
         help="Generate a filtered plot with the top-N configs by baseline runtime",
+    )
+    parser.add_argument(
+        "--plot-skip-top",
+        type=int,
+        default=PLOT_SKIP_TOP,
+        help="Skip the fastest N configs (lowest baseline runtime) before applying --plot-num",
     )
     parser.add_argument("--report-output", type=str, default=REPORT_OUTPUT_PATH)
     parser.add_argument("--results-json", type=str, default=str(RESULTS_JSON_PATH))
@@ -1929,10 +1979,19 @@ def _baseline_sort_key(record: Dict[str, object]) -> float:
     return baseline if math.isfinite(baseline) else float("inf")
 
 
-def _select_top_by_baseline(records: List[Dict[str, object]], limit: int) -> List[Dict[str, object]]:
-    if limit <= 0 or limit >= len(records):
-        return list(records)
-    return sorted(records, key=_baseline_sort_key)[:limit]
+def _select_top_by_baseline(
+    records: List[Dict[str, object]],
+    limit: int,
+    *,
+    skip_top: int = 0,
+) -> List[Dict[str, object]]:
+    if not records:
+        return []
+    safe_skip = max(0, int(skip_top) if skip_top is not None else 0)
+    ordered = sorted(records, key=_baseline_sort_key)
+    start = min(safe_skip, len(ordered))
+    end = len(ordered) if limit <= 0 else min(start + limit, len(ordered))
+    return ordered[start:end]
 
 
 def _format_runtime(value: object) -> str:
@@ -1943,22 +2002,31 @@ def _format_runtime(value: object) -> str:
     return f"{runtime:.4f}" if math.isfinite(runtime) else "nan"
 
 
-def _print_top_records(records: List[Dict[str, object]], label: str) -> None:
+def _print_top_records(records: List[Dict[str, object]], label: str, *, skip_top: int = 0) -> None:
     if not records:
         return
-    print(f"Top {len(records)} configs by baseline runtime ({label}):")
+    if skip_top > 0:
+        print(
+            f"Selected {len(records)} configs by baseline runtime after skipping {skip_top} fastest ({label}):"
+        )
+    else:
+        print(f"Top {len(records)} configs by baseline runtime ({label}):")
     for record in records:
         baseline = _format_runtime(record.get("baseline_runtime"))
         fault_mean = _format_runtime(record.get("fault_mean"))
-        print(f"  {record.get('label', '')}: baseline={baseline}s, fault_mean={fault_mean}s")
+        print(f"  {_record_display_label(record)}: baseline={baseline}s, fault_mean={fault_mean}s")
 
 
-def _filter_records_by_labels(
+def _filter_records_by_keys(
     records: List[Dict[str, object]],
-    labels: Sequence[str],
+    keys: Sequence[Tuple[int, int, int, int, int]],
 ) -> List[Dict[str, object]]:
-    record_map = {record.get("label", ""): record for record in records}
-    return [record_map[label] for label in labels if label in record_map]
+    record_map = {}
+    for record in records:
+        key = _record_key(record)
+        if key is not None:
+            record_map[key] = record
+    return [record_map[key] for key in keys if key in record_map]
 
 
 def plot_fault_sensitivity(
@@ -1970,6 +2038,7 @@ def plot_fault_sensitivity(
     fault_range_color: str = "#fb6a4a",
     fault_fill_color: str = "#fdd0a2",
     fault_label: str = "Fault mean ± range",
+    normalize: bool = False,
 ) -> None:
     if not records:
         print("No records to plot.", file=sys.stderr)
@@ -1984,7 +2053,17 @@ def plot_fault_sensitivity(
     fault_min = np.array([rec["fault_min"] for rec in records], dtype=float)
     fault_max = np.array([rec["fault_max"] for rec in records], dtype=float)
 
-    config_labels = [rec["label"] for rec in records]
+    if normalize:
+        finite_baseline = baseline[np.isfinite(baseline)]
+        norm_factor = float(np.min(finite_baseline)) if finite_baseline.size else 1.0
+        if not math.isfinite(norm_factor) or norm_factor <= 0:
+            norm_factor = 1.0
+        baseline = baseline / norm_factor
+        fault_mean = fault_mean / norm_factor
+        fault_min = fault_min / norm_factor
+        fault_max = fault_max / norm_factor
+
+    config_labels = [_record_display_label(rec) for rec in records]
 
     plt.figure(figsize=(12, 6))
     plt.scatter(xs, baseline, color="#1f78b4", marker="o", s=80, label="Baseline")
@@ -2027,7 +2106,8 @@ def plot_fault_sensitivity(
             )
 
     plt.xticks(xs, config_labels, rotation=45, ha="right", fontsize=16)
-    plt.ylabel("Runtime (s)", fontsize=19)
+    ylabel = "Normalized runtime (fastest=1.0)" if normalize else "Runtime (s)"
+    plt.ylabel(ylabel, fontsize=19)
     plt.title(f"Fault Sensitivity Across Parallelism Configurations (Num GPUs = {num_gpus})", fontsize=18)
     plt.grid(alpha=0.3, axis="y")
     plt.legend(fontsize=16)
@@ -2044,6 +2124,8 @@ def plot_fault_sensitivity_combined(
     hard_records: List[Dict[str, object]],
     output_path: str,
     num_gpus: int,
+    *,
+    normalize: bool = False,
 ) -> None:
     if not soft_records or not hard_records:
         print("No combined records to plot.", file=sys.stderr)
@@ -2052,20 +2134,43 @@ def plot_fault_sensitivity_combined(
     if sns is not None:  # pragma: no branch
         sns.set_theme(style="whitegrid")
 
-    soft_map = {rec["label"]: rec for rec in soft_records}
-    hard_map = {rec["label"]: rec for rec in hard_records}
-    labels = [label for label in soft_map.keys() if label in hard_map]
-    if not labels:
+    soft_map = {}
+    for rec in soft_records:
+        key = _record_key(rec)
+        if key is not None:
+            soft_map[key] = rec
+    hard_map = {}
+    for rec in hard_records:
+        key = _record_key(rec)
+        if key is not None:
+            hard_map[key] = rec
+    keys = []
+    labels = []
+    for rec in soft_records:
+        key = _record_key(rec)
+        if key is None or key not in hard_map:
+            continue
+        keys.append(key)
+        labels.append(_record_display_label(rec))
+    if not keys:
         print("No overlapping configs between soft and hard fault runs.", file=sys.stderr)
         return
 
-    xs = np.arange(len(labels))
-    baseline = np.array([soft_map[label]["baseline_runtime"] for label in labels], dtype=float)
+    xs = np.arange(len(keys))
+    baseline = np.array([soft_map[key]["baseline_runtime"] for key in keys], dtype=float)
+
+    norm_factor = 1.0
+    if normalize:
+        finite_baseline = baseline[np.isfinite(baseline)]
+        norm_factor = float(np.min(finite_baseline)) if finite_baseline.size else 1.0
+        if not math.isfinite(norm_factor) or norm_factor <= 0:
+            norm_factor = 1.0
+        baseline = baseline / norm_factor
 
     def _stats(records_map):
-        mean = np.array([records_map[label]["fault_mean"] for label in labels], dtype=float)
-        min_vals = np.array([records_map[label]["fault_min"] for label in labels], dtype=float)
-        max_vals = np.array([records_map[label]["fault_max"] for label in labels], dtype=float)
+        mean = np.array([records_map[key]["fault_mean"] for key in keys], dtype=float)
+        min_vals = np.array([records_map[key]["fault_min"] for key in keys], dtype=float)
+        max_vals = np.array([records_map[key]["fault_max"] for key in keys], dtype=float)
         lower = []
         upper = []
         for mean_val, min_val, max_val in zip(mean, min_vals, max_vals):
@@ -2081,6 +2186,17 @@ def plot_fault_sensitivity_combined(
 
     soft_mean, soft_min, soft_max, soft_lower, soft_upper = _stats(soft_map)
     hard_mean, hard_min, hard_max, hard_lower, hard_upper = _stats(hard_map)
+    if normalize:
+        soft_mean = soft_mean / norm_factor
+        soft_min = soft_min / norm_factor
+        soft_max = soft_max / norm_factor
+        soft_lower = [val / norm_factor for val in soft_lower]
+        soft_upper = [val / norm_factor for val in soft_upper]
+        hard_mean = hard_mean / norm_factor
+        hard_min = hard_min / norm_factor
+        hard_max = hard_max / norm_factor
+        hard_lower = [val / norm_factor for val in hard_lower]
+        hard_upper = [val / norm_factor for val in hard_upper]
 
     plt.figure(figsize=(12, 6))
     plt.scatter(xs, baseline, color="#1f78b4", marker="o", s=80, label="Baseline")
@@ -2126,9 +2242,10 @@ def plot_fault_sensitivity_combined(
             plt.fill_between([x - 0.16, x + 0.16], [fmin, fmin], [fmax, fmax], color="#fff2b2", alpha=0.35)
 
     plt.xticks(xs, labels, rotation=45, ha="right", fontsize=16)
-    plt.ylabel("Runtime (s)", fontsize=19)
+    ylabel = "Normalized runtime (fastest=1.0)" if normalize else "Runtime (s)"
+    plt.ylabel(ylabel, fontsize=19)
     plt.title(
-        f"Soft vs Hard Fault Sensitivity Across Parallelism Configurations (Num GPUs = {num_gpus})",
+        f"Soft vs Hard Fault Sensitivity (GLM4.7 [358B,32B active]), Num GPUs = {num_gpus})",
         fontsize=18,
     )
     plt.grid(alpha=0.3, axis="y")
@@ -2153,7 +2270,8 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     global RANDOM_SEED, ENFORCE_SQUARE_TP_CP, DEBUG_MODE, DEBUG_RUN_DIR, DEBUG_SAVED_PATHS
     global _DEBUG_FILE_INDEX, FAILURE_DUMP_DIR, FAILURE_SAVED_PATHS, _FAILURE_FILE_INDEX
     global HARDWARE_CONFIG_PATH, MODEL_CONFIG_PATH, NETWORK_CONFIG_PATH
-    global RUN_TYPE, SWEEP_MOE_DP, BASE_HW_DICT, PLOT_ONLY, PLOT_NUM
+    global RUN_TYPE, SWEEP_MOE_DP, MOE_MODE, BASE_HW_DICT, PLOT_ONLY, PLOT_NUM, PLOT_SKIP_TOP
+    global HARD_PLOT_OUTPUT_PATH, HARD_REPORT_OUTPUT_PATH, COMBINED_PLOT_OUTPUT_PATH
     global HARD_FILTERED_PLOT_OUTPUT_PATH, COMBINED_FILTERED_PLOT_OUTPUT_PATH
 
     args = parse_args(cli_args)
@@ -2192,7 +2310,13 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     FILTERED_PLOT_OUTPUT_PATH = _tag_output_path(PLOT_OUTPUT_PATH, "filtered")
     REPORT_OUTPUT_PATH = args.report_output
     RESULTS_JSON_PATH = Path(args.results_json)
+    HARD_PLOT_OUTPUT_PATH = _suffix_output_path(PLOT_OUTPUT_PATH, "hard")
+    HARD_FILTERED_PLOT_OUTPUT_PATH = _tag_output_path(HARD_PLOT_OUTPUT_PATH, "filtered")
+    COMBINED_PLOT_OUTPUT_PATH = _suffix_output_path(PLOT_OUTPUT_PATH, "combined")
+    COMBINED_FILTERED_PLOT_OUTPUT_PATH = _tag_output_path(COMBINED_PLOT_OUTPUT_PATH, "filtered")
+    HARD_REPORT_OUTPUT_PATH = _suffix_output_path(REPORT_OUTPUT_PATH, "hard")
     PLOT_NUM = max(0, int(getattr(args, "plot_num", 0) or 0))
+    PLOT_SKIP_TOP = max(0, int(getattr(args, "plot_skip_top", 0) or 0))
 
     RANDOM_SEED = args.seed
     random.seed(RANDOM_SEED)
@@ -2221,6 +2345,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     model_config_obj = config.parse_config(MODEL_CONFIG_PATH, config_type=mode)
     RUN_TYPE = _model_run_type(model_config_obj)
     SWEEP_MOE_DP = RUN_TYPE == "inference"
+    MOE_MODE = bool(_moe_num_experts(model_config_obj))
 
     if PLOT_ONLY:
         records = read_fault_report(REPORT_OUTPUT_PATH)
@@ -2228,9 +2353,14 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
         if records:
             plot_fault_sensitivity(records, PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
             if PLOT_NUM > 0:
-                filtered_records = _select_top_by_baseline(records, PLOT_NUM)
-                _print_top_records(filtered_records, "soft faults")
-                plot_fault_sensitivity(filtered_records, FILTERED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
+                filtered_records = _select_top_by_baseline(records, PLOT_NUM, skip_top=PLOT_SKIP_TOP)
+                _print_top_records(filtered_records, "soft faults", skip_top=PLOT_SKIP_TOP)
+                plot_fault_sensitivity(
+                    filtered_records,
+                    FILTERED_PLOT_OUTPUT_PATH,
+                    TARGET_NUM_GPUS,
+                    normalize=True,
+                )
         else:
             print("No records found for plot-only mode (soft faults).", file=sys.stderr)
         hard_records: List[Dict[str, object]] = []
@@ -2248,17 +2378,23 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                     fault_label="Hard fault mean ± range",
                 )
                 if PLOT_NUM > 0 and filtered_records:
-                    labels = [record.get("label", "") for record in filtered_records]
-                    filtered_hard_records = _filter_records_by_labels(hard_records, labels)
+                    keys = []
+                    for record in filtered_records:
+                        key = _record_key(record)
+                        if key is not None:
+                            keys.append(key)
+                    filtered_hard_records = _filter_records_by_keys(hard_records, keys)
                     if filtered_hard_records:
+                        sorted_filtered_hard = sorted(filtered_hard_records, key=_baseline_sort_key)
                         plot_fault_sensitivity(
-                            filtered_hard_records,
+                            sorted_filtered_hard,
                             HARD_FILTERED_PLOT_OUTPUT_PATH,
                             TARGET_NUM_GPUS,
                             fault_color="#f1c40f",
                             fault_range_color="#f7dc6f",
                             fault_fill_color="#fff2b2",
                             fault_label="Hard fault mean ± range",
+                            normalize=True,
                         )
             else:
                 print("No records found for plot-only mode (hard faults).", file=sys.stderr)
@@ -2270,6 +2406,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                 filtered_hard_records,
                 COMBINED_FILTERED_PLOT_OUTPUT_PATH,
                 TARGET_NUM_GPUS,
+                normalize=True,
             )
         return 0
 
@@ -2862,9 +2999,14 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
     plot_fault_sensitivity(records, PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
     filtered_records: List[Dict[str, object]] = []
     if PLOT_NUM > 0:
-        filtered_records = _select_top_by_baseline(records, PLOT_NUM)
-        _print_top_records(filtered_records, "soft faults")
-        plot_fault_sensitivity(filtered_records, FILTERED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
+        filtered_records = _select_top_by_baseline(records, PLOT_NUM, skip_top=PLOT_SKIP_TOP)
+        _print_top_records(filtered_records, "soft faults", skip_top=PLOT_SKIP_TOP)
+        plot_fault_sensitivity(
+            filtered_records,
+            FILTERED_PLOT_OUTPUT_PATH,
+            TARGET_NUM_GPUS,
+            normalize=True,
+        )
 
     if hard_records:
         write_fault_report(hard_records, HARD_REPORT_OUTPUT_PATH)
@@ -2880,17 +3022,23 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
         )
         filtered_hard_records: List[Dict[str, object]] = []
         if PLOT_NUM > 0 and filtered_records:
-            labels = [record.get("label", "") for record in filtered_records]
-            filtered_hard_records = _filter_records_by_labels(hard_records, labels)
+            keys = []
+            for record in filtered_records:
+                key = _record_key(record)
+                if key is not None:
+                    keys.append(key)
+            filtered_hard_records = _filter_records_by_keys(hard_records, keys)
             if filtered_hard_records:
+                sorted_filtered_hard = sorted(filtered_hard_records, key=_baseline_sort_key)
                 plot_fault_sensitivity(
-                    filtered_hard_records,
+                    sorted_filtered_hard,
                     HARD_FILTERED_PLOT_OUTPUT_PATH,
                     TARGET_NUM_GPUS,
                     fault_color="#f1c40f",
                     fault_range_color="#f7dc6f",
                     fault_fill_color="#fff2b2",
                     fault_label="Hard fault mean ± range",
+                    normalize=True,
                 )
         plot_fault_sensitivity_combined(records, hard_records, COMBINED_PLOT_OUTPUT_PATH, TARGET_NUM_GPUS)
         if filtered_records and filtered_hard_records:
@@ -2899,6 +3047,7 @@ def main(cli_args: Optional[Sequence[str]] = None) -> int:
                 filtered_hard_records,
                 COMBINED_FILTERED_PLOT_OUTPUT_PATH,
                 TARGET_NUM_GPUS,
+                normalize=True,
             )
     else:
         print("No hard fault records to report.", file=sys.stderr)
