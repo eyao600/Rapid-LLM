@@ -286,5 +286,6 @@ Comparing the two runs will show how increasing tensor parallelism changes the p
 
 ### Validation
 - **Status:** Validation scripts are available in validation_scripts folder. We also validate against Megatron-LM and other paper data for inference and training, including networking, for up to 3000 GPUs. Below is a validation plot against Koyeb's single NVIDIA A100 data on Llama3.1-8B. The relevant script can be found in `validation_scripts/koyeb.py`. A memory-estimator smoke test lives at `validation_scripts/memory_estimator_smoke.py`.
+- **NVIDIA inference validation:** `validation_scripts/nvidia_inf.py` runs RAPID-LLM inference validation against NVIDIA Llama 2 7B/13B/70B and Llama 3.3-70B datasets (A100 by default) references, then generates combined comparison plots (actual vs RAPID-LLM and optional LLMCompass/Vidur/GenZ) under `output/validation/inf`. Options: `--llmcompass`, `--vidur`, `--genz` (pick comparison tools; if any are set, only those run) and `--plot errors|ratio|both` (select plot type; default is `ratio`).
 
 ![Koyeb Validation](validation_scripts/koyeb_a100_sxm_no_parallelism.png)

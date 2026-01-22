@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -38,6 +39,7 @@ from tools.parallelism_sweep import set_astrasim_cache_mode  # type: ignore
 
 VALIDATION_WORKERS_ENV = "RAPID_VALIDATION_WORKERS"
 VALIDATION_QUIET_ENV = "RAPID_VALIDATION_QUIET"
+VALIDATION_KEEP_TMP_ENV = "RAPID_VALIDATION_KEEP_TMP"
 DEFAULT_WORKER_COUNT = 8
 
 ResultParser = Callable[[str, "ValidationSpec"], Dict[str, Any]]
@@ -117,6 +119,62 @@ def _merge_list_of_dicts(orig: List[Dict[str, Any]],
     if id not in orig_order:
       result.append(orig_index[id])
   return result
+
+
+def _summarize_network_config(hw_config_path: str) -> str:
+  try:
+    with open(hw_config_path, "r") as handle:
+      data = yaml.safe_load(handle)
+  except Exception as exc:
+    return f"[validation] Failed to read hardware config {hw_config_path}: {exc}"
+  if not isinstance(data, dict):
+    return f"[validation] Hardware config {hw_config_path} is not a mapping."
+  network = data.get("network", {})
+  dims = network.get("dimensions")
+  if not isinstance(dims, list):
+    return f"[validation] Hardware config {hw_config_path} has no network dimensions."
+  lines = [f"[validation] Network summary ({hw_config_path}):"]
+  for dim in dims:
+    if not isinstance(dim, dict):
+      continue
+    label = dim.get("label") or dim.get("id", "<unnamed>")
+    size = dim.get("size")
+    topo = dim.get("topology", {})
+    topo_type = topo.get("type")
+    bandwidth = topo.get("bandwidth")
+    latency = topo.get("latency")
+    parallelisms = dim.get("parallelisms", [])
+    lines.append(
+      f"  {label}: size={size}, topo={topo_type}, bw={bandwidth}, lat={latency}, axes={parallelisms}"
+    )
+  return "\n".join(lines)
+
+
+def _find_network_config(search_roots: Sequence[Path]) -> Optional[Path]:
+  candidates: List[Path] = []
+  for root in search_roots:
+    if not root.exists():
+      continue
+    candidates.extend(root.rglob("network_analytical_*.yml"))
+  if not candidates:
+    return None
+  return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _log_astrasim_artifacts(tmp_dir: str, env: Mapping[str, str]) -> None:
+  roots = [Path(tmp_dir)]
+  astra_cache = env.get("ASTRA_CACHE_DIR")
+  if astra_cache:
+    roots.append(Path(astra_cache))
+  roots.append(Path(tmp_dir) / "output")
+  roots.append(Path(PROJECT_ROOT) / "output")
+  path = _find_network_config(roots)
+  if path is None:
+    return
+  work_dir = path.parent
+  cache_desc = f" (ASTRA_CACHE_DIR={astra_cache})" if astra_cache else ""
+  print(f"[validation] AstraSim artifacts: work_dir={work_dir}{cache_desc}")
+  print(f"[validation] AstraSim network config: {path}")
 
 def _deep_update(target: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
   for key, value in overrides.items():
@@ -261,7 +319,12 @@ def _execute_spec(spec: ValidationSpec) -> ValidationResult:
     )
     duration = time.time() - start_time
     output = proc.stdout or ""
+    _log_astrasim_artifacts(tmp_dir, env)
     if proc.returncode != 0:
+      if "Assertion `0 <= dest && dest < devices_count' failed" in output:
+        summary = _summarize_network_config(hardware_config_path)
+        output = f"{output}\n\n{summary}"
+        print(summary)
       return ValidationResult(
         spec=spec,
         success=False,
@@ -299,7 +362,11 @@ def _execute_spec(spec: ValidationSpec) -> ValidationResult:
       hardware_config_used=hardware_config_path,
     )
   finally:
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    keep_tmp = str(os.environ.get(VALIDATION_KEEP_TMP_ENV, "")).lower() in {"1", "true", "yes"}
+    if keep_tmp:
+      print(f"[validation] Keeping temp dir: {tmp_dir}")
+    else:
+      shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def run_validation_suite(
@@ -394,8 +461,14 @@ _DECODE_TIME_REGEX = re.compile(
 _INF_TIME_REGEX = re.compile(
   r"LLM inference time:\s*([0-9]+(?:\.[0-9]+)?)s"
 )
+_TTFT_REGEX = re.compile(
+  r"LLM time to first token:\s*([0-9]+(?:\.[0-9]+)?)s"
+)
+_TPOT_REGEX = re.compile(
+  r"midpoint=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)s"
+)
 _TRAIN_TIME_REGEX = re.compile(
-  r"Training time for batch:\s*([0-9]+(?:\.[0-9]+)?)s"
+  r"(?:Training time for batch|LLM inference time):\s*([0-9]+(?:\.[0-9]+)?)s"
 )
 
 def parse_decode_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
@@ -410,6 +483,17 @@ def parse_inference_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
     raise ValueError(f"Failed to parse inference time for experiment '{spec.label}'.")
   return {"inference_time_s": float(match.group(1))}
 
+def parse_ttft(output: str, spec: ValidationSpec) -> Dict[str, Any]:
+  match = _TTFT_REGEX.search(output)
+  if not match:
+    raise ValueError(f"Failed to parse time-to-first-token for experiment '{spec.label}'.")
+  return {"ttft_s": float(match.group(1))}
+
+def parse_tpot(output: str, spec: ValidationSpec) -> Dict[str, Any]:
+  match = _TPOT_REGEX.search(output)
+  if not match:
+    raise ValueError(f"Failed to parse per-token output time for experiment '{spec.label}'.")
+  return {"tpot_s": float(match.group(1))}
 
 def parse_training_time(output: str, spec: ValidationSpec) -> Dict[str, Any]:
   match = _TRAIN_TIME_REGEX.search(output)

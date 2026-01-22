@@ -85,6 +85,7 @@ def cached_rows():
         network_ignored=False,
         device=device,
         emit_logs=False,
+        test_model=True,
       )
     except FileNotFoundError:
       continue
