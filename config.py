@@ -2106,11 +2106,7 @@ def validate_model_config(hw_config: HWConfig, model_config: ModelConfig) -> Non
     if run_type == "inference":
         replica_count = sch.inference.replica_count
         moe_dp = sch.inference.moe_dp
-        if cp > 1:
-            raise ValueError(
-                "Context parallelism (cp) is not supported for LLM inference. "
-                "Please set parallelism.cp to 1 for inference runs."
-            )
+
         if mb > 1:
             print(
                 f"[WARNING]: LLM inference configured with mb={mb} (>1). \n "

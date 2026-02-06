@@ -110,8 +110,6 @@ class MemoryEstimator:
             tp_ep = False
             if use_moe and hasattr(tc, "_moe_routing_group"):
                 moe_group = max(1, int(tc._moe_routing_group()))
-            if cp != 1:
-                raise ValueError("Inference memory estimation requires cp=1 (context parallelism is WIP).")
         if use_moe and zero_stage >= 2:
             raise NotImplementedError("MoE memory estimation with ZeRO-2/3 (dp_zero_stage >= 2) is not supported yet.")
 

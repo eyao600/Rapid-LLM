@@ -576,6 +576,7 @@ class TimeCalculationLLM(TimeCalculation):
                 raise ValueError(f"Unsupported GEMM type for tensor parallelism: {gemm_type}")
         elif mode == ParallelismMode.CONTEXT:
             shard_m = math.ceil(m / cp)
+            shard_n = math.ceil(n / cp)
             if gemm_type not in (
                 GemmType.ATTENTION_SCORE,
                 GemmType.ATTENTION_OUTPUT,
@@ -591,6 +592,8 @@ class TimeCalculationLLM(TimeCalculation):
             if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):
                 shard_batch = math.ceil(batch / tp)
                 batch_scale = 1.0 / tp
+                shard_n = math.ceil(n / cp)
+                shard_k = math.ceil(k / cp)
             elif gemm_type in (GemmType.QKV, GemmType.FFN1, GemmType.LINEAR_SOFTMAX):
                 shard_n = math.ceil(n / tp)
             elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN2):
@@ -871,15 +874,21 @@ class TimeCalculationLLM(TimeCalculation):
             return int(shard_k * n)
         return 0
     
-    # assuming no context parallelism for now
-    def parallelism_gemm_forward(self, gemm: Tuple[int, ...], name: str, gemm_type: Optional[GemmType] = None) -> Any:
+    def parallelism_gemm_forward(
+        self,
+        gemm: Tuple[int, ...],
+        name: str,
+        gemm_type: Optional[GemmType] = None,
+        *,
+        decode: bool = False,
+    ) -> Any:
         parallelism_mode = self.get_parallelism_mode()
         if parallelism_mode == ParallelismMode.TENSOR or parallelism_mode == ParallelismMode.TENSOR_SEQUENCE:
             return self._tensor_parallelism_gemm_forward(gemm, name, gemm_type) # also return flops and mem accesses
         elif parallelism_mode == ParallelismMode.CONTEXT:
-            return self._context_parallelism_gemm_forward(gemm, name, gemm_type)
+            return self._context_parallelism_gemm_forward(gemm, name, gemm_type, decode=decode)
         elif parallelism_mode == ParallelismMode.TENSOR_CONTEXT_HYBRID:
-            return self._tensor_context_hybrid_gemm_forward(gemm, name, gemm_type)
+            return self._tensor_context_hybrid_gemm_forward(gemm, name, gemm_type, decode=decode)
         elif parallelism_mode == ParallelismMode.SINGLE:
             return self.single_gpu_gemm_forward(gemm, name, gemm_type) # also return flops and mem accesses
         else:
@@ -935,6 +944,8 @@ class TimeCalculationLLM(TimeCalculation):
         gemm: Tuple[int, ...],
         name: str,
         gemm_type: Optional[GemmType] = None,
+        *,
+        decode: bool = False,
     ) -> Tuple[float, float, float, float, Any]:
         """
         Megatron-LM style TPxCP hybrid forward GEMM behavior.
@@ -979,7 +990,7 @@ class TimeCalculationLLM(TimeCalculation):
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
                 shard_spec.k,
-                shard_spec.n,
+                shard_spec.n if not decode else shard_spec.shard_n,
                 name,
                 disable_overhead=True,
             )
@@ -987,7 +998,7 @@ class TimeCalculationLLM(TimeCalculation):
         elif gemm_type == GemmType.ATTENTION_OUTPUT:  # attention gemm
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
-                shard_spec.k,
+                shard_spec.k if not decode else shard_spec.shard_k,  
                 shard_spec.n,
                 name,
                 disable_overhead=True,
@@ -1000,7 +1011,11 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.shard_n,
                 name,
             )
-            total_bytes = self.get_kv_size_bytes()  / self.tp # each tp group holds a tp shard of kv for each cp group
+            if decode:
+                # for the current token shard instead of full-context K/V.
+                total_bytes = shard_spec.shard_m * shard_spec.k * self.precision.activations
+            else:
+                total_bytes = self.get_kv_size_bytes() / self.tp  # each tp group holds a tp shard of kv for each cp group
             kind = ALL_GATHER
             participants = self.cp # all gather K V for each cp group
             axis_hint = "cp"
@@ -1425,6 +1440,7 @@ class TimeCalculationLLM(TimeCalculation):
         gemm: Tuple[int, ...],
         name: str,
         gemm_type: Optional[GemmType] = None,
+        decode: bool = False,
     ) -> Tuple[float, float, float, float, Any]:
         """
         Megatron-LM style context-parallel (CP) forward GEMM behavior.
@@ -1448,13 +1464,14 @@ class TimeCalculationLLM(TimeCalculation):
             raise ValueError("gemm_type is required for context-parallel forward GEMM")
         shard_spec = self._shard_gemm_descriptor(gemm, gemm_type)
         if gemm_type in (GemmType.ATTENTION_SCORE, GemmType.ATTENTION_OUTPUT):  # attention gemm
+            
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,
                 shard_spec.k,
-                shard_spec.n,
+                shard_spec.n if not decode else shard_spec.shard_n,  
                 name,
                 disable_overhead=True,
-            )
+            ) 
             gemm_time = gemm_time * batch + self.O
         elif gemm_type == GemmType.QKV:  # qkv gemm
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
@@ -1463,7 +1480,7 @@ class TimeCalculationLLM(TimeCalculation):
                 shard_spec.n,
                 name,
             )
-            total_bytes = self.get_kv_size_bytes()
+            total_bytes = self.get_kv_size_bytes() if not decode else shard_spec.shard_m * shard_spec.k * self.precision.activations  # in decode, only need to broadcast the Q for the current token
         elif gemm_type in (GemmType.OUT_PROJ, GemmType.FFN1, GemmType.FFN2):
             gemm_time, _, _, mem_accesses = self.get_gemm_time(
                 shard_spec.shard_m,

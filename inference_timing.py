@@ -133,7 +133,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         # QKV projection
         qkv_proj_time, qkv_proj_reduction, qkv_proj_size, qkv_proj_flops, qkv_proj_mem = self.parallelism_gemm_forward(
-            gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV
+            gemm_qkv_proj, "decode_qkv_proj_f", gemm_type=GemmType.QKV, decode=True
         )
         transformer_timings["qkv_proj"] = OperationTiming(
             "qkv_proj",
@@ -150,10 +150,10 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
 
         # Attention components
         attention_score_time, attention_score_reduction, attention_score_size, attention_score_flops, attention_score_mem = self.parallelism_gemm_forward(
-            gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE
+            gemm_attention_score, "decode_attention_score_f", gemm_type=GemmType.ATTENTION_SCORE, decode=True
         )
         attention_output_time, attention_output_reduction, attention_output_size, attention_output_flops, attention_output_mem = self.parallelism_gemm_forward(
-            gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT
+            gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT, decode=True
         )
         attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
 
@@ -917,6 +917,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
             top_k=self.moe_top_k,
             pp=self.pp,
             tp=self.tp,
+            cp=self.cp,
             tp_sp=self.tp_sp,
             moe_dp=self.moe_dp,
             sample_every=sample_every,
@@ -944,7 +945,6 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         """
         # Calculate prefill time (existing functionality)
         prefill_time, prefill_energy = self.calc_time()
-
         # Calculate decode time (new functionality)
         decode_time, decode_energy, decode_samples = self.calc_decode_time()
         total_time = prefill_time + decode_time
