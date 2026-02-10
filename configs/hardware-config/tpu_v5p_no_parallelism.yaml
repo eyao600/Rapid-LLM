@@ -1,10 +1,13 @@
+# EXAMPLE FILE FOR TPUv5p-STYLE DUAL-COMPUTE CORE MODELING.
+# Matrix path models MXU/systolic compute; vector path models TPU VPU.
+# Values are TPUv5-class approximations and should be calibrated per target SKU.
 
 sw_param:
   full_recomputation: false # Enable full activation recompute during backward instead of selective recomputation
-  kernel_launch_overhead: 9e-6   #9us
+  kernel_launch_overhead: 9e-6
   # dp_zero_stage selects ZeRO-style data-parallel sharding: 0=DDP, 1=ZeRO-1, 2=ZeRO-2, 3=ZeRO-3
   # only used if data parallelism (dp) > 1
-  dp_zero_stage: 0
+  dp_zero_stage: 2
   precision:
     # tensor_format accepts numeric byte counts or dtype strings (fp16, bf16, fp32).
     # Take care that the number of flops defined below has been carefully tuned for FP16/BF16 formats.
@@ -20,50 +23,62 @@ sw_param:
     optimizer_states: as_tensor_format  # Optimizer states 
     stats: as_tensor_format  # Normalization statistics 
     master_parameters: 0.0  # master weight copy in bytes (0 = disabled)
-  h2d_bandwidth: 13297674240    # Bytes/s; set -1 to disable H2D timing
+  h2d_bandwidth: -1  # Bytes/s; set -1 to disable H2D timing
   const_mem_offset: 0 GB # default 0 GB. We will optimize it later.
-
   # DP gradient sync frequency: every_mb (default) or last_mb (sync only on final microbatch; ZeRO-3 stays per-mb)
   dp_microbatch: last_mb
 tech_param:
   core:
-    operating_frequency: 1.33e9     #Hz
-    num_bundles: 80     # V100 has 80 SMs
-    nominal_energy_per_flop: 1.8e-13
-    num_mcu_per_bundle: 8     #a bundle can be thought of as an SM, number of tensorcores per SM
+    operating_frequency: 1.35e9
+    # TPUv5p device has 2 TensorCores; model each TensorCore as one bundle.
+    num_bundles: 2
+    nominal_energy_per_flop: 1.3e-13
+    nominal_power_per_mcu: 0.1
+    # Each TPU TensorCore has 4 MXUs; model each MXU as one MCU.
+    num_mcu_per_bundle: 4
     matrix_unit:
-      nominal_flop_rate_per_mcu: 128
-      util: 0.85     #util should be 0.75 (12/16) for tensorcore
-      FMA_d1: 4                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
-      FMA_d2: 4
-      dataflow: best              #{wst. ast, ost, best, none}: wst: weight stationary, ast: activation stationary, ost: output stationary
+      # Per-MCU rate is scaled to preserve aggregate matrix throughput
+      # under the {bundle=TensorCore, mcu=MXU} mapping.
+      # TPUv5p TensorCore matrix engine assumptions:
+      # - each MXU is modeled as 128x128 systolic-like compute (FMA_d1/FMA_d2).
+      # - assuming weight stationary systolic array architecture.
+      # - accumulator precision is assumed BF16-compatible in this simplified model.
+      nominal_flop_rate_per_mcu: 49152
+      util: 0.9
+      FMA_d1: 128
+      FMA_d2: 128
+      dataflow: best
     vector_unit:
-      nominal_flop_rate_per_bundle: 64
-      util: 0.85
-      lanes: 64
-      simd_width: 1
+      # Vector throughput is specified per bundle (per TPU TensorCore).
+      # TPUv5p has one VPU per TensorCore with 4 independently programmable
+      # units, each 8x128 (=1024 ALUs), for 4096 ALUs total per TensorCore.
+      # Assumes 1 flop/ALU/cycle for the nominal vector-rate abstraction.
+      nominal_flop_rate_per_bundle: 4096
+      util: 0.8
+      lanes: 128
+      simd_width: 8
       vector_width_bits: 32
   DRAM:
-    size: 16 GB     # V100 has 16GB HBM2
-    bandwidth: 900 GB     # V100 has ~900 GB/s bandwidth
-    dynamic_energy_per_bit: 4.2e-12     #Joules
-    latency: 100e-9
+    size: 95 GB
+    bandwidth: 2800 GB
+    dynamic_energy_per_bit: 4.5e-12
+    latency: 90e-9
     util: 1
   SRAM-L2:
-    size: 6 MB     # V100 L2 cache
-    bandwidth: 3072 GB     # Estimated L2 bandwidth
+    size: 48 MB
+    bandwidth: 9 TB
     dynamic_energy_per_bit: 130e-15
     latency: 0
-    util: 0.45
+    util: 1
   SRAM-L1:
-    size: 6400 KB     # 80 KB per SM * 80 SMs
-    bandwidth: 15 TB     # Estimated L1 bandwidth
+    size: 24576 KB
+    bandwidth: 22 TB
     dynamic_energy_per_bit: 130e-15
     latency: 0
     util: 1
   SRAM-R:
-    size: 20 MB     # Register file
-    bandwidth: 80 TB     # Estimated register bandwidth
+    size: 32 MB
+    bandwidth: 150 TB
     dynamic_energy_per_bit: 110e-15
     latency: 0
     util: 1
@@ -71,23 +86,22 @@ tech_param:
     intra_node:
       latency: 5e-6
       util: 1
-      bandwidth: 300 Gb
+      bandwidth: 800 Gb
     inter_node:
       latency: 5e-6
       util: 0.96
-      bandwidth: 300 Gb
-
+      bandwidth: 800 Gb
 memory_hierarchy:
-  l0:   #Register Memory
+  l0:
     type: SRAM-R
     scope: mcu
-  l1:   #Shared Memory
+  l1:
     type: SRAM-L1
     scope: mcu-bundle
-  l2:   #L2
+  l2:
     type: SRAM-L2
     scope: global
-  l3:   #Global Memory
+  l3:
     type: DRAM
     scope: global
 
@@ -97,7 +111,7 @@ parallelism:
   pp: 1 # pipeline stages
   mb: 1 # number of micro-batches
   tp: 1 # tensor parallelism
-  tp_sp: true # tensor-sequence parallelism
+  tp_sp: false # tensor-sequence parallelism
   cp : 1 # context parallelism
 
   train:
@@ -114,13 +128,14 @@ network:
       label: device_fabric
       size: 1
       topology:
-        type: Mesh
-        bandwidth: 300 Gb
+        type: Ring
+        bandwidth: 800 Gb
         latency: 5e-6
         energy_per_bit: 8e-12 # (J/bit)
         util: 1.0
       collective_override: {} # overrides execution_backend.collectives when provided
       parallelisms: [tp, cp, ep, pp, dp]
+
 
 
   overlap:
@@ -131,10 +146,10 @@ network:
     # fraction of CP comm that can overlap CP compute
     cp_overlap: 0.0
 execution_backend:
-  model: astra # analytical | astra
+  model: analytical # analytical | astra
   astra:
     backend: astra
-    mode: hybrid  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
+    mode: full_astrasim_flattened  # hybrid | full_astrasim_hierarchical | full_astrasim_flattened
     collectives:
       # Default collective algorithms. Per-dimension collective_override entries can override these.
       # Allowed values per op: auto | ring | direct | halvingDoubling | doubleBinaryTree | mesh | mesh2d | hypercube | torus2d
@@ -149,4 +164,4 @@ execution_backend:
       preferred_dataset_splits: 32 # Should be same as active_chunks_per_dimension
 
 inference:
-  kvcache_type: hbm_only
+  kvcache_type: hbm_only # Only supported mode for now.

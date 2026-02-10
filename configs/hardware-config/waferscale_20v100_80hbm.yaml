@@ -32,13 +32,20 @@ tech_param:
   core:
     operating_frequency: 1.33e9     #Hz
     num_bundles: 1600     # 80 SMs per V100 * 20 GPUs
-    nominal_flop_rate_per_mcu: 128
     nominal_energy_per_flop: 1.8e-13
     num_mcu_per_bundle: 8     #a bundle can be thought of as an SM, number of tensorcores per SM
-    FMA_d1: 4                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
-    FMA_d2: 4
-    dataflow: best              #{wst. ast, ost, best, none}: wst: weight stationary, ast: activation stationary, ost: output stationary
-    util: 0.85     #util should be 0.75 (12/16) for tensorcore
+    matrix_unit:
+      nominal_flop_rate_per_mcu: 128
+      util: 0.85     #util should be 0.75 (12/16) for tensorcore
+      FMA_d1: 4                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
+      FMA_d2: 4
+      dataflow: best              #{wst. ast, ost, best, none}: wst: weight stationary, ast: activation stationary, ost: output stationary
+    vector_unit:
+      nominal_flop_rate_per_bundle: 64
+      util: 0.85
+      lanes: 64
+      simd_width: 1
+      vector_width_bits: 32
   DRAM:
     size: 320 GB     # 16 GB per V100 * 20 GPUs
     bandwidth: 18000 GB     # ~900 GB/s per V100 * 20

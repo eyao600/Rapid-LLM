@@ -18,13 +18,20 @@ tech_param:
   core:
     operating_frequency: 1.83e9
     num_bundles: 132
-    nominal_flop_rate_per_mcu: 1024
     nominal_energy_per_flop: 1.8e-13
     num_mcu_per_bundle: 4
-    FMA_d1: 16
-    FMA_d2: 8
-    dataflow: best
-    util: 1
+    matrix_unit:
+      nominal_flop_rate_per_mcu: 1024
+      util: 1
+      FMA_d1: 16
+      FMA_d2: 8
+      dataflow: best
+    vector_unit:
+      nominal_flop_rate_per_bundle: 128
+      util: 1
+      lanes: 128
+      simd_width: 1
+      vector_width_bits: 32
   DRAM:
     size: 80 GB
     bandwidth: 3350 GB

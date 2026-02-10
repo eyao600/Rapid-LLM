@@ -159,37 +159,146 @@ def _parse_precision_block(spec: dict) -> PrecisionConfig:
 
 
 @dataclass
+class MatrixUnitConfig:
+    nominal_flop_rate_per_mcu: float
+    util: float
+    FMA_dims: tuple
+    dataflow: str
+
+    @classmethod
+    def from_dict(cls, matrix_cfg):
+        fma_dims = matrix_cfg.get("FMA_dims")
+        if fma_dims is None:
+            fma_d1 = matrix_cfg.get("FMA_d1")
+            fma_d2 = matrix_cfg.get("FMA_d2")
+            if fma_d1 is None or fma_d2 is None:
+                raise ValueError("matrix_unit requires either FMA_dims or both FMA_d1/FMA_d2")
+            fma_dims = (fma_d1, fma_d2)
+        if not isinstance(fma_dims, (list, tuple)) or len(fma_dims) != 2:
+            raise ValueError("matrix_unit.FMA_dims must be a length-2 list/tuple")
+
+        return cls(
+            nominal_flop_rate_per_mcu=float(matrix_cfg["nominal_flop_rate_per_mcu"]),
+            util=float(matrix_cfg.get("util", 1.0)),
+            FMA_dims=(int(fma_dims[0]), int(fma_dims[1])),
+            dataflow=str(matrix_cfg.get("dataflow", "best")),
+        )
+
+
+@dataclass
+class VectorUnitConfig:
+    # Vector throughput is defined per bundle (SM for GPU, TensorCore for TPU).
+    nominal_flop_rate_per_bundle: float
+    util: float
+    simd_width: int
+    lanes: int
+    vector_width_bits: int
+
+    @classmethod
+    def from_dict(cls, vector_cfg, *, num_mcu_per_bundle: int):
+        bundle_rate = vector_cfg.get("nominal_flop_rate_per_bundle")
+        if bundle_rate is None:
+            # Backward compatibility: older dual-compute configs expressed vector
+            # throughput per MCU/subpartition.
+            legacy_mcu_rate = vector_cfg.get("nominal_flop_rate_per_mcu")
+            if legacy_mcu_rate is None:
+                raise ValueError(
+                    "vector_unit requires nominal_flop_rate_per_bundle "
+                    "(or legacy nominal_flop_rate_per_mcu)"
+                )
+            bundle_rate = float(legacy_mcu_rate) * int(num_mcu_per_bundle)
+
+        return cls(
+            nominal_flop_rate_per_bundle=float(bundle_rate),
+            util=float(vector_cfg.get("util", 1.0)),
+            simd_width=int(vector_cfg.get("simd_width", 1)),
+            lanes=int(vector_cfg.get("lanes", 1)),
+            vector_width_bits=int(vector_cfg.get("vector_width_bits", 32)),
+        )
+
+
+@dataclass
 class CoreConfig:
     nominal_power_per_mcu: float
-    nominal_flop_rate_per_mcu: float
     nominal_energy_per_flop: float
     nominal_voltage: float
     threshold_voltage: float
     margin_voltage: float
     operating_area_per_mcu: float
     num_mcu_per_bundle: int
-    FMA_dims: tuple
-    dataflow: str
-    util: float
+    matrix_unit: MatrixUnitConfig
+    vector_unit: VectorUnitConfig
     num_bundles: int = None
     operating_frequency: float = None
     nominal_frequency: float = None
     nominal_area_per_mcu: float = None
 
+    @property
+    def nominal_flop_rate_per_mcu(self) -> float:
+        # Backward compatibility: legacy code reads core.nominal_flop_rate_per_mcu
+        # and should resolve to matrix-math throughput.
+        return self.matrix_unit.nominal_flop_rate_per_mcu
+
+    @property
+    def FMA_dims(self) -> tuple:
+        return self.matrix_unit.FMA_dims
+
+    @property
+    def dataflow(self) -> str:
+        return self.matrix_unit.dataflow
+
+    @property
+    def util(self) -> float:
+        # Backward compatibility: legacy code reads core.util and should resolve
+        # to matrix compute utilization.
+        return self.matrix_unit.util
+
     @classmethod
     def from_dict(cls, core_config_dict):
+        matrix_cfg = core_config_dict.get("matrix_unit")
+        if matrix_cfg is None:
+            # Legacy single-core schema maps to matrix-unit fields.
+            matrix_cfg = {
+                "nominal_flop_rate_per_mcu": core_config_dict["nominal_flop_rate_per_mcu"],
+                "util": core_config_dict["util"],
+                "FMA_d1": core_config_dict["FMA_d1"],
+                "FMA_d2": core_config_dict["FMA_d2"],
+                "dataflow": core_config_dict["dataflow"],
+            }
+
+        vector_cfg = core_config_dict.get("vector_unit")
+        if vector_cfg is None:
+            # Legacy schema has one throughput/util. Vector throughput is now
+            # modeled per bundle, so convert per-MCU values to per-bundle.
+            vector_bundle_rate = core_config_dict.get("vector_nominal_flop_rate_per_bundle")
+            if vector_bundle_rate is None:
+                legacy_vector_mcu_rate = core_config_dict.get(
+                    "vector_nominal_flop_rate_per_mcu",
+                    matrix_cfg["nominal_flop_rate_per_mcu"],
+                )
+                vector_bundle_rate = (
+                    float(legacy_vector_mcu_rate) * int(core_config_dict["num_mcu_per_bundle"])
+                )
+            vector_cfg = {
+                "nominal_flop_rate_per_bundle": vector_bundle_rate,
+                "util": core_config_dict.get("vector_util", matrix_cfg.get("util", 1.0)),
+                "simd_width": core_config_dict.get("vector_simd_width", 1),
+                "lanes": core_config_dict.get("vector_lanes", 1),
+                "vector_width_bits": core_config_dict.get("vector_width_bits", 32),
+            }
+
         return cls(
             nominal_power_per_mcu=core_config_dict.get("nominal_power_per_mcu", 0.1),
-            nominal_flop_rate_per_mcu=core_config_dict["nominal_flop_rate_per_mcu"],
             nominal_energy_per_flop=core_config_dict["nominal_energy_per_flop"],
             nominal_voltage=core_config_dict.get("nominal_voltage", 0.1),
             threshold_voltage=core_config_dict.get("threshold_voltage", 0.1),
             margin_voltage=core_config_dict.get("margin_voltage", 0.1),
             operating_area_per_mcu=core_config_dict.get("operating_area_per_mcu", 0.1),
             num_mcu_per_bundle=core_config_dict["num_mcu_per_bundle"],
-            FMA_dims=(core_config_dict["FMA_d1"], core_config_dict["FMA_d2"]),
-            dataflow=core_config_dict["dataflow"],
-            util=core_config_dict["util"],
+            matrix_unit=MatrixUnitConfig.from_dict(matrix_cfg),
+            vector_unit=VectorUnitConfig.from_dict(
+                vector_cfg, num_mcu_per_bundle=int(core_config_dict["num_mcu_per_bundle"])
+            ),
             num_bundles=core_config_dict.get("num_bundles", None),
             operating_frequency=core_config_dict.get("operating_frequency", None),
             nominal_frequency=core_config_dict.get("nominal_frequency", None),

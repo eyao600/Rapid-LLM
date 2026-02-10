@@ -29,14 +29,35 @@ sw_param:
 tech_param:
   core:
     operating_frequency: 1.41e9
+    # GPU mapping: one bundle = one SM.
     num_bundles: 108
-    nominal_flop_rate_per_mcu: 512
     nominal_energy_per_flop: 1.8e-13
+    # GPU mapping: one MCU = one Tensor Core.
     num_mcu_per_bundle: 4
-    FMA_d1: 8
-    FMA_d2: 4
-    dataflow: best
-    util: 1.0
+    matrix_unit:
+      # A100 Tensor Core nominal BF16/FP16-rate model:
+      # - This assumes one Tensor Core issues one MMA-style matmul per cycle.
+      # - FMA_d1/FMA_d2 define the compact mixed-precision GEMM shape used by the timing model.
+      # - dataflow: best lets the simulator choose the best of weight/activation/output-stationary.
+      nominal_flop_rate_per_mcu: 512
+      util: 1.0
+      FMA_d1: 8
+      FMA_d2: 4
+      dataflow: best
+    vector_unit:
+      # Vector throughput is specified per bundle (per SM for GPU).
+      # A100 has 64 FP32 CUDA cores per SM.
+      # The A100 whitepaper cites 78 TFLOPS FP16, but that likely relies on a
+      # special execution pipeline that is not commonly achievable in practice.
+      # Here we therefore reference BF16 non-tensor throughput.
+      # Reported vendor throughput numbers (19.5 TFLOPS FP32) are peak values that assume FMA-class
+      # instructions can be issued each cycle. In this config we model a more
+      # conservative case where only single operations are pipelined.
+      nominal_flop_rate_per_bundle: 128 # 2 BF16 FLOP per lane, 19.5 TFLOPS per GPU
+      util: 1.0
+      lanes: 64
+      simd_width: 1
+      vector_width_bits: 32
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB

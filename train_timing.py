@@ -691,7 +691,7 @@ class TimeCalculationLLM(TimeCalculation):
         attention_size_f = 0
         # assuming key and value are preloaded into shared memory before attention computation
         load_kv_bytes = Bc * d * 2 * num_SMs * self.precision.activations #load key and value for one tile from HBM to SRAM
-        initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
+        initial_load_time = self.vector_roofline(0, load_kv_bytes, "flash_attention_initial_load", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
 
         
         # attention score gemm
@@ -702,7 +702,7 @@ class TimeCalculationLLM(TimeCalculation):
         # Softmax time
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_scale_softmax_time = self.vector_roofline(flops, 1, "attention_scale_softmax", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         
         # attention output gemm
         output_bytes = Br * d * self.precision.activations #load value for one tile S is already in shared memory
@@ -759,7 +759,7 @@ class TimeCalculationLLM(TimeCalculation):
         recompute_time = 0
         # assuming key and value are preloaded into shared memory before attention backward computation
         load_kv_bytes = Bc * d * 2 * num_SMs * self.precision.activations #load key and value for one tile from HBM to SRAM
-        initial_load_time = self.roofline(0, load_kv_bytes, "flash_attention_initial_load_b", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
+        initial_load_time = self.vector_roofline(0, load_kv_bytes, "flash_attention_initial_load_b", mem_level=self.num_levels - 1) #assume key and value of one attention head is loaded from HBM to SRAM
 
         
         # attention score recompute
@@ -770,7 +770,7 @@ class TimeCalculationLLM(TimeCalculation):
         # Softmax recompute time 
         elements = Br * Bc
         flops = SOFTMAX_FORWARD_FLOPS_PER_ELEMENT * elements  
-        attn_scale_softmax_time = self.roofline(flops, 1, "attention_scale_softmax_recompute", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        attn_scale_softmax_time = self.vector_roofline(flops, 1, "attention_scale_softmax_recompute", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         
         # dV dP
         load_o_bytes = Br * d * self.precision.activations #load output for one tile assuming v is already in shared memory
@@ -782,7 +782,7 @@ class TimeCalculationLLM(TimeCalculation):
         # compute dS
         elements = Br * Bc
         flops = (SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT ) * elements 
-        softmax_time_backward = self.roofline(flops, 1, "attention_scale_softmax_b", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
+        softmax_time_backward = self.vector_roofline(flops, 1, "attention_scale_softmax_b", mem_level=self.num_levels - 1) * active_tiles #use roofline model for softmax time with no memory access, memory access set to 1 because roofline does not accept 0 memory access
         
         # dQ
         act_dQ_time_per_tile = self.get_gemm_time(Br, Bc, d, "attention_score_b", read_bytes_l2=0, flashattn_enable=True)[0] #dQ = dS * K [Br, d]
@@ -849,7 +849,7 @@ class TimeCalculationLLM(TimeCalculation):
         mem_bytes = float(elements) * (
             2.0 * float(self.precision.gradients) + float(self.precision.grad_communication)
         )
-        time_s = self.roofline(0, mem_bytes, name=name, mem_level=self.num_levels - 1)
+        time_s = self.vector_roofline(0, mem_bytes, name=name, mem_level=self.num_levels - 1)
         overhead = getattr(self, "grad_acc_overhead", 0.0) or 0.0
         if overhead:
             time_s += float(overhead)
@@ -1844,7 +1844,7 @@ class TimeCalculationLLM(TimeCalculation):
         """
         batch = self._effective_transformer_batch()
         embedding_mem = vocab_size * hidden_dim * self.precision.activations + seq_len * batch * hidden_dim * self.precision.activations
-        embedding_time = self.roofline(
+        embedding_time = self.vector_roofline(
             0,
             embedding_mem,
             name="embedding_f",
@@ -1879,7 +1879,7 @@ class TimeCalculationLLM(TimeCalculation):
         elements = effective_m * n / (self.tp * self.cp) # each tp-cp group holds a shard of the vocab dimension
         point_flop = elements * SOFTMAX_FORWARD_FLOPS_PER_ELEMENT
         point_mem = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES 
-        point_time = self.roofline(
+        point_time = self.vector_roofline(
             point_flop,
             point_mem,
             name="pointwise-linear-softmax-f",
@@ -1913,7 +1913,7 @@ class TimeCalculationLLM(TimeCalculation):
         # same here, unsure if should be precision.activations or precision.stats
         point_mem = self.precision.activations * elements * SOFTMAX_BACKWARD_MEM_ACCESSES
 
-        point_time = self.roofline(
+        point_time = self.vector_roofline(
             point_flop,
             point_mem,
             name="pointwise-linear-softmax-b",
@@ -1939,7 +1939,7 @@ class TimeCalculationLLM(TimeCalculation):
         flops = elements * (SOFTMAX_FORWARD_FLOPS_PER_ELEMENT + 1)  # +1 for scaling
         mem = self.precision.activations * elements * (SOFTMAX_FORWARD_MEM_ACCESSES )  
 
-        time = self.roofline(
+        time = self.vector_roofline(
             flops,
             mem,
             name="pointwise-scale-softmax-f",
@@ -1954,7 +1954,7 @@ class TimeCalculationLLM(TimeCalculation):
         flops = elements * (SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT + 1)  # +1 for scaling
         mem = self.precision.activations * elements * (SOFTMAX_BACKWARD_MEM_ACCESSES)  
 
-        time = self.roofline(
+        time = self.vector_roofline(
             flops,
             mem,
             name="pointwise-scale_softmax-b",
@@ -1990,7 +1990,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         flops = 2 * elements  # add + bias
         mem = self.precision.activations * elements * 3  # read main, read residual, write out
-        time = self.roofline(flops, mem, name="pointwise-residual-f", mem_level=self.num_levels - 1) + self.O
+        time = self.vector_roofline(flops, mem, name="pointwise-residual-f", mem_level=self.num_levels - 1) + self.O
 
         if self.debug:
             print(
@@ -2019,7 +2019,7 @@ class TimeCalculationLLM(TimeCalculation):
 
         flops = elements  # dL/dx = dL/dy passthrough
         mem = self.precision.gradients * elements * 3  # read grad, read forward residual, write grad
-        time = self.roofline(flops, mem, name="pointwise-residual-b", mem_level=self.num_levels - 1) + self.O
+        time = self.vector_roofline(flops, mem, name="pointwise-residual-b", mem_level=self.num_levels - 1) + self.O
 
         if self.debug:
             print(
@@ -2036,7 +2036,7 @@ class TimeCalculationLLM(TimeCalculation):
         compute_flops = elements * hidden * GELU_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.activations * elements * hidden * 2  # read, write
 
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-f", mem_level=self.num_levels - 1) + 2 * self.O
+        time = self.vector_roofline(compute_flops, mem_bytes, name="pointwise-gelu-f", mem_level=self.num_levels - 1) + 2 * self.O
 
         if self.debug:
             print(
@@ -2052,7 +2052,7 @@ class TimeCalculationLLM(TimeCalculation):
         compute_flops = elements * hidden * GELU_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.gradients * elements * hidden * 3  # read grad, read forward, write grad
 
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-gelu-b", mem_level=self.num_levels - 1) + 3 * self.O
+        time = self.vector_roofline(compute_flops, mem_bytes, name="pointwise-gelu-b", mem_level=self.num_levels - 1) + 3 * self.O
 
         if self.debug:
             print(
@@ -2072,7 +2072,7 @@ class TimeCalculationLLM(TimeCalculation):
         reads = 2 * gate_hidden  # gate and up activations
         writes = gate_hidden  # SwiGLU output
         mem_bytes = self.precision.activations * elements * (reads + writes)
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-f", mem_level=self.num_levels - 1) + 2 * self.O
+        time = self.vector_roofline(compute_flops, mem_bytes, name="pointwise-swiglu-f", mem_level=self.num_levels - 1) + 2 * self.O
         if self.debug:
             print(
                 "SwiGLU (f) gate elements: {:,}, flops: {:,}, mem: {:,}".format(
@@ -2094,7 +2094,7 @@ class TimeCalculationLLM(TimeCalculation):
         reads += gate_hidden  # upstream gradient
         writes = 2 * gate_hidden  # gradients for gate and up projections
         mem_bytes = self.precision.gradients * elements * (reads + writes)
-        time = self.roofline(compute_flops, mem_bytes, name="pointwise-swiglu-b", mem_level=self.num_levels - 1) + 3 * self.O
+        time = self.vector_roofline(compute_flops, mem_bytes, name="pointwise-swiglu-b", mem_level=self.num_levels - 1) + 3 * self.O
         if self.debug:
             print(
                 "SwiGLU (b) gate elements: {:,}, flops: {:,}, mem: {:,}".format(
@@ -2117,7 +2117,7 @@ class TimeCalculationLLM(TimeCalculation):
             elements = batch * seq_len * d_model
         compute_flops = elements * LAYER_NORM_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.stats * elements * LAYER_NORM_FORWARD_MEM_ACCESSES
-        compute_time = self.roofline(
+        compute_time = self.vector_roofline(
             compute_flops,
             mem_bytes,
             name="pointwise-layernorm-f",
@@ -2154,7 +2154,7 @@ class TimeCalculationLLM(TimeCalculation):
         compute_flops = elements * LAYER_NORM_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.stats * elements * LAYER_NORM_BACKWARD_MEM_ACCESSES
 
-        compute_time = self.roofline(
+        compute_time = self.vector_roofline(
             compute_flops,
             mem_bytes,
             name="pointwise-layernorm-b",
@@ -2190,7 +2190,7 @@ class TimeCalculationLLM(TimeCalculation):
         flops = elements * SOFTMAX_FORWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES  
 
-        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-router-f", mem_level=self.num_levels - 1) + self.O
+        compute_time = gemm_time + self.vector_roofline(flops, mem_bytes, name="pointwise-router-f", mem_level=self.num_levels - 1) + self.O
 
         return compute_time, 0.0, 0
     def get_router_b(self, gemm_router, gemm_ffn1, *, batch_size: int, seq_len: int):
@@ -2206,13 +2206,13 @@ class TimeCalculationLLM(TimeCalculation):
         flops = elements * SOFTMAX_BACKWARD_FLOPS_PER_ELEMENT
         mem_bytes = self.precision.activations * elements * SOFTMAX_BACKWARD_MEM_ACCESSES
 
-        compute_time = gemm_time + self.roofline(flops, mem_bytes, name="pointwise-router-b", mem_level=self.num_levels - 1) + self.O
+        compute_time = gemm_time + self.vector_roofline(flops, mem_bytes, name="pointwise-router-b", mem_level=self.num_levels - 1) + self.O
         return compute_time, 0.0, 0
     
     def get_embedding_b(self, vocab_size, seq_len, hidden_dim):
         batch = self._effective_transformer_batch()
         embedding_mem = vocab_size * hidden_dim * self.precision.gradients + seq_len * batch * hidden_dim * self.precision.gradients
-        embedding_mem_time = self.roofline(
+        embedding_mem_time = self.vector_roofline(
             0,
             embedding_mem,
             name="embedding_b",
@@ -2232,7 +2232,7 @@ class TimeCalculationLLM(TimeCalculation):
         if self.pp > 1:
             w_size = self.precision.activations * batch_size * hidden_dim * seq_len
             transfer_time = w_size / self.links["pp"].bandwidth + self.links["pp"].latency
-            mem_time = self.roofline(0, 2 * w_size, name="inter_layer", mem_level=self.num_levels - 1)
+            mem_time = self.vector_roofline(0, 2 * w_size, name="inter_layer", mem_level=self.num_levels - 1)
             # 2: read from memory of previous layer and write to the memory of the next layer
             w = mem_time + transfer_time
         return w, w_size

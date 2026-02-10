@@ -27,13 +27,20 @@ tech_param:
   core:
     operating_frequency: 1.41e9     # (Hz)
     num_bundles: 108
-    nominal_flop_rate_per_mcu: 512
     nominal_energy_per_flop: 1.8e-13 # (J)
     num_mcu_per_bundle: 4     # number of tensorcores per SM
-    FMA_d1: 8                 # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
-    FMA_d2: 4
-    dataflow: best            # {wst | ast | ost | best}: wst: weight stationary, ast: activation stationary, ost: output stationary, best: best of all 3
-    util: 1.0
+    matrix_unit:
+      nominal_flop_rate_per_mcu: 512
+      util: 1.0
+      FMA_d1: 8                 # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
+      FMA_d2: 4
+      dataflow: best            # {wst | ast | ost | best}: wst: weight stationary, ast: activation stationary, ost: output stationary, best: best of all 3
+    vector_unit:
+      nominal_flop_rate_per_bundle: 128
+      util: 1.0
+      lanes: 64
+      simd_width: 1
+      vector_width_bits: 32
   DRAM:
     size: 80 GB
     bandwidth: 1986 GB     # (/s)

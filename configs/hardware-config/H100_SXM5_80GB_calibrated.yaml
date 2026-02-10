@@ -34,13 +34,20 @@ tech_param:
     # operating_frequency: 1.98e9     # (Hz) GPU boost clock frequency [TePU]
     operating_frequency: 1.83e9     # (Hz) GPU boost clock frequency [TePU, derated to match FLOPS]
     num_bundles: 132     # number of bundles (SMs) [TePU]
-    nominal_flop_rate_per_mcu: 1024     # F16 FLOP / cycle / SM is 4096 [Semi]
     nominal_energy_per_flop: 1.8e-13
     num_mcu_per_bundle: 4     # number of tensorcores per SM [TePU]
-    FMA_d1: 16                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
-    FMA_d2: 8
-    dataflow: best
-    util: 1  # calibrated from HF bench (pp=1 median ratio)
+    matrix_unit:
+      nominal_flop_rate_per_mcu: 1024     # F16 FLOP / cycle / SM is 4096 [Semi]
+      util: 1  # calibrated from HF bench (pp=1 median ratio)
+      FMA_d1: 16                # tensor core can compute the results for an d1 x d2 x d1 mixed-precision matrix multiplication per clock
+      FMA_d2: 8
+      dataflow: best
+    vector_unit:
+      nominal_flop_rate_per_bundle: 128
+      util: 1
+      lanes: 128
+      simd_width: 1
+      vector_width_bits: 32
   DRAM:
     size: 80 GB     # [TePU]
     # bandwidth: 3430 GB     # (/s) [TePU]

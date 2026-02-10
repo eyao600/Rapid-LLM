@@ -23,6 +23,8 @@ from train_timing import (
     LLMExecutionDispatcher,
     TimeCalculationLLM,
     GemmType,
+    SOFTMAX_FORWARD_FLOPS_PER_ELEMENT,
+    SOFTMAX_FORWARD_MEM_ACCESSES,
     COMMUNICATION_RULES,
     COMM_RULE_DEFAULT_KEY,
 )
@@ -55,6 +57,19 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
     def __init__(self, hw_config, model_config, mode, output_dir: Optional[str] = None):
         super().__init__(hw_config, model_config, mode, output_dir)
         self._raw_model_config = model_config
+
+    def _decode_scale_softmax_f_vector(self, gemm: Tuple[int, ...]) -> float:
+        """Decode softmax pointwise path modeled on the vector roofline."""
+        batch, m, _, n = self._expand_gemm_descriptor(gemm)
+        elements = math.ceil(batch * m * n / (self.tp * self.cp))
+        flops = elements * (SOFTMAX_FORWARD_FLOPS_PER_ELEMENT + 1)
+        mem = self.precision.activations * elements * SOFTMAX_FORWARD_MEM_ACCESSES
+        return self.vector_roofline(
+            flops,
+            mem,
+            name="pointwise-scale-softmax-f-decode",
+            mem_level=self.num_levels - 1,
+        ) + self.O
 
     def _build_decode_transformer_results(
         self,
@@ -155,7 +170,7 @@ class TimeCalculationLLMInference(TimeCalculationLLM):
         attention_output_time, attention_output_reduction, attention_output_size, attention_output_flops, attention_output_mem = self.parallelism_gemm_forward(
             gemm_attention_output, "decode_attention_output_f", gemm_type=GemmType.ATTENTION_OUTPUT, decode=True
         )
-        attention_scale_softmax_f = self.get_scale_softmax_f(gemm_attention_score)
+        attention_scale_softmax_f = self._decode_scale_softmax_f_vector(gemm_attention_score)
 
         attention_reduction = attention_score_reduction + attention_output_reduction
         attention_comm_bytes = attention_score_size + attention_output_size
